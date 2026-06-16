@@ -2,7 +2,7 @@
 
 This framework requires a verification plan before any multi-step build task.
 
-Linked memory: [[karpathy_method]]
+Linked memory: [[karpathy-method]]
 
 ---
 

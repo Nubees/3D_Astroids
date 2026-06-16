@@ -1,6 +1,7 @@
 # Setup.md — 3D Astroids Dev Environment
 
 > **Purpose:** This file is the thin goal-bridge index for recreating the Claude Code dev environment for the 3D Astroids project. The full runbook, lessons, and gotchas now live in the Knowledge Architecture.
+> **Canonical entry point:** For the full setup goal, start at `Knowledge/Wiki/setup-index.md` and follow its links.
 > **Last Updated:** 2026-06-15
 > **Maintained By:** Claude Code
 > **Origin:** Environment structure ported from the Donkey Kong 2.5D project, then migrated into a three-layer Knowledge structure.
@@ -55,3 +56,4 @@ Per the pre-tool-use hook, **append a maintenance log entry below** for any non-
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-06-15 | Migrated monolithic runbook into Knowledge Architecture (RAW/Wiki/Frameworks). Rewrote `Setup.md` as thin index. | Claude |
+| 2026-06-15 | Fixed adversarial audit blockers: corrected `.claude/settings.json` hook paths (absolute forward slashes), added PowerShell to hook matcher, fixed `pre-tool-use.cjs` single-backslash detection, added hook self-protection guard, added My Rules comment blocks to `session-start.cjs` and `post-tool-use.cjs`, rewrote `environment-setup.md` Section 3 to match real Claude Code settings schema, fixed memory cross-link slugs in Frameworks files, added canonical-entry note. | Claude |

@@ -2,7 +2,7 @@
 
 This framework defines the mandatory comment-block convention for every non-trivial code change in the 3D Astroids project.
 
-Linked memory: [[feedback_code_section_notes]] + [[feedback_my_rules_alias]]
+Linked memory: [[feedback-code-section-notes]] + [[feedback-my-rules-alias]]
 
 ---
 

@@ -8,6 +8,36 @@ const projectRoot = path.resolve(__dirname, '..', '..');
 const logDir = path.join(projectRoot, '.remember', 'logs');
 const logFile = path.join(logDir, 'hook-errors.log');
 
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Post-Tool-Use Error Logger
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose:
+//   Capture tool errors after they occur and append them to a local log so the
+//   user (and future sessions) can inspect what went wrong without relying on
+//   transient terminal output.
+//
+// Setup:
+//   - Lives at .claude/hooks/post-tool-use.cjs
+//   - Wired in .claude/settings.json under PostToolUse matcher
+//     "Bash|PowerShell|Write|Edit"
+//   - Reads JSON event from stdin and writes empty JSON to stdout
+//   - Logs to .remember/logs/hook-errors.log (created on first error)
+//
+// Issues:
+//   - The file lacked a My Rules comment block documenting its behavior and
+//     the silent-fail design.
+//
+// Fix:
+//   - Added this explanatory block per the Code Section Notes convention.
+//
+// Gotchas:
+//   - This hook must never throw, or it could trigger an infinite loop of
+//     hook errors. All filesystem operations are wrapped in try/catch.
+//   - The matcher was updated to include PowerShell so errors from both shells
+//     are logged consistently.
+//   - Keep the log file outside the git tracked area; .remember/ is gitignored.
+// ═══════════════════════════════════════════════════════════════════════════
+
 try {
   if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true });

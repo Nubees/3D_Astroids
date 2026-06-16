@@ -2,7 +2,7 @@
 
 This framework defines the 50-minute memory-save cycle that is mandatory for the 3D Astroids project.
 
-Linked memory: [[project_autosave_system]]
+Linked memory: [[project-autosave-system]]
 
 ---
 

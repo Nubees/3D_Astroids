@@ -2,7 +2,7 @@
 
 This framework prevents cascading side effects and task-state corruption by enforcing strict boundaries around every user request.
 
-Linked memory: [[feedback_atomic_actions]]
+Linked memory: [[feedback-atomic-actions]]
 
 ---
 

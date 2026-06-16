@@ -28,24 +28,30 @@ rl.on('line', (line) => {
     //
     // Setup:
     //   - Lives at .claude/hooks/pre-tool-use.cjs
-    //   - Wired in .claude/settings.json under PreToolUse matcher "Bash|Write|Edit"
+    //   - Wired in .claude/settings.json under PreToolUse matcher
+    //     "Bash|PowerShell|Write|Edit"
     //   - Reads JSON event from stdin and prints JSON warning to stdout
     //
     // Issues:
     //   - Original hook only warned on rm -rf / git reset --hard and .env writes.
     //   - It did not protect the environment itself (settings.json, CLAUDE.md,
     //     memory files, Knowledge/RAW immutability, Setup.md maintenance log).
+    //   - Regex for Windows backslash detection matched two backslashes instead
+    //     of one, so real single-backslash paths slipped through.
+    //   - The PreToolUse matcher in settings.json excluded PowerShell, so
+    //     destructive PowerShell commands bypassed the hook entirely.
     //
     // Fix:
     //   - Added path-based warnings for edits to configuration, onboarding,
-    //     memory, setup runbook, and immutable RAW knowledge.
-    //   - Added backslash detection for any statusLine command string.
+    //     memory, setup runbook, immutable RAW knowledge, and the hooks themselves.
+    //   - Corrected backslash regex to detect a single literal backslash.
+    //   - Matcher now includes PowerShell so this hook runs for both shells.
     //
     // Gotchas:
     //   - This hook cannot block tools; it only adds context to the permission
     //     prompt. The user still decides.
     //   - Keep regexes simple. Overly broad patterns create false-positive fatigue.
-    //   - The hook runs before every Bash|Write|Edit call, so keep it fast.
+    //   - The hook runs before every Bash|PowerShell|Write|Edit call, so keep it fast.
     // ═══════════════════════════════════════════════════════════════════════════
 
     if (tool === 'Bash' || tool === 'PowerShell') {
@@ -64,7 +70,7 @@ rl.on('line', (line) => {
       }
 
       // Extra guard: deleting memory or Knowledge files via shell
-      if (/C:\\\\Users\\\\User101\\\\.claude\\\\projects\\\\C--Projects-3D-Astroids\\\\memory/.test(cmd) ||
+      if (/C:\\Users\\User101\\.claude\\projects\\C--Projects-3D-Astroids\\memory/.test(cmd) ||
           /Knowledge[\\/]RAW/.test(cmd)) {
         warnings.push(`Command references memory or Knowledge/RAW directory. These are protected. Confirm before running.`);
       }
@@ -112,10 +118,15 @@ rl.on('line', (line) => {
         warnings.push(`Editing ${filePath}. Do not remove .env, .env.*, node_modules/, dist/, or .claude/settings.local.json protections.`);
       }
 
+      // Guard the guardrails: editing hook files can silently disable protections
+      if (/\.claude[\\/]hooks[\\/].+\.cjs$/.test(filePath)) {
+        warnings.push(`Editing ${filePath}. This hook is part of the project's guardrails. Test it after editing and ensure the settings.json matcher still invokes it.`);
+      }
+
       // Status-line command strings with Windows backslashes
       const textToCheck = input.new_string || input.content || '';
-      if (/statusLine.*command.*node\s+C:\\\\/.test(textToCheck) ||
-          /"command":\s*"node\s+C:\\\\/.test(textToCheck)) {
+      if (/statusLine.*command.*node\s+C:\\/.test(textToCheck) ||
+          /"command":\s*"node\s+C:\\/.test(textToCheck)) {
         warnings.push(`statusLine.command appears to use Windows backslashes. Use forward slashes (C:/Users/...) or the status line will silently fail.`);
       }
     }

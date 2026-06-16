@@ -43,29 +43,119 @@ Do **not** put a `statusLine` command here. The project-level `settings.json` ov
 
 File: `C:\Projects\3D_Astroids\.claude\settings.json`
 
+This is the real, validated project settings file. Claude Code merges it over global settings.
+
 ```json
 {
-  "statusLine": {
-    "command": "node C:/Users/<YourUser>/.claude/3dastroids-statusline.cjs"
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(git status)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git log)",
+      "Bash(git diff)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(node *)",
+      "PowerShell(npm *)",
+      "PowerShell(npx *)",
+      "PowerShell(git status)",
+      "PowerShell(git add *)",
+      "PowerShell(git commit *)",
+      "PowerShell(git log)",
+      "PowerShell(git diff)",
+      "PowerShell(ls *)",
+      "PowerShell(mkdir *)",
+      "PowerShell(node *)"
+    ],
+    "deny": [
+      "Bash(git reset --hard *)",
+      "Bash(git checkout -f)",
+      "Bash(git clean -f)",
+      "Bash(Remove-Item -Recurse -Force *)",
+      "Bash(Remove-Item *)",
+      "Bash(Move-Item *)",
+      "Bash(Invoke-WebRequest *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(invoke-webrequest *)",
+      "PowerShell(git reset --hard *)",
+      "PowerShell(git checkout -f)",
+      "PowerShell(git clean -f)",
+      "PowerShell(Remove-Item -Recurse -Force *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Move-Item *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(curl *)",
+      "PowerShell(wget *)",
+      "PowerShell(invoke-webrequest *)",
+      "Read(./.env*)",
+      "Read(./.env.*)",
+      "Write(./.env*)",
+      "Write(./.env.*)"
+    ],
+    "defaultMode": "auto"
   },
   "hooks": {
-    "session-start": "C:/Projects/3D_Astroids/.claude/hooks/session-start.cjs",
-    "pre-tool-use": "C:/Projects/3D_Astroids/.claude/hooks/pre-tool-use.cjs",
-    "post-tool-use": "C:/Projects/3D_Astroids/.claude/hooks/post-tool-use.cjs"
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Projects/3D_Astroids/.claude/hooks/session-start.cjs"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Projects/3D_Astroids/.claude/hooks/pre-tool-use.cjs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Projects/3D_Astroids/.claude/hooks/post-tool-use.cjs"
+          }
+        ]
+      }
+    ]
   },
-  "memory": {
-    "project": "C:/Users/<YourUser>/.claude/projects/C--Projects-3D-Astroids/memory"
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true
   },
-  "agents": {
-    "coder-agent": "C:/Projects/3D_Astroids/.claude/agents/coder-agent.md",
-    "testing-agent": "C:/Projects/3D_Astroids/.claude/agents/testing-agent.md",
-    "graphics-reviewer": "C:/Projects/3D_Astroids/.claude/agents/graphics-reviewer.md",
-    "challenger-agent": "C:/Projects/3D_Astroids/.claude/agents/challenger-agent.md"
+  "skipDangerousModePermissionPrompt": true,
+  "statusLine": {
+    "type": "command",
+    "command": "node C:/Users/<YourUser>/.claude/3dastroids-statusline.cjs",
+    "padding": 1,
+    "refreshInterval": 60,
+    "hideVimModeIndicator": false
   }
 }
 ```
 
-**Critical Windows path rule:** Use forward slashes (`/`) everywhere. Backslashes are interpreted as escape sequences by the Git Bash runner and will break the status line.
+**Critical Windows path rule:** Use forward slashes (`/`) everywhere in command paths. Backslashes are interpreted as escape sequences by the shell runner and will break the status line and hooks.
+
+**Schema notes:**
+- `SessionStart` entries must be objects containing a `hooks` array, just like `PreToolUse` and `PostToolUse`.
+- `PreToolUse`/`PostToolUse` entries require a `matcher` string and a `hooks` array.
+- `memory` and `agents` are **not** top-level keys in project `settings.json`; memory lives in the per-project memory directory discovered automatically by Claude Code, and agents are loaded from `.claude/agents/*.md`.
 
 ---
 
@@ -75,29 +165,97 @@ File: `C:\Projects\3D_Astroids\.claude\settings.json`
 
 File: `C:\Users\<YourUser>\.claude\3dastroids-statusline.cjs`
 
-This script reads the newest `.md` file in the project memory directory and prints a status line:
+This script reads the newest `.md` file in the project memory directory and prints a compact status line:
 
 ```javascript
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
-const memoryDir = 'C:/Users/<YourUser>/.claude/projects/C--Projects-3D-Astroids/memory';
+const MEMORY_DIR = path.join(
+  process.env.USERPROFILE || process.env.HOME || '',
+  '.claude', 'projects', 'C--Projects-3D-Astroids', 'memory'
+);
 
-function getNewestMtime(dir) {
-  const files = fs.readdirSync(dir, { withFileTypes: true })
-    .filter(e => e.isFile() && e.name.endsWith('.md'))
-    .map(e => fs.statSync(path.join(dir, e.name)).mtime.getTime());
-  return files.length ? Math.max(...files) : 0;
+function getLastMemorySave() {
+  try {
+    const files = fs.readdirSync(MEMORY_DIR).filter(f => f.endsWith('.md'));
+    if (files.length === 0) return '—';
+
+    let newest = { file: '', mtime: 0 };
+    for (const f of files) {
+      const stat = fs.statSync(path.join(MEMORY_DIR, f));
+      if (stat.mtimeMs > newest.mtime) {
+        newest = { file: f, mtime: stat.mtimeMs };
+      }
+    }
+
+    const d = new Date(newest.mtime);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  } catch (e) {
+    return 'err';
+  }
 }
 
-function formatTime(ts) {
-  if (!ts) return '--:--';
-  const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+function getGitInfo() {
+  try {
+    const branch = execSync('git branch --show-current', {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 1000
+    }).trim();
+
+    if (!branch) return '—';
+
+    const short = execSync('git status --short', {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 1000
+    }).trim();
+
+    const dirtyCount = short ? short.split('\n').length : 0;
+    const indicator = dirtyCount > 0
+      ? `\x1b[33m●${dirtyCount}\x1b[0m`
+      : '\x1b[32m✓\x1b[0m';
+
+    return `${branch} ${indicator}`;
+  } catch (e) {
+    return '—';
+  }
 }
 
-const mtime = getNewestMtime(memoryDir);
-process.stdout.write(`💾 ${formatTime(mtime)} | 3D Astroids`);
+let input = '';
+process.stdin.setEncoding('utf8');
+
+process.stdin.on('data', chunk => {
+  input += chunk;
+});
+
+process.stdin.on('end', () => {
+  let data = {};
+  try {
+    data = JSON.parse(input || '{}');
+  } catch {
+    // ignore malformed JSON
+  }
+
+  const model = data.model?.display_name || 'Claude';
+  const ctxPct = Math.floor(data.context_window?.used_percentage || 0);
+  const cost = data.cost?.total_cost_usd || 0;
+  const lastSave = getLastMemorySave();
+  const gitInfo = getGitInfo();
+
+  let ctxColor = '\x1b[32m';
+  if (ctxPct > 70) ctxColor = '\x1b[33m';
+  if (ctxPct > 90) ctxColor = '\x1b[31m';
+  const reset = '\x1b[0m';
+
+  console.log(`💾 ${lastSave} | ${gitInfo} | ${model} | ${ctxColor}${ctxPct}%${reset} ctx | $${cost.toFixed(2)}`);
+});
 ```
 
 ### 4.2 Debug Helper
@@ -119,8 +277,9 @@ If the output shows `node not found`, Node.js is not in the system PATH.
 3. Accept the trust dialog when prompted.
 4. Verify the status bar shows something like:
    ```
-   💾 HH:MM | 3D Astroids
+   💾 HH:MM | master ✓ | Claude | 12% ctx | $0.00
    ```
+   (The exact model name, context percentage, and cost will vary.)
 5. If it shows only `auto mode on`, the path in `settings.json` is broken. Check forward slashes and the script path.
 
 ---

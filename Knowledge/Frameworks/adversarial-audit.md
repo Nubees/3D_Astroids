@@ -2,7 +2,7 @@
 
 This framework defines how and when to use the `challenger-agent` as a devil's advocate.
 
-Linked memory: [[challenger_agent]]
+Linked memory: [[challenger-agent]]
 
 ---
 
