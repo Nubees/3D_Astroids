@@ -1,0 +1,1525 @@
+# Setup.md — 3D Astroids Dev Environment
+
+> **Purpose:** This file is a self-contained guide for recreating the entire Claude Code dev environment for the 3D Astroids project on a new Windows machine. It contains every rule, workflow, configuration, and process established for this project.
+> **Last Updated:** 2026-06-15
+> **Maintained By:** Claude Code (this is a living document — update it as new rules, tools, or configurations are added)
+> **Origin:** Environment structure ported from the Donkey Kong 2.5D project. Donkey-Kong-specific game logic has been removed; only transferable tooling, workflow, and safety rules were carried over.
+> **Constraint:** This project is isolated from `C:\Projects\DonkeyKong`. Nothing in the Donkey Kong project is modified by this setup.
+
+---
+
+## Table of Contents
+
+1. [Pre-Requisites](#1-pre-requisites)
+2. [Installation Order (Critical)](#2-installation-order-critical)
+3. [Infrastructure Setup](#3-infrastructure-setup)
+4. [Project Configuration](#4-project-configuration)
+5. [Workflow Rules (Non-Negotiable)](#5-workflow-rules-non-negotiable)
+6. [How Rules Are Enforced](#6-how-rules-are-enforced)
+7. [Known Conflicts & Gotchas](#7-known-conflicts--gotchas)
+8. [Appendix: Exact File Contents](#8-appendix-exact-file-contents)
+9. [Maintenance Log](#9-maintenance-log)
+
+---
+
+## 1. Pre-Requisites
+
+Before touching any Claude Code configuration, install these globally on the target machine:
+
+| Tool | Version | Install Command | Verification |
+|------|---------|-----------------|------------|
+| Node.js LTS | 20.x+ | Download from [nodejs.org](https://nodejs.org/) or `winget install OpenJS.NodeJS` | `node --version` |
+| Git for Windows | Latest | Download from [git-scm.com](https://git-scm.com/download/win) | `git --version` |
+| npm | Bundled with Node | Comes with Node.js | `npm --version` |
+
+**Then:**
+1. Clone the project repository to its permanent location: `git clone <repo-url> C:\Projects\3D_Astroids`
+2. Ensure Node.js is in your **system** PATH (not just user PATH), as hooks run before the shell env is fully initialized.
+3. **Engine stack TBD.** Once the stack is chosen, run the appropriate install command (e.g., `npm install` if using a Node-based build).
+
+---
+
+## 2. Installation Order (Critical)
+
+Several steps have hard dependencies on files created in earlier steps. **Follow this exact order.**
+
+| Step | Action | Creates / Configures | Depends On |
+|------|--------|----------------------|------------|
+| 2.1 | Install Claude Code CLI globally | `claude` command | Node.js |
+| 2.2 | Create/update global `settings.json` | `~/.claude/settings.json` | — |
+| 2.3 | Create status line script | `~/.claude/3dastroids-statusline.cjs` | — |
+| 2.4 | Create project `.claude/` directory | `C:\Projects\3D_Astroids\.claude\` | Git clone |
+| 2.5 | Create project hooks | `session-start.cjs`, `pre-tool-use.cjs`, `post-tool-use.cjs` | Step 2.4 |
+| 2.6 | Create code style rules | `code-style.md` | Step 2.4 |
+| 2.7 | Create project `settings.json` | `C:\Projects\3D_Astroids\.claude\settings.json` | Steps 2.3, 2.5 |
+| 2.8 | Replace `<YourUser>` placeholders | Global settings.json, project settings.json, `CLAUDE.md` | Steps 2.2, 2.7 |
+| 2.9 | Create memory directory + index | `MEMORY.md` + `.md` files | — |
+| 2.10 | Create auto-save cron job | Session-only cron (50-min interval) | Step 2.9 |
+| 2.11 | First run + trust dialog | `~/.claude.json` (auto-generated) | Steps 2.1–2.10 |
+| 2.12 | **Restart Claude Code** | Status line becomes active | Step 2.11 |
+
+**Why this order matters:**
+- The global `settings.json` (Step 2.2) references the status line script (Step 2.3). The script must exist before Claude Code first reads the config.
+- The project `settings.json` (Step 2.7) references hooks that live in `.claude/hooks/` (Step 2.5).
+- The trust dialog (Step 2.11) creates an auto-generated `~/.claude.json` entry that cannot be pre-configured; it must be accepted interactively.
+- The `statusLine` configuration is **cached at process startup** and requires a full restart (Step 2.12) to take effect.
+
+---
+
+### 2.8 Replace `<YourUser>` Placeholders
+
+After creating the files in Steps 2.2, 2.7, and 2.8, replace the literal string `<YourUser>` with your actual Windows username in **all three files**:
+
+| File | Field(s) to update |
+|------|-------------------|
+| `C:\Users\<YourUser>\.claude\settings.json` | `statusLine.command` only |
+| `C:\Projects\3D_Astroids\.claude\settings.json` | `statusLine.command` only |
+| `C:\Projects\3D_Astroids\CLAUDE.md` | Auto-Save memory path (`C:\Users\<YourUser>\.claude\projects\...`) |
+
+**Do not** replace anything in `additionalDirectories` — those use absolute paths without placeholders.
+
+**Why:** If left as `<YourUser>`, the status line script path breaks silently, and auto-save writes memories to a non-existent folder.
+
+---
+
+### 2.10 Create Auto-Save Cron Job
+
+The auto-save system requires a cron job. In Claude Code, run:
+
+```
+/CronCreate {"cron": "*/50 * * * *", "prompt": "🔄 Memory save is now taking place… Check for new/updated memories in C:\\Users\\%USERNAME%\\.claude\\projects\\C--Projects-3D-Astroids\\memory\\. Write them. Post a recap. Confirm with ✅.", "recurring": true}
+```
+
+**Important:** Claude Code cron jobs are **session-only**. They are lost when Claude Code exits. You must recreate this cron job every time you start a new session.
+
+**Verification:** Run `/CronList` — you should see one entry with `cron: */50 * * * *`.
+
+---
+
+## 3. Infrastructure Setup
+
+### 3.1 Install Claude Code CLI (Global)
+
+**Use the npm package. Do NOT use the native Windows `.exe` installer — it has known `statusLine` rendering bugs.**
+
+```powershell
+npm install -g @anthropic-ai/claude-code
+```
+
+Verify: `claude --version`
+
+**Note:** If `claude --version` is not recognized, open a new PowerShell window and try again — npm global PATH changes may require a fresh session.
+
+---
+
+### 3.2 Global Settings (`~/.claude/settings.json`)
+
+**Path:** `C:\Users\<YourUser>\.claude\settings.json`
+
+This file is read on every Claude Code startup. It controls global plugins, permissions, effort level, and the status line.
+
+**CRITICAL:** Replace `<YourUser>` with your actual Windows username in the `statusLine.command` path.
+
+**CRITICAL:** In `statusLine.command`, use **forward slashes** (`C:/Users/...`) even though this is Windows. Claude Code's internal command runner uses Git Bash semantics, which silently mangles backslash escapes and breaks the path. This was a three-hour root-cause investigation from the Donkey Kong project (2026-05-30).
+
+The global status line is intentionally left pointing at the Donkey Kong script so that project is untouched. The 3D Astroids project overrides this with its own project-level `settings.json`.
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "C:\\Projects",
+      "C:\\Projects\\3D_Astroids"
+    ],
+    "defaultMode": "auto"
+  },
+  "enabledPlugins": {
+    "andrej-karpathy-skills@karpathy-skills": true,
+    "remember@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "claude-md-management@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "chrome-devtools-mcp@claude-plugins-official": true,
+    "playwright@claude-plugins-official": true,
+    "coderabbit@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "explanatory-output-style@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true,
+    "ralph-loop@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "karpathy-skills": {
+      "source": {
+        "source": "github",
+        "repo": "forrestchang/andrej-karpathy-skills"
+      },
+      "autoUpdate": true
+    }
+  },
+  "effortLevel": "xhigh",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark-daltonized",
+  "statusLine": {
+    "type": "command",
+    "command": "node C:/Users/<YourUser>/.claude/dk-statusline.cjs",
+    "padding": 1,
+    "refreshInterval": 60,
+    "hideVimModeIndicator": false
+  }
+}
+```
+
+**What this does:**
+- `defaultMode: auto` — Claude Code asks for permission on potentially destructive actions but auto-approves reads and safe edits. This avoids `--yesToAll` bypass while keeping workflow smooth.
+- `additionalDirectories` — Allows Claude Code to access the project even when launched from a different working directory.
+- `enabledPlugins` — Activates marketplace skills, remembering, feature development, code review, etc.
+- `effortLevel: xhigh` — Tells Claude Code to use maximum reasoning depth for all responses.
+- `statusLine` — Global fallback. 3D Astroids overrides this at the project level.
+
+---
+
+### 3.3 Status Line Script (`~/.claude/3dastroids-statusline.cjs`)
+
+**Path:** `C:\Users\<YourUser>\.claude\3dastroids-statusline.cjs`
+
+This Node.js script receives JSON on stdin after every assistant turn and prints a one-line status string. It is a **separate, project-specific script** so the Donkey Kong script remains untouched.
+
+**Why `.cjs`:** The project may later declare `"type": "module"` in `package.json`, so `.js` files would be treated as ESM. This script uses `require()` (CommonJS), so it **must** have the `.cjs` extension.
+
+**Why forward slashes:** The `command` string in `settings.json` uses forward slashes (`C:/Users/...`) because Git Bash (used internally by Claude Code) silently mangles Windows backslashes.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+
+/**
+ * ============================================================================
+ * My Rules — Status Line Script Notes
+ * ============================================================================
+ * Purpose:
+ *   Custom Claude Code status line that displays the last memory-save time,
+ *   model name, context-window percentage, and session cost in the CLI bottom
+ *   bar after every assistant turn.
+ *
+ * Setup:
+ *   - Lives at C:/Users/User101/.claude/3dastroids-statusline.cjs
+ *   - Referenced from settings.json via "statusLine": { "type": "command",
+ *     "command": "node C:/Users/User101/.claude/3dastroids-statusline.cjs" }
+ *   - Reads the newest .md mtime from the memory directory to show 💾 HH:MM.
+ *
+ * Issues (2026-05-30, inherited from Donkey Kong):
+ *   - The status bar showed only the default "auto mode on" text.
+ *   - The custom 💾 output never appeared, even after restart, even though
+ *     trust settings were correct, hooks were enabled, and the script worked
+ *     perfectly when tested manually in PowerShell.
+ *
+ * Fix:
+ *   - The "command" path in settings.json was using Windows backslashes:
+ *       "node C:\\Users\\User101\\.claude\\dk-statusline.cjs"
+ *   - Claude Code's internal command runner uses Git Bash semantics on
+ *     Windows, which treat backslashes as escape characters and silently
+ *     mangle/destroy the path. The script path became invalid and the
+ *     statusLine fell back to the default bar with no visible error.
+ *   - Changed the path to forward slashes (which Node.js accepts on Windows):
+ *       "node C:/Users/User101/.claude/3dastroids-statusline.cjs"
+ *
+ * Gotchas:
+ *   - ALWAYS use forward slashes in the "command" field of statusLine on
+ *     Windows, even for absolute paths.
+ *   - Manual PowerShell testing does NOT reveal this bug — the internal
+ *     Claude Code runner uses different shell semantics.
+ *   - The script is spawned with JSON on stdin after every assistant message.
+ *   - ANSI colour codes are supported in the output.
+ * ============================================================================
+ */
+
+/**
+ * 3D Astroids — Claude Code Status Line
+ *
+ * Receives JSON from Claude Code on stdin after every assistant message.
+ * Prints a single-line status string to stdout that renders in the
+ * bottom status bar.
+ *
+ * Fields used from stdin JSON:
+ *   - model.display_name
+ *   - context_window.used_percentage
+ *   - cost.total_cost_usd
+ *
+ * Custom field (read from disk):
+ *   - Last memory save time (mtime of newest .md in memory dir)
+ */
+
+const MEMORY_DIR = path.join(
+  process.env.USERPROFILE || process.env.HOME || '',
+  '.claude', 'projects', 'C--Projects-3D-Astroids', 'memory'
+);
+
+function getLastMemorySave() {
+  try {
+    const files = fs.readdirSync(MEMORY_DIR).filter(f => f.endsWith('.md'));
+    if (files.length === 0) return '—';
+
+    let newest = { file: '', mtime: 0 };
+    for (const f of files) {
+      const stat = fs.statSync(path.join(MEMORY_DIR, f));
+      if (stat.mtimeMs > newest.mtime) {
+        newest = { file: f, mtime: stat.mtimeMs };
+      }
+    }
+
+    const d = new Date(newest.mtime);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  } catch (e) {
+    return 'err';
+  }
+}
+
+/**
+ * My Rules — Git Status Indicator
+ * Purpose: Show current branch and uncommitted file count so the user
+ *   knows at a glance if work is unsaved or if they're on the wrong branch.
+ * Setup: Runs `git branch --show-current` and `git status --short` via
+ *   child_process.execSync. cwd defaults to the project root.
+ * Issues: None yet.
+ * Fix: Inherited from Donkey Kong setup (2026-05-30).
+ * Gotchas:
+ *   - If cwd is not inside a git repo, returns '—'.
+ *   - Dirty count is the number of lines from `git status --short`.
+ *   - Uses ● (bullet) for dirty, ✓ for clean to stay compact.
+ */
+function getGitInfo() {
+  try {
+    const branch = execSync('git branch --show-current', {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 1000
+    }).trim();
+
+    if (!branch) return '—';
+
+    const short = execSync('git status --short', {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 1000
+    }).trim();
+
+    const dirtyCount = short ? short.split('\n').length : 0;
+    const indicator = dirtyCount > 0
+      ? `\x1b[33m●${dirtyCount}\x1b[0m` // yellow bullet + count
+      : '\x1b[32m✓\x1b[0m';            // green checkmark
+
+    return `${branch} ${indicator}`;
+  } catch (e) {
+    return '—';
+  }
+}
+
+let input = '';
+process.stdin.setEncoding('utf8');
+
+process.stdin.on('data', chunk => {
+  input += chunk;
+});
+
+process.stdin.on('end', () => {
+  let data = {};
+  try {
+    data = JSON.parse(input || '{}');
+  } catch {
+    // ignore malformed JSON
+  }
+
+  const model = data.model?.display_name || 'Claude';
+  const ctxPct = Math.floor(data.context_window?.used_percentage || 0);
+  const cost = data.cost?.total_cost_usd || 0;
+  const lastSave = getLastMemorySave();
+  const gitInfo = getGitInfo();
+
+  // ANSI colours (green for low ctx, yellow for mid, red for high)
+  let ctxColor = '\x1b[32m'; // green
+  if (ctxPct > 70) ctxColor = '\x1b[33m'; // yellow
+  if (ctxPct > 90) ctxColor = '\x1b[31m'; // red
+  const reset = '\x1b[0m';
+
+  // Compact status line
+  const status = `💾 ${lastSave} | ${gitInfo} | ${model} | ${ctxColor}${ctxPct}%${reset} ctx | $${cost.toFixed(2)}`;
+  console.log(status);
+});
+
+// Safety timeout: if stdin never closes (shouldn't happen), emit anyway
+setTimeout(() => {
+  if (!process.stdin.destroyed) {
+    const lastSave = getLastMemorySave();
+    const gitInfo = getGitInfo();
+    console.log(`💾 ${lastSave} | ${gitInfo} | Claude | ?% ctx`);
+  }
+}, 5000);
+```
+
+---
+
+### 3.3a Status Line Debug Helper (`~/.claude/3dastroids-statusline-debug.cjs`)
+
+Create a minimal debug script alongside the production status line. It logs every invocation and the first 200 characters of stdin to `%USERPROFILE%\\claude-3dastroids-statusline-debug.log`. This is invaluable when the status bar shows only `auto mode on` even though the script works in PowerShell.
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+
+const LOG = path.join(process.env.USERPROFILE || '', 'claude-3dastroids-statusline-debug.log');
+const now = new Date().toISOString();
+
+fs.appendFileSync(LOG, `[${now}] STATUSLINE INVOKED\n`);
+
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => input += chunk);
+process.stdin.on('end', () => {
+  fs.appendFileSync(LOG, `[${now}] STDIN received: ${input.slice(0, 200)}...\n`);
+  console.log(`💾 debug | test`);
+});
+
+setTimeout(() => {
+  fs.appendFileSync(LOG, `[${now}] TIMEOUT fallback\n`);
+  console.log(`💾 timeout | test`);
+}, 5000);
+```
+
+**How to use:**
+1. Temporarily change `statusLine.command` in `C:\\Projects\\3D_Astroids\\.claude\\settings.json` to point at `3dastroids-statusline-debug.cjs`.
+2. Restart Claude Code.
+3. Check the log file.
+   - **Log exists** → the command path is correct; the issue is in the production script.
+   - **Log does not exist** → the path is broken (usually Windows backslashes). Fix with forward slashes.
+4. Point `statusLine.command` back to the production script and restart.
+
+---
+
+### 3.4 MCP Server Setup (Optional — Browser Automation)
+
+If the project requires browser automation (screenshot verification, Playwright testing, DOM inspection), install the Playwright MCP server:
+
+```
+/mcp add playwright npx @playwright/mcp@latest
+```
+
+**Note:** MCP server configurations are stored in the auto-generated `~/.claude.json` file. They cannot be pre-configured in `settings.json` and must be added interactively after first run.
+
+**Verification:** After installation, run `/mcp list` to confirm `playwright` appears in the active MCP servers.
+
+---
+
+## 4. Project Configuration
+
+### 4.1 Project Directory Structure
+
+Inside the project repository (`C:\Projects\3D_Astroids`), create:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.claude\hooks"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.claude\rules"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.claude\skills"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.claude\agents"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.claude\plans"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.claude\plugins"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\.remember\logs"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\Knowledge\RAW"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\Knowledge\Wiki"
+New-Item -ItemType Directory -Force -Path "C:\Projects\3D_Astroids\Knowledge\Frameworks"
+```
+
+- `.remember\logs` — required by the `post-tool-use.cjs` hook.
+- `.claude\skills` and `.claude\agents` — project-specific skills and agents (Sections 4.8 and 4.9).
+- `.claude\plans` — implementation plans for significant features or refactors.
+- `.claude\plugins` — documentation only; plugins are installed globally.
+- `Knowledge\RAW` — immutable source material; Austin ingests, never gets edited by Claude.
+- `Knowledge\Wiki` — Claude generated synthesis; Claude maintained.
+- `Knowledge\Frameworks` — actionable guides; Austin + Claude collaborate.
+
+---
+
+### 4.2 Project Hooks
+
+Hooks are Node.js scripts that run at specific lifecycle points. They communicate via JSON over stdin/stdout.
+
+#### A. Session Start Hook
+
+**Path:** `C:\Projects\3D_Astroids\.claude\hooks\session-start.cjs`
+
+```javascript
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+
+const root = path.resolve(__dirname, '..', '..');
+const hasNodeModules = fs.existsSync(path.join(root, 'node_modules'));
+
+const messages = [];
+
+messages.push({
+  type: 'text',
+  content: '3D Astroids project loaded.'
+});
+
+if (!hasNodeModules) {
+  messages.push({
+    type: 'text',
+    content: 'node_modules not found. Run the install command for your chosen stack before building.'
+  });
+}
+
+messages.push({
+  type: 'text',
+  content: '🛡️ Auto-save active: memory save + recap every 50 minutes.'
+});
+
+process.stdout.write(JSON.stringify({
+  updatedContext: messages.map(m => m.content).join('\n')
+}));
+```
+
+**What it does:** Greets the user on every session start, warns if `node_modules` is missing, and reminds about the auto-save obligation.
+
+#### B. Pre-Tool-Use Hook
+
+**Path:** `C:\Projects\3D_Astroids\.claude\hooks\pre-tool-use.cjs`
+
+```javascript
+#!/usr/bin/env node
+
+const readline = require('readline');
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
+
+rl.on('line', (line) => {
+  try {
+    const event = JSON.parse(line);
+    const tool = event?.tool || '';
+    const input = event?.input || {};
+    const filePath = input.file_path || '';
+    const cmd = input.command || '';
+
+    const warnings = [];
+
+    if (tool === 'Bash' || tool === 'PowerShell') {
+      const destructivePatterns = [
+        /rm\s+-rf/,
+        /rmdir\s+\/s/,
+        /del\s+\/f/,
+        /git\s+push\s+--force/,
+        /git\s+reset\s+--hard/,
+        /git\s+clean\s+-f/
+      ];
+      for (const pattern of destructivePatterns) {
+        if (pattern.test(cmd)) {
+          warnings.push(`Destructive command detected: ${cmd}. Confirm before running.`);
+        }
+      }
+
+      // Extra guard: deleting memory or Knowledge files via shell
+      if (/C:\\\\Users\\\\User101\\\\.claude\\\\projects\\\\C--Projects-3D-Astroids\\\\memory/.test(cmd) ||
+          /Knowledge[\\/]RAW/.test(cmd)) {
+        warnings.push(`Command references memory or Knowledge/RAW directory. These are protected. Confirm before running.`);
+      }
+    }
+
+    if (tool === 'Write' || tool === 'Edit') {
+      // Secret / env files
+      if (filePath.includes('.env')) {
+        warnings.push(`Writing to ${filePath}. Never commit secrets.`);
+      }
+
+      // Immutable RAW knowledge layer
+      if (/Knowledge[\\/]RAW[\\/]/.test(filePath)) {
+        warnings.push(`Writing to ${filePath}. Knowledge/RAW/ is immutable. Add a correction note to Knowledge/Wiki/ instead.`);
+      }
+
+      // Environment guardrails
+      if (filePath.endsWith('.claude/settings.json') || filePath.endsWith('.claude\\settings.json')) {
+        warnings.push(`Editing ${filePath}. Changes here can disable hooks or break the status line. Verify hooks and statusLine.command (forward slashes) are preserved.`);
+      }
+
+      // Primary rulebook
+      if (/[\\/]CLAUDE\.md$/.test(filePath)) {
+        warnings.push(`Editing ${filePath}. Ensure the same rule is also updated in memory and/or Knowledge/Frameworks/ if it is a workflow rule.`);
+      }
+
+      // Self-setup runbook — maintenance log must be updated
+      if (/Setup_MD[\\/]Setup\.md$/.test(filePath)) {
+        warnings.push(`Editing ${filePath}. Append a maintenance log entry in Section 9 unless the change is purely formatting.`);
+      }
+
+      // Local permissions cache
+      if (/settings\.local\.json$/.test(filePath)) {
+        warnings.push(`Editing ${filePath}. This file is auto-generated by Claude Code. Manual edits may be overwritten.`);
+      }
+
+      // Memory files
+      if (/C--Projects-3D-Astroids[\\/]memory[\\/].+\.md$/.test(filePath) ||
+          /\.claude[\\/]projects[\\/]C--Projects-3D-Astroids[\\/]memory[\\/].+\.md$/.test(filePath)) {
+        warnings.push(`Editing memory file ${filePath}. If deleting, ensure MEMORY.md index is also updated.`);
+      }
+
+      // .gitignore changes that could expose secrets
+      if (/\.gitignore$/.test(filePath)) {
+        warnings.push(`Editing ${filePath}. Do not remove .env, .env.*, node_modules/, dist/, or .claude/settings.local.json protections.`);
+      }
+
+      // Status-line command strings with Windows backslashes
+      const textToCheck = input.new_string || input.content || '';
+      if (/statusLine.*command.*node\s+C:\\\\/.test(textToCheck) ||
+          /"command":\s*"node\s+C:\\\\/.test(textToCheck)) {
+        warnings.push(`statusLine.command appears to use Windows backslashes. Use forward slashes (C:/Users/...) or the status line will silently fail.`);
+      }
+    }
+
+    process.stdout.write(JSON.stringify({
+      additionalContext: warnings.join('\n') || undefined
+    }));
+    rl.close();
+  } catch (err) {
+    process.stdout.write(JSON.stringify({}));
+    rl.close();
+  }
+});
+```
+
+**What it does:** Intercepts Bash/PowerShell/Write/Edit tool calls before they execute. Warns about:
+- Destructive shell commands (`rm -rf`, `git reset --hard`, etc.)
+- `.env` file writes
+- Edits to `.claude/settings.json` that could disable hooks or break the status line
+- Edits to `CLAUDE.md` without cross-checking memory/frameworks
+- Edits to `Setup.md` without updating the maintenance log
+- Writes to `Knowledge/RAW/` (immutable layer)
+- Deletion of memory files
+- `.gitignore` changes that expose secrets
+- `statusLine.command` paths using Windows backslashes
+
+#### C. Post-Tool-Use Hook
+
+**Path:** `C:\Projects\3D_Astroids\.claude\hooks\post-tool-use.cjs`
+
+```javascript
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const readline = require('readline');
+
+const projectRoot = path.resolve(__dirname, '..', '..');
+const logDir = path.join(projectRoot, '.remember', 'logs');
+const logFile = path.join(logDir, 'hook-errors.log');
+
+try {
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+  if (!fs.existsSync(logFile)) {
+    fs.writeFileSync(logFile, '');
+  }
+} catch (err) {
+  // silently continue to avoid infinite hook error loops
+}
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
+
+rl.on('line', (line) => {
+  try {
+    const event = JSON.parse(line);
+    const tool = event?.tool || '';
+    const error = event?.error || event?.result?.error;
+
+    if (error) {
+      const timestamp = new Date().toISOString();
+      const entry = `[${timestamp}] Tool: ${tool} | Error: ${JSON.stringify(error)}\n`;
+      try {
+        fs.appendFileSync(logFile, entry);
+      } catch (e) {
+        // Silent fail to avoid hook loops
+      }
+    }
+
+    process.stdout.write(JSON.stringify({}));
+    rl.close();
+  } catch (err) {
+    process.stdout.write(JSON.stringify({}));
+    rl.close();
+  }
+});
+```
+
+**What it does:** Logs tool errors to `.remember/logs/hook-errors.log` for later debugging. Fails silently to avoid infinite error loops.
+
+#### D. Hooks README
+
+Create `.claude/hooks/README.md` to document the hook lifecycle and how to add new hooks. This is especially useful when the team grows or when returning to the project after a break.
+
+---
+
+### 4.3 Rules Directory and Code Style
+
+**Path:** `C:\Projects\3D_Astroids\.claude\rules\`
+
+Create `.claude/rules/README.md` to document the purpose of each rule file. Create additional `.md` rule files in `.claude/rules/` as the project grows. Add a `paths` frontmatter block to scope a rule to specific file patterns:
+
+```markdown
+---
+paths:
+  - "src/**/*.ts"
+  - "src/**/*.js"
+---
+```
+
+Without `paths`, the rule applies globally. This is useful when different subsystems need different conventions (e.g., renderer code vs. utility code).
+
+#### A. `code-style.md`
+
+**Path:** `C:\Projects\3D_Astroids\.claude\rules\code-style.md`
+
+```markdown
+# Code Style — Game Code
+
+## Formatting
+- 2-space indentation
+- Single quotes for strings
+- Semicolons required
+- Max line length 100
+
+## Naming
+- `PascalCase` for classes, interfaces, enums, and game systems
+- `camelCase` for variables, functions, methods
+- `UPPER_SNAKE_CASE` for `readonly` constants and config values
+
+## Imports
+- Group: external libs → internal absolute (`src/`) → relative (`./`)
+- Avoid `import * as` unless library requires it
+- Prefer named exports over default exports
+
+## Game Patterns
+- Keep game logic under `src/`. No logic in `public/`.
+- Pure utility functions live in `src/utils/` and must be unit-testable
+- State mutation only inside update loops or event handlers
+- Avoid raw `setTimeout` / `setInterval` in game logic — use engine timers
+
+## Types
+- Explicit return types on public methods
+- Use `readonly` for injected dependencies and config
+- Export shared types from a central `src/types.ts` (or engine-appropriate location)
+```
+
+---
+
+### 4.4 Project Settings
+
+**Path:** `C:\Projects\3D_Astroids\.claude\settings.json`
+
+```json
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(git status)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git log)",
+      "Bash(git diff)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(node *)",
+      "PowerShell(npm *)",
+      "PowerShell(npx *)",
+      "PowerShell(git status)",
+      "PowerShell(git add *)",
+      "PowerShell(git commit *)",
+      "PowerShell(git log)",
+      "PowerShell(git diff)",
+      "PowerShell(ls *)",
+      "PowerShell(mkdir *)",
+      "PowerShell(node *)"
+    ],
+    "deny": [
+      "Bash(git reset --hard *)",
+      "Bash(git checkout -f)",
+      "Bash(git clean -f)",
+      "Bash(Remove-Item -Recurse -Force *)",
+      "Bash(Remove-Item *)",
+      "Bash(Move-Item *)",
+      "Bash(Invoke-WebRequest *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(invoke-webrequest *)",
+      "PowerShell(git reset --hard *)",
+      "PowerShell(git checkout -f)",
+      "PowerShell(git clean -f)",
+      "PowerShell(Remove-Item -Recurse -Force *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Move-Item *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(curl *)",
+      "PowerShell(wget *)",
+      "PowerShell(invoke-webrequest *)",
+      "Read(./.env*)",
+      "Read(./.env.*)",
+      "Write(./.env*)",
+      "Write(./.env.*)"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/session-start.cjs"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/pre-tool-use.cjs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/post-tool-use.cjs"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "statusLine": {
+    "type": "command",
+    "command": "node C:/Users/<YourUser>/.claude/3dastroids-statusline.cjs",
+    "padding": 1,
+    "refreshInterval": 60,
+    "hideVimModeIndicator": false
+  }
+}
+```
+
+**CRITICAL:** Replace `<YourUser>` with your Windows username in the `statusLine.command` path. Use forward slashes.
+
+**What this does:**
+- Defines an explicit allow/deny list for Bash and PowerShell commands.
+- Blocks destructive git operations (reset --hard, clean -f) and file removal.
+- Blocks reading/writing `.env` files to prevent secret leakage.
+- Hooks are wired to lifecycle events (SessionStart, PreToolUse, PostToolUse).
+- `defaultMode: auto` applies to project-level permissions.
+- Overrides the global status line with the project-specific script.
+
+**Auto-generated file:** Claude Code also creates `settings.local.json` in the same directory as permissions are granted interactively. This file is **not** in version control and should not be copied manually. A new instance will regenerate it as you approve commands.
+
+---
+
+### 4.5 CLAUDE.md (Project Root)
+
+**Path:** `C:\Projects\3D_Astroids\CLAUDE.md`
+
+This file lives in the project root and is automatically read by Claude Code on every session start. It is the primary onboarding document for the project.
+
+**NOTE:** Replace `<YourUser>` in the Auto-Save memory path with your Windows username.
+
+```markdown
+# CLAUDE.md — 3D Astroids
+
+This file provides guidance to Claude Code when working with code in this repository.
+
+Claude must use the highest thinking and problem solving ability it can get from the model.
+Claude will always apply deeper critical thinking to every fix, tracing root causes, examining edge cases,
+and questioning assumptions before proposing solutions.
+
+## Project
+
+3D Astroids — Browser-based 3D asteroids-style game.
+- Engine / framework: **TBD** (decision pending).
+- Language: **TBD** (likely TypeScript if web-based).
+- Build system: **TBD** (Vite / webpack / engine tooling to be selected).
+
+## Commands
+
+| Task | Command |
+|------|---------|
+| Dev server | `npm run dev` (TBD) |
+| Build | `npm run build` (TBD) |
+| Type check | `npm run typecheck` (TBD) |
+| Lint | `npm run lint` (TBD) |
+| Preview build | `npm run preview` (TBD) |
+| Run tests | `npm test` (TBD) |
+
+## Architecture
+
+| Layer | Technology | Responsibility |
+|-------|------------|----------------|
+| Game loop | TBD | Update, render, timing |
+| 3D rendering | TBD | Models, camera, lighting |
+| Physics / movement | TBD | Ship motion, asteroid collisions |
+| Input | TBD | Keyboard / mouse / gamepad |
+| Build | TBD | Bundling, dev server, HMR |
+
+## Key Conventions
+
+- All game code lives under `src/`. No logic in `public/`.
+- Engine-specific integration code lives in its own subdirectory (e.g., `src/renderer/`, `src/physics/`).
+- Input abstraction maps raw device input to game actions.
+- Placeholder / procedural assets first; replace later.
+- Use `readonly` for config constants. Prefer `const` over `let`.
+- Export shared types from `src/types.ts`. Avoid deep barrel files.
+- Keep visual representation and physics/collision layers independently tunable.
+
+## Testing
+
+- Unit tests for pure utility functions in `src/utils/`.
+- Manual / automated playtesting for rendering and physics feel.
+- Run `npm test` before committing. Fix type errors before pushing.
+- After every batch of changes, explicitly state: `"Commit needed: YES"` or `"Commit needed: NO"`.
+
+## Workflow Obligations (Non-Negotiable)
+
+### 1. Auto-Save + Recap Every 50 Minutes
+- A cron job fires every 50 minutes. When it fires:
+  1. **Check state.** "Busy" means the agent has an unresolved tool call in flight or is actively generating a response to a user message. Empty idle time is NEVER busy.
+  2. **Announce.** Post exactly: `🔄 Memory save is now taking place…`
+  3. **Persist.** Write all new/updated memories to `C:\Users\<YourUser>\.claude\projects\C--Projects-3D-Astroids\memory\`.
+  4. **Empty-cycle mandate.** Even if no memories changed, touch the newest `.md` file in the memory directory so the status bar timestamp (`💾 HH:MM`) updates.
+  5. **Recap.** Summarize the last 50-minute block. Minimum required: (a) files modified, (b) decisions made, (c) blockers encountered, (d) next immediate step.
+  6. **Confirm.** Post exactly: `✅ Memory save complete. Recap delivered.`
+- **This is mandatory.** Do not disable the cron or skip a cycle without explicit user approval.
+- Persisted in 4 layers: memory file, session-start hook, this CLAUDE.md section, and MEMORY.md index.
+
+### 2. Code Section Notes ("My Rules")
+- Between every distinct code section (or after any non-trivial change), insert a detailed comment block with:
+  - **Purpose** — why this block exists.
+  - **Setup** — what it needs to work.
+  - **Issues** — what was broken before.
+  - **Fix** — what was done and why.
+  - **Gotchas** — edge cases or traps for future editors.
+- **Triviality test:** If the change required debugging, research, or altered a value derived from another system, it is non-trivial. Pure refactors (renaming a variable with no logic change) are trivial.
+- **Self-enforcement:** Before declaring any task "done", read back every added comment block from the files and paste it verbatim into the chat. If more than 3 blocks were added, post a summary message: `"Verifying N comment blocks across files: [file1.ts, file2.ts, ...]"`, then paste each block.
+- "My Rules" and "Rules" are aliases for this exact procedure.
+
+### 3. Development Workflow Preferences
+1. **Research first.** Present 2–4 options with pros/cons and a clear recommendation before making architectural or tooling decisions.
+2. **Infrastructure before features.** Set up project config, tooling, and folder structure before writing implementation code. **Override clause:** This applies only when the user initiates a new project, major phase, or explicitly asks for setup. It does NOT justify refactoring unrelated systems during a targeted bugfix or asset swap.
+3. **Procedural assets.** Default to code-generated or downloadable assets. Do not assume 3D modeling skills.
+4. **Browser verification.** After any visual change, run the dev server and capture a gameplay screenshot to confirm the result before declaring done. **Fallback:** If Playwright/screenshot fails, verbally describe what was changed and ask the user to verify visually.
+5. **Percentage adjustments.** When tweaking sizes or positions of existing assets, use percentage adjustments (e.g., "30% bigger", "shift by 10%") rather than absolute pixel values. **Baseline rule:** If no prior value exists, propose an absolute starting value, get approval, then switch to percentage adjustments for refinements.
+6. **No side changes.** Only touch files and systems directly related to the user's request. If a side change seems necessary, ask first.
+
+### 4. Atomic Actions ("No Assumptions")
+1. **Do exactly what is asked.** Every instruction is atomic.
+2. **No cascading.** Completing task X does NOT imply task Y is done, even if Y was a prerequisite.
+3. **No side effects.** If asked for A, deliver A. Do not also do B, C, or D because they "seem related."
+4. **Ask first.** If something else seems necessary, ask: "Should I also...?" and wait for an answer.
+5. **Verbalize assumptions.** If an assumption must be made to proceed, state it explicitly before acting: "I am assuming X — confirm or correct me."
+6. **Task states are the user's property.** Only the user decides when a task is complete.
+```
+
+---
+
+### 4.6 Memory Directory and Index
+
+**Path:** `C:\Users\<YourUser>\.claude\projects\C--Projects-3D-Astroids\memory\`
+
+The status line script reads the modification time of the newest `.md` file in this directory. Create the directory and the index file:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "C:\Users\$env:USERNAME\.claude\projects\C--Projects-3D-Astroids\memory"
+```
+
+**Initial `MEMORY.md` content:**
+
+```markdown
+# Memory Index — 3D Astroids
+
+## User
+- [User Profile](user_role.md) — TBD; update once user preferences are learned
+
+## Feedback
+- [Workflow Preferences](feedback_workflow.md) — Research-first, infrastructure-first, procedural assets, browser verification, percentage adjustments
+- [Code Section Notes](feedback_code_section_notes.md) — Detailed explanatory blocks between code sections: purpose, setup, issues, fixes, gotchas
+- [My Rules / Rules Alias](feedback_my_rules_alias.md) — "My Rules" and "Rules" refer to the code section notes procedure
+- [Atomic Actions](feedback_atomic_actions.md) — Do exactly what is asked, no cascading side effects
+
+## Project
+- [3D Astroids](project_3d_astroids.md) — Browser-based 3D asteroids game, stack TBD
+- [Auto-Save System](project_autosave_system.md) — Mandatory memory save + recap every 50 min; 4-layer persistence + status bar integration
+
+## Reference
+- [Status Line Forward Slashes](reference_status_line_windows.md) — Windows status-line paths must use forward slashes in settings.json
+```
+
+**Memory File Format (every `.md` file in this directory):**
+
+```markdown
+---
+name: short-kebab-case-slug
+description: one-line summary — used to decide relevance during recall
+type: user | feedback | project | reference
+---
+
+The fact or rule. For feedback/project memories, follow with **Why:** and **How to apply:** lines.
+Link related memories with [[their-name]].
+```
+
+**Note:** The `type` field is a top-level frontmatter key, NOT wrapped in a `metadata:` block. This matches the format used by all existing memory files.
+
+**Creation threshold:** Create a new file when the fact introduces a new rule, decision, or architectural pattern. Append to an existing file when adding a new instance or session note to an existing category.
+
+**Stale-marker convention:** When verifying a memory against current code and finding it outdated, prepend `(STALE — verified [date])` to the description field and update the body with corrected information.
+
+---
+
+### 4.7 First Run and Trust Setup
+
+1. Open a terminal in `C:\Projects\3D_Astroids`.
+2. Run `claude`.
+3. Claude Code will display a **trust dialog** for the project. **Accept it.**
+   - This creates an entry in the auto-generated `~/.claude.json` file (`hasTrustDialogAccepted: true`). You cannot pre-configure this; it must be accepted interactively on first run.
+4. Install marketplace plugins when prompted, or run:
+   ```
+   /plugin install karpathy-skills
+   ```
+   (This pulls from the `extraKnownMarketplace` configured in Section 3.2.)
+
+---
+
+### 4.8 Restart Claude Code
+
+The `statusLine` configuration is **only read at startup**. After Sections 3–4 are complete, fully exit Claude Code (`Ctrl+C` or type `exit`) and restart it.
+
+Verify the status bar shows:
+```
+💾 --:-- | master ✓ | Claude | 0% ctx | $0.00
+```
+
+If it shows only `auto mode on`, the status line script path is broken. Check that forward slashes are used in both `settings.json` files and that the project-level override is pointing at `3dastroids-statusline.cjs`.
+
+---
+
+### 4.8 Custom Skills
+
+**Path:** `C:\Projects\3D_Astroids\.claude\skills\`
+
+Project-specific skills provide shortcuts for common workflows. Each skill is a directory containing a `SKILL.md` file.
+
+Create two generic skills now. Add engine-specific skills once the stack is chosen.
+
+**A. `build-project` skill** — Production build workflow
+
+```markdown
+---
+name: build-project
+description: Build the 3D Astroids project. Runs typecheck, lint, and production build. Use when the user says "build", "make production build", or before deploying.
+allowed-tools: [Bash, Read, Write, Edit]
+---
+
+# Build Project Workflow
+
+1. Run the type-check command for the chosen stack.
+2. Run the lint command for the chosen stack.
+3. If either fails, report errors and stop.
+4. Run the production build command.
+5. Report success and the output path.
+```
+
+**B. `preview-project` skill** — Dev server + browser preview
+
+```markdown
+---
+name: preview-project
+description: Start the dev server and open the game in a browser for playtesting. Use when the user says "preview", "run the game", "test in browser", or "play".
+allowed-tools: [Bash, mcp__plugin_playwright_playwright__browser_navigate, mcp__plugin_playwright_playwright__browser_snapshot]
+---
+
+# Preview Project Workflow
+
+1. Start the dev server for the chosen stack.
+2. Wait for the server to be ready.
+3. Open the browser to the local URL.
+4. Take a snapshot of the page so the user can see the current state.
+5. Report the server URL and any console errors found.
+```
+
+---
+
+### 4.9 Custom Agents
+
+**Path:** `C:\Projects\3D_Astroids\.claude\agents\`
+
+Project-specific agents provide specialized subagents for specific domains. Each agent is a `.md` file.
+
+Create three generic agents now. Add engine-specific agents once the stack is chosen.
+
+**A. `coder-agent.md`** — Code specialist
+
+```markdown
+---
+name: coder-agent
+description: "Senior code specialist for the 3D Astroids project. Use when writing or modifying game code to catch bugs, verify logic, and suggest cleaner implementations."
+tools: Read, Grep, Glob, Bash, Edit, Write
+model: kimi-k2.6:cloud
+permissionMode: default
+memory: project
+maxTurns: 30
+color: cyan
+---
+
+You are a senior game developer. Your focus is on making the requested change correct, clean, and well-styled.
+
+Review the provided code for:
+1. Correctness — does the logic match the stated intent?
+2. Edge cases — null checks, boundary conditions, timing issues.
+3. Style — does it follow the project's code-style.md?
+4. Performance — are there obvious hot paths or allocations?
+5. Suggest cleaner implementations where appropriate.
+
+Scope boundary:
+- Do not redesign the feature or add unrequested abstractions.
+- Do not treat yourself as the final arbiter of whether the feature should exist.
+- If you suspect the design itself is wrong, the requirements are unclear, or the change is over-engineered, note it briefly and suggest invoking `challenger-agent` rather than solving it alone.
+
+Always apply the project's "My Rules" comment-block convention when making changes.
+```
+
+**B. `testing-agent.md`** — Testing / quality gate specialist
+
+```markdown
+---
+name: testing-agent
+description: "Testing and quality-gate specialist. Use when reviewing tests, adding test coverage, or verifying a change passes the testing gate before commit."
+tools: Read, Grep, Glob, Bash, Edit, Write
+model: kimi-k2.6:cloud
+permissionMode: default
+memory: project
+maxTurns: 30
+color: green
+---
+
+You are a testing specialist. Your focus is on test coverage, quality gates, and verifying that changes are safe to commit.
+
+For the provided code or change:
+1. Identify what should be unit-tested vs manually verified.
+2. Check existing tests still pass.
+3. Propose missing test cases with concrete inputs/outputs.
+4. Verify the testing gate (typecheck, lint, tests) is satisfied.
+5. Flag any side effects that should be isolated or reverted.
+6. Challenge whether the tests are testing the *right* thing. If the change appears to solve the wrong problem, lock in assumptions, or ignore edge cases, flag it for `challenger-agent` rather than adding tests that rubber-stamp a bad design.
+```
+
+**C. `graphics-reviewer.md`** — Rendering reviewer
+
+```markdown
+---
+name: graphics-reviewer
+description: "Specialist subagent for reviewing rendering code, shaders, and asset loading. Use when modifying visual code or integrating a 3D engine. For adversarial review of rendering trade-offs and cost-effectiveness, escalate to challenger-agent."
+model: kimi-k2.6:cloud
+permissionMode: default
+memory: project
+maxTurns: 30
+color: purple
+tools: Read, Grep, Glob, Bash, Edit, Write
+---
+
+You are a graphics programming specialist. Review the provided code for:
+1. Performance — are resources created/disposed correctly?
+2. Sync correctness — are cameras, viewports, and resize handlers consistent?
+3. Visual fidelity — are materials, lighting, and effects appropriate?
+4. Asset loading — are loaders used with proper error handling?
+5. Check that visual verification (screenshot or described change) is planned.
+
+Scope boundary:
+- Focus on whether the rendering approach is technically sound and verifiable.
+- If you suspect the visual approach is unnecessarily complex, expensive, or misaligned with the requirement, note it briefly and suggest invoking `challenger-agent`.
+- Do not redesign the renderer or swap engines without explicit user direction.
+```
+
+**D. `challenger-agent.md`** — Adversarial reviewer / devil's advocate
+
+```markdown
+---
+name: challenger-agent
+description: "Adversarial reviewer / devil's advocate. Use before committing significant changes, during architectural decisions, or when a complex bugfix seems too clever. Questions assumptions, requirements-fit, robustness, hidden costs, and unnecessary complexity. Reports only; does not edit code."
+tools: Read, Grep, Glob, Bash
+model: kimi-k2.7:cloud
+permissionMode: default
+memory: project
+maxTurns: 30
+color: orange
+---
+
+You are a skeptical, adversarial code reviewer — a "devil's advocate" — for the 3D Astroids project.
+
+Your job is **not** to write or fix code. It is to challenge the provided change or design so the team does not ship weak, over-engineered, or misaligned work. Report findings only. If you need to prove a point, quote code or run commands; do not modify files.
+
+For the code, design, or plan provided, inspect it with these lenses:
+
+1. **Requirements fit** — Does it actually solve the stated problem? Is there evidence it meets the user's request, or is it solving a different, easier problem? Flag any "solution looking for a problem."
+2. **Robustness / strength** — Are edge cases handled? Are assumptions documented? Could a null, zero, NaN, missing asset, failed load, or rapid input break it? Are timeouts, error paths, and fallbacks present where needed?
+3. **Logic and consistency** — Does the reasoning hold up? Are there contradictions with `CLAUDE.md`, `.claude/rules/code-style.md`, or existing agents? Are names, units, and coordinate systems consistent?
+4. **Simplicity** — Can it be made smaller or clearer without losing capability? Flag unnecessary abstraction, indirection, generic layers, or "future-proofing" that has no current use. Prefer the boring solution.
+5. **Optimization discipline** — Is performance work grounded by a measured hot path or a concrete budget? Reject speculative micro-optimizations, premature caching, or complexity added "just in case." If optimization is justified, check that it actually helps.
+6. **Cost effectiveness** — Consider API/token cost, runtime performance, maintenance cost, and debuggability. Flag changes that increase complexity disproportionately to their benefit.
+7. **Project rule compliance** — Verify "My Rules" comment blocks where relevant, atomic-action discipline, no-side-changes policy, percentage adjustments for visual tweaks, and browser verification for visual changes. Do not treat these as optional.
+8. **Assumption surfacing** — List the unstated assumptions the code relies on. The author should be forced to confirm or refute them.
+
+Output format:
+- Start with a one-line verdict: `APPROVE`, `APPROVE WITH CONCERNS`, or `CHALLENGE`.
+- If `APPROVE WITH CONCERNS` or `CHALLENGE`, list issues as bullet points with severity, concise description, concrete recommendation or question, and file/line references.
+- End with a short "if I were forced to change one thing first" priority.
+- Do not produce implementation patches or rewrite code.
+
+When finished, explicitly tell the parent agent whether additional review agents should be invoked and why.
+```
+
+**Agent team summary:**
+
+| Agent | Role | Edits? | When to use |
+|-------|------|--------|-------------|
+| `coder-agent` | Correctness, style, cleaner implementation | Yes | Writing or modifying game code |
+| `testing-agent` | Test coverage and quality gates | Yes | Reviewing tests, verifying gate before commit |
+| `graphics-reviewer` | Rendering, shaders, asset loading, visual verification | Yes | Modifying visual code or integrating a 3D engine |
+| `challenger-agent` | Adversarial review: requirements-fit, robustness, simplicity, cost | No | Before significant commits, architectural decisions, complex bugfixes |
+
+**When to spawn `challenger-agent`:**
+- Before committing non-trivial changes (architecture, public APIs, game loop, physics, >3 files).
+- During architectural or tooling decisions, after research but before implementation.
+- During complex bugfixes that seem too clever or rely on non-obvious root causes.
+- After `coder-agent` finishes a large feature, as a sequential second opinion.
+
+---
+
+### 4.10 Plans Directory and Adversarial Review
+
+**Path:** `C:\Projects\3D_Astroids\.claude\plans\`
+
+Create detailed implementation plans here before starting work that:
+- Touches more than 3 files
+- Changes architecture, public APIs, or game flow
+- Introduces new dependencies or build steps
+- Has significant risk or multiple implementation options
+
+A good plan includes:
+1. Overview and chosen approach
+2. Current state / new state (flow diagrams if applicable)
+3. Changes per file
+4. Risk assessment and mitigations
+5. Verification commands
+6. Manual test matrix
+7. Files modified / created summary
+8. Rough time estimate
+
+**Adversarial audit before execution:**
+Spawn `challenger-agent` against the plan to verify:
+- The plan actually solves the stated problem
+- Risks are realistic and mitigations are adequate
+- The approach is simpler than alternatives
+- Verification steps are sufficient
+
+**Adversarial audit of Setup.md:**
+After any major change to environment, hooks, status line, memory format, or permissions, run an adversarial audit of `Setup.md` with at least two agents:
+1. Technical auditor — find gaps, incorrect paths, missing steps
+2. Naive user roleplay — find the first point where a fresh Claude Code instance would fail
+
+Fix all blockers, triage warnings, and append a maintenance log entry.
+
+---
+
+### 4.11 Knowledge Architecture
+
+**Path:** `C:\Projects\3D_Astroids\Knowledge\`
+
+This project uses a three-layer knowledge system.
+
+| Layer | Path | Owner | Purpose | Mutability |
+|-------|------|-------|---------|------------|
+| **RAW** | `Knowledge/RAW/` | Austin | Immutable source material — Austin ingests, never gets edited | Never edited by Claude |
+| **Wiki** | `Knowledge/Wiki/` | Claude | Claude generated synthesis and Claude maintained | Claude maintains |
+| **Frameworks** | `Knowledge/Frameworks/` | Austin + Claude | Actionable guides | Collaborative |
+
+**Rules:**
+1. **RAW is immutable.** Claude reads it but never writes to it. If a RAW source is wrong, add a correction note in `Wiki/` rather than editing the original.
+2. **Wiki is the searchable index.** Claude reads `Wiki/` first, then falls back to `RAW/` only if the synthesis is insufficient.
+3. **Frameworks are executable conventions.** Every framework should be actionable: "When X happens, do Y." If it is not actionable, it belongs in `Wiki/`.
+4. **Cross-link liberally.** Wiki entries link to RAW files; Frameworks link to Wiki entries and memory files.
+5. **Memory is the persistent rule store.** Project rules, user feedback, and gotchas also live in `C:\Users\User101\.claude\projects\C--Projects-3D-Astroids\memory\`. Knowledge frameworks should link to memory files with `[[name]]`.
+
+**Example first framework:** `Knowledge/Frameworks/karpathy-method.md` documents the Karpathy Method workflow for this project.
+
+---
+
+## 5. Workflow Rules (Non-Negotiable)
+
+These rules are enforced across multiple layers. A rule is only considered active if it appears in at least two layers.
+
+### 5.1 Auto-Save + Recap (Every 50 Minutes)
+
+A cron job fires every 50 minutes. When it fires:
+
+1. **Check state.** "Busy" means the agent has an unresolved tool call in flight or is actively generating a response to a user message. Empty idle time is NEVER busy.
+2. **Announce.** Post exactly: `🔄 Memory save is now taking place…`
+3. **Persist.** Write all new/updated memories to `C:\Users\<YourUser>\.claude\projects\C--Projects-3D-Astroids\memory\`.
+4. **Empty-cycle mandate.** Even if no memories changed, touch the newest `.md` file in the memory directory so the status bar timestamp (`💾 HH:MM`) updates.
+5. **Recap.** Summarize the last 50-minute block. Minimum required: (a) files modified, (b) decisions made, (c) blockers encountered, (d) next immediate step.
+6. **Confirm.** Post exactly: `✅ Memory save complete. Recap delivered.`
+
+**Constraint:** Do not disable the cron or skip a cycle without explicit user approval.
+
+---
+
+### 5.2 Code Section Notes ("My Rules")
+
+After every non-trivial change or between distinct code sections, insert a detailed comment block using the `// ═══ ... ═══` separator format.
+
+Each block **must** cover:
+- **Purpose** — why this block exists
+- **Setup** — what it needs to work
+- **Issues** — what was broken before
+- **Fix** — what was done and why
+- **Gotchas** — edge cases or traps for future editors
+
+**Triviality test:** If the change required debugging, research, or altered a value derived from another system, it is non-trivial. Pure refactors (renaming a variable with no logic change) are trivial.
+
+**Self-Enforcement:**
+1. Before declaring any task "done", read back every added comment block from the files and paste it verbatim into the chat.
+2. If there is no comment block to paste, go back and write one. The edit is not complete until the comment exists and is shown.
+3. If more than 3 blocks were added, post a summary message: `"Verifying N comment blocks across files: [file1.ts, file2.ts, ...]"`, then paste each block.
+
+**Aliases:** "My Rules" and "Rules" refer to this exact procedure.
+
+---
+
+### 5.3 Development Workflow Preferences
+
+1. **Research first.** Present 2–4 options with pros/cons and a clear recommendation before making architectural or tooling decisions.
+2. **Infrastructure before features.** Set up project config, tooling, and folder structure before writing implementation code. **Override clause:** This applies only when the user initiates a new project, major phase, or explicitly asks for setup. It does NOT justify refactoring unrelated systems during a targeted bugfix or asset swap.
+3. **Procedural assets.** Default to code-generated or downloadable assets. Do not assume 3D modeling skills.
+4. **Browser verification.** After any visual change, run the dev server and capture a gameplay screenshot to confirm the result before declaring done. **Fallback:** If Playwright/screenshot fails, verbally describe what was changed and ask the user to verify visually.
+5. **Percentage adjustments.** When tweaking sizes or positions of existing assets, use percentage adjustments (e.g., "30% bigger", "shift by 10%") rather than absolute pixel values. **Baseline rule:** If no prior value exists, propose an absolute starting value, get approval, then switch to percentage adjustments for refinements.
+6. **No side changes.** Only touch files and systems directly related to the user's request. If a side change seems necessary, ask first.
+
+---
+
+### 5.4 Atomic Actions ("No Assumptions")
+
+1. **Do exactly what is asked.** Every instruction is atomic.
+2. **No cascading.** Completing task X does NOT imply task Y is done, even if Y was a prerequisite.
+3. **No side effects.** If asked for A, deliver A. Do not also do B, C, or D because they "seem related."
+4. **Ask first.** If something else seems necessary, ask: "Should I also...?" and wait for an answer.
+5. **Verbalize assumptions.** If an assumption must be made to proceed, state it explicitly before acting: "I am assuming X — confirm or correct me."
+6. **Task states are the user's property.** Only the user decides when a task is complete.
+
+**Why:** Prevents the "while I'm at it" pattern that causes unintended side effects, task state corruption, and user frustration.
+
+---
+
+### 5.5 Karpathy Method
+
+Behavioral guidelines to reduce common LLM coding mistakes. Bias toward caution over speed.
+
+1. **Think Before Coding**
+   - State assumptions explicitly before implementing.
+   - If multiple interpretations exist, present them — don't pick silently.
+   - If a simpler approach exists, say so. Push back when warranted.
+   - If something is unclear, stop, name what's confusing, and ask.
+
+2. **Simplicity First**
+   - Minimum code that solves the problem. Nothing speculative.
+   - No features beyond what was asked.
+   - No abstractions for single-use code.
+   - No "flexibility" or "configurability" that wasn't requested.
+   - If you write 200 lines and it could be 50, rewrite it.
+
+3. **Surgical Changes**
+   - Touch only what the user's request requires.
+   - Don't "improve" adjacent code, comments, or formatting.
+   - Match existing style, even if you'd do it differently.
+   - Clean up only the mess your own changes create.
+   - If you notice unrelated dead code, mention it — don't delete it.
+
+4. **Goal-Driven Execution**
+   - Transform tasks into verifiable goals.
+   - "Add validation" → "Write tests for invalid inputs, then make them pass."
+   - "Fix the bug" → "Write a test that reproduces it, then make it pass."
+   - "Refactor X" → "Ensure tests pass before and after."
+
+### 5.6 Role Routing, Search Before Building, Effort Matching
+
+**Role routing:** Before starting any task, identify the mode and state it explicitly:
+
+| Mode | What I will do | What I will NOT do |
+|------|----------------|--------------------|
+| **Planning** | Research options, write `.claude/plans/`, define verification | Write implementation code |
+| **Building** | Make surgical changes to solve the stated problem | Redesign unrelated systems, add speculative features |
+| **Reviewing** | Read code, ask questions, suggest improvements | Make edits unless explicitly asked |
+| **Debugging** | Reproduce, isolate root cause, propose minimal fix | Layer workarounds without understanding the cause |
+| **Testing** | Run gates, write/propose tests, verify behavior | Change production logic unless the fix is trivial and safe |
+
+**Search before building:** Before writing new code:
+1. Search the codebase for similar functionality (`Grep` / `Glob`).
+2. Check existing skills, agents, and `Knowledge/Wiki/`.
+3. Reuse or extend existing patterns rather than duplicating.
+
+**Effort matching:** Match analysis depth to task size:
+
+| Task size | Response |
+|-----------|----------|
+| Quick fix (<5 lines, obvious) | Short explanation + change |
+| Medium change (1 file, contained) | Brief plan + verification |
+| Large change (>1 file, architecture, new feature) | Full plan with options, risks, verification matrix |
+
+### 5.7 Verification Plans
+
+**Before building anything multi-step, include a verification plan.**
+
+For any task with more than 2 steps or that touches more than 1 file, state the plan in this format:
+
+```
+Plan:
+1. [Step] → verify: [specific check]
+2. [Step] → verify: [specific check]
+3. [Step] → verify: [specific check]
+```
+
+Verification can be a test, a command (`npm run typecheck`, `npm test`), a manual check (screenshot, browser behavior), or an agent review.
+
+Do not proceed to the next step until the current step's verification is satisfied.
+
+### 5.8 Self-Audit Procedure
+
+Run the following audit periodically and after any major setup change:
+
+> Check my `CLAUDE.md`, my knowledge base (`Knowledge/` + memory), my skills, and my guardrails.
+> For each of the **top 5 gaps**, name the file, the problem, and the exact fix — and flag which risky actions need a hook so I can't bypass them.
+
+When asked to run this audit:
+1. Spawn at least two review agents (e.g., `challenger-agent` + `testing-agent`).
+2. Compare their findings.
+3. Present a ranked list with file paths and concrete fixes.
+4. Do not skip the audit because the project "looks fine."
+
+---
+
+## 6. How Rules Are Enforced
+
+| Rule | CLAUDE.md | Memory File | Knowledge Framework | Session Hook | Status Bar |
+|------|-----------|-------------|---------------------|------------|------------|
+| Auto-Save (5.1) | Summary + full spec | `project_autosave_system.md` | — | Reminder | Timestamp |
+| My Rules (5.2) | Summary + full spec | `feedback_code_section_notes.md` + alias | — | — | — |
+| Workflow (5.3) | Summary + full spec | `feedback_workflow.md` | `karpathy-method.md` | — | — |
+| Atomic Actions (5.4) | Summary + full spec | `feedback_atomic_actions.md` | `karpathy-method.md` | — | — |
+| Karpathy Method (5.5) | Summary + full spec | `karpathy_method.md` | `karpathy-method.md` | — | — |
+| Verification Plans (5.7) | Summary + full spec | `karpathy_method.md` | `karpathy-method.md` | — | — |
+
+---
+
+## 7. Known Conflicts & Gotchas
+
+| Issue | Root Cause | Resolution |
+|-------|------------|------------|
+| **Status line shows `auto mode on` instead of custom bar** | Windows backslashes in `statusLine.command` are treated as escape sequences by the internal Git Bash runner | Always use forward slashes (`C:/Users/...`) in both global and project `settings.json` |
+| **Status line still not showing after editing settings** | `statusLine` config is cached at process startup | Full restart of Claude Code is required after any `statusLine` change |
+| **Trust dialog repeats on every session** | `hasTrustDialogAccepted` is missing from `~/.claude.json` | Accept the dialog once interactively; do not try to hand-edit `.claude.json` |
+| **SessionStart hook fails with "node not found"** | Hook runs before shell env is fully initialized | Ensure Node.js is in your **system** PATH, not just user PATH |
+| **post-tool-use hook crashes silently** | `.remember/logs/` directory missing | Create it in Section 4.1; the hook tries to auto-create it but may race |
+| **Memory save time shows `—` forever** | No `.md` files in memory directory yet | The timer appears once the first memory file is written by an agent |
+| **Plugins not available** | Marketplace not initialized or plugin IDs changed | Run `/plugin list` and `/plugin install <name>` manually; IDs may drift |
+| **`.cjs` vs `.js` confusion** | Project may later declare `"type": "module"` | Any file using `require()` must use `.cjs` extension |
+| **"permissionMode" rejected by validation** | `"permissionMode": "yesToAll"` is not a valid schema field | Use `"permissions": { "defaultMode": "auto" }` instead |
+| **Lost all configs after reinstall** | `~/.claude/` and `project/.claude/` are machine-specific and not in Git | Back up `~/.claude/settings.json`, `~/.claude/3dastroids-statusline.cjs`, and `project/.claude/` to a private dotfiles repo or cloud storage |
+
+**Engine-specific gotchas will be appended here as they are discovered.**
+
+---
+
+## 8. Appendix: Exact File Contents
+
+For convenience, here is a quick-reference table of every file created in this setup and its purpose:
+
+| File | Purpose | Content Source |
+|------|---------|----------------|
+| `~/.claude/settings.json` | Global Claude Code config | Section 3.2 |
+| `~/.claude/3dastroids-statusline.cjs` | Custom status bar script for this project | Section 3.3 |
+| `~/.claude/3dastroids-statusline-debug.cjs` | Status-line debug helper | Section 3.3a |
+| `~/.claude.json` | Auto-generated trust state | Created interactively at first run |
+| `project/.claude/settings.json` | Project-level permissions + hooks + status line override | Section 4.4 |
+| `project/.claude/hooks/session-start.cjs` | Session greeting + auto-save reminder | Section 4.2.A |
+| `project/.claude/hooks/pre-tool-use.cjs` | Destructive command warnings | Section 4.2.B |
+| `project/.claude/hooks/post-tool-use.cjs` | Tool error logging | Section 4.2.C |
+| `project/.claude/hooks/README.md` | Hook lifecycle documentation | Section 4.2.D |
+| `project/.claude/rules/README.md` | Rules directory documentation | Section 4.3 |
+| `project/.claude/rules/code-style.md` | Coding conventions | Section 4.3.A |
+| `project/.claude/plugins/README.md` | Global plugins documentation | Section 3.4 |
+| `project/.claude/plans/README.md` | Plan template and discipline | Section 4.10 |
+| `project/Knowledge/README.md` | Knowledge architecture overview | Section 4.11 |
+| `project/Knowledge/RAW/README.md` | Immutable source material rules | Section 4.11 |
+| `project/Knowledge/Wiki/README.md` | Claude-maintained synthesis rules | Section 4.11 |
+| `project/Knowledge/Frameworks/README.md` | Actionable guides rules | Section 4.11 |
+| `project/Knowledge/Frameworks/karpathy-method.md` | Karpathy Method workflow guide | Section 4.11 / 5.5 |
+| `project/CLAUDE.md` | Project onboarding + obligations | Section 4.5 |
+| `~/.claude/projects/C--Projects-3D-Astroids/memory/MEMORY.md` | Memory index | Section 4.6 |
+| `project/.remember/README.md` | Daily memory workflow documentation | Section 4.1 |
+| `project/.claude/skills/build-project/SKILL.md` | Generic build workflow | Section 4.8 |
+| `project/.claude/skills/preview-project/SKILL.md` | Dev server + browser preview | Section 4.8 |
+| `project/.claude/skills/karpathy-method/SKILL.md` | Karpathy Method workflow skill | Section 5.5 |
+| `project/.claude/agents/coder-agent.md` | Code specialist | Section 4.9 |
+| `project/.claude/agents/testing-agent.md` | Testing specialist | Section 4.9 |
+| `project/.claude/agents/graphics-reviewer.md` | Rendering reviewer | Section 4.9 |
+| `project/.claude/agents/challenger-agent.md` | Adversarial reviewer / devil's advocate | Section 4.9 |
+
+---
+
+## 9. Maintenance Log
+
+| Date | Change | Section |
+|------|--------|---------|
+| 2026-06-15 | Ported environment structure from Donkey Kong 2.5D to 3D Astroids; rewrote Setup.md as engine-agnostic runbook | All |
+| 2026-06-15 | Created project-specific status line `3dastroids-statusline.cjs` so Donkey Kong script remains untouched | 3.3 |
+| 2026-06-15 | Added generic skills (`build-project`, `preview-project`) and agents (`coder-agent`, `testing-agent`, `graphics-reviewer`) | 4.8, 4.9 |
+| 2026-06-15 | Ported transferable memories: auto-save, My Rules, workflow preferences, atomic actions, status-line forward-slash gotcha | 4.6 |
+| 2026-06-15 | Added `challenger-agent` (adversarial reviewer) and refined coder/testing/graphics agent boundaries to prevent overlap | 4.9 |
+| 2026-06-15 | Boosted setup with Donkey Kong lessons: status-line debug helper, README files for hooks/rules/plugins/plans, Rule Step 0 sprite-sheet memory, phased cleanup procedure, adversarial audit practice, MCP GitHub setup reference | 3.3a, 4.2, 4.3, 4.10, memory |
+| 2026-06-15 | Applied Karpathy Method: added knowledge architecture (`Knowledge/RAW`, `/Wiki`, `/Frameworks`), Karpathy workflow framework, verification-plan rule, role routing, search-before-building, effort matching, self-audit prompt, and expanded pre-tool-use guardrails | 4.2.B, 4.11, 5.5–5.8, memory, hooks |
+
+---
+
+> **End of Setup.md**
+>
+> Remember: This is a **living document**. As new rules, tools, or configurations are added to 3D Astroids, update this file and the maintenance log. New setups should be able to achieve 100% parity by following this guide in order.

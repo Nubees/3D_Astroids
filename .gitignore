@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+
+# Local Claude Code permissions cache
+.claude/settings.local.json
+
+# Remember logs and temporary working files (keep directory, ignore contents)
+.remember/logs/*.log
+.remember/tmp/
+.remember/now.md
+.remember/today-*.md
+.remember/recent.md
+

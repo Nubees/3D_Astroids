@@ -1,0 +1,42 @@
+# Implementation Plans
+
+This directory holds detailed implementation plans for significant features, refactors, or architectural changes. Plans are written in Markdown and are not executable code.
+
+## When to Write a Plan
+
+Create a plan before starting work that:
+- Touches more than 3 files
+- Changes architecture, public APIs, or scene flow
+- Introduces new dependencies or build steps
+- Has significant risk or multiple implementation options
+
+## Plan Template
+
+A good plan should include:
+
+1. **Overview** — what problem this solves and the chosen approach
+2. **Current state / New state** — flow diagrams or before/after descriptions
+3. **Changes per file** — specific add/remove/modify instructions
+4. **Risk assessment** — what could go wrong and how to mitigate it
+5. **Verification** — commands and manual tests to prove correctness
+6. **Test matrix** — table of scenarios and expected results
+7. **Files modified / created** — summary table
+8. **Estimate** — rough time breakdown
+
+## Reviewing Plans
+
+Before executing a plan, consider spawning `challenger-agent` to verify:
+- The plan actually solves the stated problem
+- Risks are realistic and mitigations are adequate
+- The approach is simpler than alternatives
+- Verification steps are sufficient
+
+## Plan Status
+
+| File | Status | Description |
+|------|--------|-------------|
+| (none yet) | — | Add the first plan here |
+
+## Relation to Memory
+
+When a plan is executed, update the corresponding session memory file and `Setup.md` maintenance log if new rules or patterns emerged.

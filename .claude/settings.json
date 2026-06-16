@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(git status)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git log)",
+      "Bash(git diff)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(node *)",
+      "PowerShell(npm *)",
+      "PowerShell(npx *)",
+      "PowerShell(git status)",
+      "PowerShell(git add *)",
+      "PowerShell(git commit *)",
+      "PowerShell(git log)",
+      "PowerShell(git diff)",
+      "PowerShell(ls *)",
+      "PowerShell(mkdir *)",
+      "PowerShell(node *)"
+    ],
+    "deny": [
+      "Bash(git reset --hard *)",
+      "Bash(git checkout -f)",
+      "Bash(git clean -f)",
+      "Bash(Remove-Item -Recurse -Force *)",
+      "Bash(Remove-Item *)",
+      "Bash(Move-Item *)",
+      "Bash(Invoke-WebRequest *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(invoke-webrequest *)",
+      "PowerShell(git reset --hard *)",
+      "PowerShell(git checkout -f)",
+      "PowerShell(git clean -f)",
+      "PowerShell(Remove-Item -Recurse -Force *)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(Move-Item *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(curl *)",
+      "PowerShell(wget *)",
+      "PowerShell(invoke-webrequest *)",
+      "Read(./.env*)",
+      "Read(./.env.*)",
+      "Write(./.env*)",
+      "Write(./.env.*)"
+    ],
+    "defaultMode": "auto"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Projects/3D_Astroids/.claude/hooks/session-start.cjs"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Projects/3D_Astroids/.claude/hooks/pre-tool-use.cjs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/Projects/3D_Astroids/.claude/hooks/post-tool-use.cjs"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "statusLine": {
+    "type": "command",
+    "command": "node C:/Users/User101/.claude/3dastroids-statusline.cjs",
+    "padding": 1,
+    "refreshInterval": 60,
+    "hideVimModeIndicator": false
+  }
+}
