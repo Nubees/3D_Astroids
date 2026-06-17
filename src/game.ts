@@ -57,6 +57,8 @@ const DRIFT_SPEED = 10;
 const CAMERA_Z_OFFSET = 14;
 const CAMERA_LAG = 0.18;
 const CAMERA_DANGER_Z = 1.5;
+const DRIFT_CAMERA_BEHIND = 16;
+const DRIFT_CAMERA_ABOVE = 10;
 
 interface LiveAsteroid {
   state: AsteroidState;
@@ -408,8 +410,19 @@ export class Game {
         y: lerp(this.cameraTarget.y, this.ship.state.position.y, t),
         z: 0,
       };
-      this.camera.position.set(this.cameraTarget.x, this.cameraTarget.y, CAMERA_Z_OFFSET);
-      this.camera.lookAt(this.ship.state.position.x, this.ship.state.position.y, 0);
+
+      // Above-and-behind camera: position is behind (+Z) and above (+Y) the
+      // ship, then look down toward a point slightly ahead of the ship.
+      this.camera.position.set(
+        this.cameraTarget.x,
+        this.cameraTarget.y + DRIFT_CAMERA_ABOVE,
+        this.cameraTarget.z + DRIFT_CAMERA_BEHIND,
+      );
+      this.camera.lookAt(
+        this.cameraTarget.x,
+        this.cameraTarget.y - 2,
+        this.cameraTarget.z - 8,
+      );
     } else {
       this.cameraTarget = { x: this.ship.state.position.x, y: this.ship.state.position.y, z: 0 };
       this.camera.position.set(this.cameraTarget.x, this.cameraTarget.y, CAMERA_Z_OFFSET);
