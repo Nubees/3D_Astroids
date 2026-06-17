@@ -282,16 +282,18 @@ export class Game {
 
     if (this.mode === MovementMode.DRIFT) {
       // In drift mode the ship moves inwards (forward into the screen along -Z).
-      // Point the nose in that direction and bank slightly toward the strafe
-      // input so steering is readable.
+      // Point the nose forward and bank/pitch toward the strafe input so the
+      // player can read steering. Down input (move.y > 0) pitches the nose
+      // downward because the camera is above the ship.
       const strafeStrength = 3;
+      const verticalPitchStrength = 6;
       const forwardDistance = 25;
       const strafeLength = Math.hypot(input.move.x, input.move.y);
-      const strafeX = strafeLength > 0.001 ? (input.move.x / strafeLength) * strafeStrength : 0;
-      const strafeY = strafeLength > 0.001 ? (input.move.y / strafeLength) * strafeStrength : 0;
+      const moveDirX = strafeLength > 0.001 ? input.move.x / strafeLength : 0;
+      const moveDirY = strafeLength > 0.001 ? input.move.y / strafeLength : 0;
 
-      const targetX = this.ship.state.position.x + strafeX;
-      const targetY = this.ship.state.position.y + strafeY;
+      const targetX = this.ship.state.position.x + moveDirX * strafeStrength;
+      const targetY = this.ship.state.position.y - moveDirY * verticalPitchStrength;
       const targetZ = this.ship.state.position.z - forwardDistance;
 
       this.shipMesh.lookAt(targetX, targetY, targetZ);
