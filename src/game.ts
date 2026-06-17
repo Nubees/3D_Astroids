@@ -66,6 +66,7 @@ const CAMERA_LAG = 0.18;
 const CAMERA_DANGER_Z = 1.5;
 const DRIFT_CAMERA_BEHIND = 16;
 const DRIFT_CAMERA_ABOVE = 10;
+const DRIFT_CAMERA_DOWNWARD_ANGLE = 15 * (Math.PI / 180);
 const DRIFT_AIM_INTERVAL = 4.0;
 const DRIFT_AIM_HORZ_STRENGTH = 4.0;
 
@@ -268,6 +269,8 @@ export class Game {
     const ndcY = -(screen.y / window.innerHeight) * 2 + 1;
     const halfHeight = this.camera.position.z * Math.tan((this.camera.fov * Math.PI) / 360);
     const halfWidth = halfHeight * this.camera.aspect;
+    // In drift mode the ship does not rotate with the mouse, so aim is anchored
+    // to the screen center (ship position) rather than the ship facing.
     return {
       x: ndcX * halfWidth + this.cameraTarget.x,
       y: ndcY * halfHeight + this.cameraTarget.y,
@@ -278,38 +281,9 @@ export class Game {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
 
     if (this.mode === MovementMode.DRIFT) {
-      // In drift mode the camera is behind the ship. Build a target orientation
-      // that points the nose back toward the camera (+Z) and banks with strafe,
-      // then blends the nose toward the mouse aim so shooting looks aimed.
-      const strafeStrength = 3;
-      const backDistance = 25;
-      const strafeLength = Math.hypot(input.move.x, input.move.y);
-      const strafeX = strafeLength > 0.001 ? (input.move.x / strafeLength) * strafeStrength : 0;
-      const strafeY = strafeLength > 0.001 ? (input.move.y / strafeLength) * strafeStrength : 0;
-
-      const baseTargetX = this.ship.state.position.x + strafeX;
-      const baseTargetY = this.ship.state.position.y + strafeY;
-      const baseTargetZ = this.ship.state.position.z + backDistance;
-
-      this.shipMesh.lookAt(baseTargetX, baseTargetY, baseTargetZ);
-      this.shipMesh.rotateY(Math.PI / 2);
-      const baseQuaternion = this.shipMesh.quaternion.clone();
-
-      // Mouse-aimed nose: look at the aim point from the ship position.
-      const aimDx = input.aim.x - this.ship.state.position.x;
-      const aimDy = input.aim.y - this.ship.state.position.y;
-      const aimDz = -18;
-      const aimTargetX = this.ship.state.position.x + aimDx;
-      const aimTargetY = this.ship.state.position.y + aimDy;
-      const aimTargetZ = this.ship.state.position.z + aimDz;
-
-      this.shipMesh.lookAt(aimTargetX, aimTargetY, aimTargetZ);
-      this.shipMesh.rotateY(Math.PI / 2);
-      const aimQuaternion = this.shipMesh.quaternion.clone();
-
-      // Blend base drift pose with mouse-aimed pose (70% mouse aim visible).
-      baseQuaternion.slerp(aimQuaternion, 0.7);
-      this.shipMesh.quaternion.copy(baseQuaternion);
+      // In drift mode the camera is strictly behind the ship and the ship must
+      // always face away from the camera (nose into the screen along -Z).
+      this.shipMesh.rotation.set(0, 0, 0);
       return;
     }
 
@@ -495,8 +469,8 @@ export class Game {
         z: 0,
       };
 
-      // Above-and-behind camera: position is behind (+Z) and above (+Y) the
-      // ship, then look down toward a point slightly ahead of the ship.
+      // Strict chase camera: fixed behind and above the ship, then rotated
+      // downward by 15 degrees so it looks down toward the ship.
       this.camera.position.set(
         this.cameraTarget.x,
         this.cameraTarget.y + DRIFT_CAMERA_ABOVE,
@@ -504,9 +478,10 @@ export class Game {
       );
       this.camera.lookAt(
         this.cameraTarget.x,
-        this.cameraTarget.y - 2,
-        this.cameraTarget.z - 8,
+        this.cameraTarget.y,
+        this.cameraTarget.z,
       );
+      this.camera.rotateX(-DRIFT_CAMERA_DOWNWARD_ANGLE);
     } else {
       this.cameraTarget = { x: this.ship.state.position.x, y: this.ship.state.position.y, z: 0 };
       this.camera.position.set(this.cameraTarget.x, this.cameraTarget.y, CAMERA_Z_OFFSET);
