@@ -66,10 +66,15 @@ const CAMERA_LAG = 0.18;
 const CAMERA_DANGER_Z = 1.5;
 const DRIFT_CAMERA_BEHIND = 16;
 const DRIFT_CAMERA_ABOVE = 10;
+const DRIFT_AIM_INTERVAL = 4.0;
+const DRIFT_AIM_HORZ_STRENGTH = 4.0;
 
 interface LiveAsteroid {
   state: AsteroidState;
   mesh: Group;
+  driftStart: Vector3;
+  driftTarget: Vector3;
+  driftTween: number;
 }
 
 interface LiveProjectile {
@@ -87,6 +92,7 @@ export class Game {
   private projectiles: LiveProjectile[] = [];
   private asteroids: LiveAsteroid[] = [];
   private spawnTimer = 0;
+  private driftAimTimer = DRIFT_AIM_INTERVAL;
   private lastTime = 0;
   private running = true;
   private mode: MovementMode = MovementMode.ARENA;
@@ -197,6 +203,12 @@ export class Game {
     if (this.spawnTimer <= 0) {
       this.spawnTimer = SPAWN_INTERVAL;
       this.spawnRandomAsteroid();
+    }
+
+    this.driftAimTimer -= deltaTime;
+    if (this.driftAimTimer <= 0) {
+      this.driftAimTimer = DRIFT_AIM_INTERVAL;
+      this.retargetDriftAsteroids();
     }
 
     this.starfield.update(deltaTime, this.mode, DRIFT_SPEED);
@@ -367,10 +379,19 @@ export class Game {
   private updateAsteroids(deltaTime: number): void {
     for (const asteroid of this.asteroids) {
       if (this.mode === MovementMode.DRIFT) {
+        // Smoothly tween velocity between retarget keyframes so asteroids drift
+        // toward the player's area rather than flying in a straight line.
+        asteroid.driftTween = Math.min(1, asteroid.driftTween + deltaTime / DRIFT_AIM_INTERVAL);
+        asteroid.state.velocity = {
+          x: lerp(asteroid.driftStart.x, asteroid.driftTarget.x, asteroid.driftTween),
+          y: lerp(asteroid.driftStart.y, asteroid.driftTarget.y, asteroid.driftTween),
+          z: lerp(asteroid.driftStart.z, asteroid.driftTarget.z, asteroid.driftTween),
+        };
+
         asteroid.state.position = {
           x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
           y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
-          z: asteroid.state.position.z + (DRIFT_SPEED + asteroid.state.velocity.z) * deltaTime,
+          z: asteroid.state.position.z + asteroid.state.velocity.z * deltaTime,
         };
 
         if (isAsteroidBehindPlayer(asteroid.state.position.z)) {
@@ -394,14 +415,38 @@ export class Game {
     }
   }
 
+  private retargetDriftAsteroids(): void {
+    if (this.mode !== MovementMode.DRIFT) return;
+
+    for (const asteroid of this.asteroids) {
+      const dx = this.ship.state.position.x - asteroid.state.position.x;
+      const dy = this.ship.state.position.y - asteroid.state.position.y;
+      const horizontalLength = Math.hypot(dx, dy);
+      const horizontalX = horizontalLength > 0.001 ? (dx / horizontalLength) * DRIFT_AIM_HORZ_STRENGTH : 0;
+      const horizontalY = horizontalLength > 0.001 ? (dy / horizontalLength) * DRIFT_AIM_HORZ_STRENGTH : 0;
+      const wobbleX = (Math.random() - 0.5) * 2;
+      const wobbleY = (Math.random() - 0.5) * 2;
+
+      asteroid.driftStart = { ...asteroid.state.velocity };
+      asteroid.driftTarget = {
+        x: horizontalX + wobbleX,
+        y: horizontalY + wobbleY,
+        z: DRIFT_SPEED,
+      };
+      asteroid.driftTween = 0;
+    }
+  }
+
   private respawnAsteroidFarAhead(asteroid: LiveAsteroid): void {
     const spawnX = (Math.random() - 0.5) * ARENA_WIDTH * 1.5;
     const spawnY = (Math.random() - 0.5) * ARENA_HEIGHT * 1.5;
     const driftX = (Math.random() - 0.5) * 2;
     const driftY = (Math.random() - 0.5) * 2;
     asteroid.state.position = { x: spawnX, y: spawnY, z: ASTEROID_SPAWN_Z };
-    asteroid.state.velocity = { x: driftX, y: driftY, z: 0 };
-    asteroid.mesh.scale.set(0.1, 0.1, 0.1);
+    asteroid.state.velocity = { x: driftX, y: driftY, z: DRIFT_SPEED };
+    asteroid.driftStart = { ...asteroid.state.velocity };
+    asteroid.driftTarget = { ...asteroid.state.velocity };
+    asteroid.driftTween = 0;
   }
 
   private spawnAsteroid(size: AsteroidSize, position: Vector3, velocity: Vector3): void {
@@ -410,7 +455,13 @@ export class Game {
     const scale = this.mode === MovementMode.DRIFT ? getAsteroidVisualScale(position.z) : 1;
     mesh.scale.set(scale, scale, scale);
     mesh.position.set(position.x, position.y, position.z);
-    this.asteroids.push({ state, mesh });
+    this.asteroids.push({
+      state,
+      mesh,
+      driftStart: { ...velocity },
+      driftTarget: { ...velocity },
+      driftTween: 0,
+    });
     this.scene.add(mesh);
   }
 
@@ -420,7 +471,7 @@ export class Game {
       const y = (Math.random() - 0.5) * ARENA_HEIGHT * 1.2;
       const driftX = (Math.random() - 0.5) * 1.5;
       const driftY = (Math.random() - 0.5) * 1.5;
-      this.spawnAsteroid(AsteroidSize.LARGE, { x, y, z: ASTEROID_SPAWN_Z }, { x: driftX, y: driftY, z: 0 });
+      this.spawnAsteroid(AsteroidSize.LARGE, { x, y, z: ASTEROID_SPAWN_Z }, { x: driftX, y: driftY, z: DRIFT_SPEED });
     } else {
       const x = (Math.random() - 0.5) * ARENA_WIDTH;
       const y = ARENA_HEIGHT / 2 + 1;
