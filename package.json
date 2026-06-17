@@ -6,11 +6,22 @@
   "scripts": {
     "headroom:start": "start \"HEADROOM Proxy\" /min cmd /c \".claude\\headroom-start.bat\"",
     "headroom:stop": "cmd /c \".claude\\headroom-stop.bat\"",
-    "dev": "echo 'Dev server command not configured yet.'",
-    "build": "echo 'Build command not configured yet.'",
-    "typecheck": "echo 'Type check command not configured yet.'",
-    "lint": "echo 'Lint command not configured yet.'",
-    "preview": "echo 'Preview command not configured yet.'",
-    "test": "echo 'Test command not configured yet.'"
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo 'Lint not configured yet.'",
+    "preview": "vite preview",
+    "test": "vitest run && playwright test"
+  },
+  "dependencies": {
+    "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0",
+    "@types/node": "^25.9.3",
+    "@types/three": "^0.184.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.9"
   }
 }

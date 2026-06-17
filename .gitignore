@@ -16,6 +16,12 @@ build/
 # HEADROOM proxy logs
 .headroom/*.log
 
+# Test artifacts (keep directory, ignore generated files)
+.test-artifacts/*.png
+.test-artifacts/*.zip
+playwright-report/
+test-results/
+
 # Remember logs and temporary working files (keep directory, ignore contents)
 .remember/logs/*.log
 .remember/tmp/

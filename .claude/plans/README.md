@@ -35,7 +35,7 @@ Before executing a plan, consider spawning `challenger-agent` to verify:
 
 | File | Status | Description |
 |------|--------|-------------|
-| (none yet) | — | Add the first plan here |
+| `phase-0-foundations.md` | completed | Phase 0 scaffold: Three.js + Vite stack, screenshot harness, npm scripts |
 
 ## Relation to Memory
 
