@@ -1,30 +1,84 @@
-import * as THREE from 'three';
+import { ConeGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial } from 'three';
+import { Vector2, ShipState, InputState } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Ship Mesh
+// My Rules — Ship Logic
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Procedurally build the player ship mesh for Phase 0.
-// Setup: Called by Game to add the ship to the scene.
-// Issues: None.
-// Fix: Cone + cylinder form a simple forward-pointing ship; no external assets.
-// Gotchas: Geometry defaults point up (+Y); rotate -90° around Z so nose is +X.
+// Purpose: Procedural ship mesh + arena-style movement and mouse aim.
+// Setup: Game creates the mesh and owns the Ship instance.
+// Issues: Phase 0 only built a static mesh; Phase 1 needs movement and aim.
+// Fix: Added Ship class with position, velocity, and update method. Movement is
+//      arena-style for Phase 1 (soft forward drift deferred to Phase 2).
+// Gotchas: Geometry points up (+Y) by default; rotate -90° around Z so nose is +X.
+//          Collision radius is smaller than visual radius for fair near-misses.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function createShip(): THREE.Group {
-  const ship = new THREE.Group();
+export const SHIP_SPEED = 7;
+export const SHIP_ACCEL = 12;
+export const SHIP_RADIUS = 0.35;
+export const SHIP_FIRE_COOLDOWN = 0.154;
 
-  const bodyGeometry = new THREE.ConeGeometry(0.5, 1.5, 8);
-  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x00ccff, roughness: 0.4 });
-  const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+export function createShipMesh(): Group {
+  const ship = new Group();
+
+  const bodyGeometry = new ConeGeometry(0.5, 1.5, 8);
+  const bodyMaterial = new MeshStandardMaterial({ color: 0x00ccff, roughness: 0.4 });
+  const body = new Mesh(bodyGeometry, bodyMaterial);
   body.rotation.z = -Math.PI / 2;
   ship.add(body);
 
-  const engineGeometry = new THREE.CylinderGeometry(0.2, 0.3, 0.6, 8);
-  const engineMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
-  const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+  const engineGeometry = new CylinderGeometry(0.2, 0.3, 0.6, 8);
+  const engineMaterial = new MeshStandardMaterial({ color: 0x333333 });
+  const engine = new Mesh(engineGeometry, engineMaterial);
   engine.rotation.z = -Math.PI / 2;
   engine.position.x = -0.8;
   ship.add(engine);
 
   return ship;
+}
+
+export class Ship {
+  state: ShipState;
+  fireCooldown = 0;
+
+  constructor(x = 0, y = -5) {
+    this.state = {
+      position: { x, y },
+      velocity: { x: 0, y: 0 },
+      aim: { x: 1, y: 0 },
+    };
+  }
+
+  update(input: InputState, deltaTime: number): void {
+    const targetVx = input.move.x * SHIP_SPEED;
+    const targetVy = input.move.y * SHIP_SPEED;
+
+    const t = Math.min(1, SHIP_ACCEL * deltaTime);
+    this.state.velocity = {
+      x: this.state.velocity.x + (targetVx - this.state.velocity.x) * t,
+      y: this.state.velocity.y + (targetVy - this.state.velocity.y) * t,
+    };
+
+    this.state.position = {
+      x: this.state.position.x + this.state.velocity.x * deltaTime,
+      y: this.state.position.y + this.state.velocity.y * deltaTime,
+    };
+
+    const aimDx = input.aim.x - this.state.position.x;
+    const aimDy = input.aim.y - this.state.position.y;
+    const aimLength = Math.hypot(aimDx, aimDy);
+    this.state.aim = aimLength > 0
+      ? { x: aimDx / aimLength, y: aimDy / aimLength }
+      : this.state.aim;
+
+    this.fireCooldown = Math.max(0, this.fireCooldown - deltaTime);
+  }
+
+  canFire(): boolean {
+    return this.fireCooldown <= 0;
+  }
+
+  resetCooldown(): void {
+    this.fireCooldown = SHIP_FIRE_COOLDOWN;
+  }
 }
