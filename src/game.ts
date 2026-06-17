@@ -281,9 +281,22 @@ export class Game {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
 
     if (this.mode === MovementMode.DRIFT) {
-      // In drift mode the camera is strictly behind the ship and the ship must
-      // always face away from the camera (nose into the screen along -Z).
-      this.shipMesh.rotation.set(0, 0, 0);
+      // In drift mode the ship moves inwards (forward into the screen along -Z).
+      // Point the nose in that direction and bank slightly toward the strafe
+      // input so steering is readable.
+      const strafeStrength = 3;
+      const forwardDistance = 25;
+      const strafeLength = Math.hypot(input.move.x, input.move.y);
+      const strafeX = strafeLength > 0.001 ? (input.move.x / strafeLength) * strafeStrength : 0;
+      const strafeY = strafeLength > 0.001 ? (input.move.y / strafeLength) * strafeStrength : 0;
+
+      const targetX = this.ship.state.position.x + strafeX;
+      const targetY = this.ship.state.position.y + strafeY;
+      const targetZ = this.ship.state.position.z - forwardDistance;
+
+      this.shipMesh.lookAt(targetX, targetY, targetZ);
+      // Ship nose is local +X, but lookAt aligns local +Z with the target.
+      this.shipMesh.rotateY(Math.PI / 2);
       return;
     }
 
