@@ -259,22 +259,38 @@ export class Game {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
 
     if (this.mode === MovementMode.DRIFT) {
-      // In drift mode the camera is behind the ship. Point the ship's nose
-      // back toward the camera / out of the screen (+Z) with a strafe bias so
-      // steering banks the ship in that direction.
+      // In drift mode the camera is behind the ship. Build a target orientation
+      // that points the nose back toward the camera (+Z) and banks with strafe,
+      // then blends the nose toward the mouse aim so shooting looks aimed.
       const strafeStrength = 3;
       const backDistance = 25;
       const strafeLength = Math.hypot(input.move.x, input.move.y);
       const strafeX = strafeLength > 0.001 ? (input.move.x / strafeLength) * strafeStrength : 0;
       const strafeY = strafeLength > 0.001 ? (input.move.y / strafeLength) * strafeStrength : 0;
 
-      const targetX = this.ship.state.position.x + strafeX;
-      const targetY = this.ship.state.position.y + strafeY;
-      const targetZ = this.ship.state.position.z + backDistance;
+      const baseTargetX = this.ship.state.position.x + strafeX;
+      const baseTargetY = this.ship.state.position.y + strafeY;
+      const baseTargetZ = this.ship.state.position.z + backDistance;
 
-      this.shipMesh.lookAt(targetX, targetY, targetZ);
-      // Ship nose is local +X, but lookAt aligns local +Z with the target.
+      this.shipMesh.lookAt(baseTargetX, baseTargetY, baseTargetZ);
       this.shipMesh.rotateY(Math.PI / 2);
+      const baseQuaternion = this.shipMesh.quaternion.clone();
+
+      // Mouse-aimed nose: look at the aim point from the ship position.
+      const aimDx = input.aim.x - this.ship.state.position.x;
+      const aimDy = input.aim.y - this.ship.state.position.y;
+      const aimDz = -18;
+      const aimTargetX = this.ship.state.position.x + aimDx;
+      const aimTargetY = this.ship.state.position.y + aimDy;
+      const aimTargetZ = this.ship.state.position.z + aimDz;
+
+      this.shipMesh.lookAt(aimTargetX, aimTargetY, aimTargetZ);
+      this.shipMesh.rotateY(Math.PI / 2);
+      const aimQuaternion = this.shipMesh.quaternion.clone();
+
+      // Blend base drift pose with mouse-aimed pose (70% mouse aim visible).
+      baseQuaternion.slerp(aimQuaternion, 0.7);
+      this.shipMesh.quaternion.copy(baseQuaternion);
       return;
     }
 
