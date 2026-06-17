@@ -9,6 +9,7 @@ import { Vector2, InputState } from './types';
 // Fix: Track pressed keys in a Set; clear all keys on window blur.
 // Gotchas: preventDefault on movement/fire keys stops page scrolling. Mouse aim
 //          is stored as a screen-space point; Game converts it to world space.
+//          Tab toggles movement mode and must be edge-detected, not held.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MOVEMENT_KEYS = new Set([
@@ -21,6 +22,7 @@ export class InputManager {
   private mouseX = 0;
   private mouseY = 0;
   private firing = false;
+  private modeTogglePending = false;
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
   private readonly onMouseMove: (event: MouseEvent) => void;
@@ -37,6 +39,10 @@ export class InputManager {
       if (key === ' ') {
         event.preventDefault();
         this.firing = true;
+      }
+      if (key === 'tab') {
+        event.preventDefault();
+        this.modeTogglePending = true;
       }
       this.keys.add(key);
     };
@@ -88,11 +94,14 @@ export class InputManager {
       ? { x: x / length, y: y / length }
       : { x: 0, y: 0 };
 
-    return {
+    const state: InputState = {
       move,
       aim: { x: this.mouseX, y: this.mouseY },
       fire: this.firing,
+      toggleMode: this.modeTogglePending,
     };
+    this.modeTogglePending = false;
+    return state;
   }
 
   destroy(): void {

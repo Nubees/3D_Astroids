@@ -1,16 +1,12 @@
 import {
   AmbientLight,
-  BufferGeometry,
   Color,
   DirectionalLight,
-  Float32BufferAttribute,
   Group,
   Material,
   Mesh,
   MeshBasicMaterial,
   PerspectiveCamera,
-  Points,
-  PointsMaterial,
   Scene,
   SphereGeometry,
   WebGLRenderer,
@@ -20,33 +16,47 @@ import { Ship, createShipMesh, SHIP_RADIUS } from './ship';
 import { createProjectile, isProjectileDead, PROJECTILE_RADIUS, updateProjectile } from './projectile';
 import {
   AsteroidSize,
+  ASTEROID_DANGER_Z,
+  ASTEROID_PASS_Z,
+  ASTEROID_SPAWN_Z,
   SIZE_RADIUS,
   createAsteroidMesh,
   createAsteroidState,
   disposeAsteroidMesh,
+  getAsteroidVisualScale,
+  isAsteroidBehindPlayer,
   splitAsteroid,
 } from './asteroid';
 import { circlesCollide } from './utils/collision';
-import { AsteroidState, InputState, Projectile as ProjectileState, Vector2 } from './types';
+import { AsteroidState, InputState, MovementMode, Projectile as ProjectileState, Vector2, Vector3 } from './types';
+import { Starfield } from './starfield';
+import { createPlanetBeacon } from './planet';
+import { lerp } from './movement';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Own the Three.js scene, camera, renderer, and update/render loop.
+//          Phase 2 adds a second movement mode (drift) with into-the-screen
+//          streaming, soft camera follow, and a distant planet beacon.
 // Setup: Created with a canvas element; starts via requestAnimationFrame.
-// Issues: Phase 0 was static. Phase 1 adds input, movement, shooting,
-//         breakable asteroids, collisions, and death/restart.
-// Fix: Added arena-style gameplay: ship strafes, asteroids spawn and drift,
-//      projectiles split rocks, ship collision triggers fast restart.
+// Issues: Phase 1 was arena-only. Phase 2 needs a clean toggle between arena
+//         and drift without breaking the sacred loop.
+// Fix: Added MovementMode state, drift asteroid spawning + pooling, layered
+//      streaming starfield, soft camera lag, and a mode-toggle HUD.
 // Gotchas: Delta time is clamped to avoid huge jumps after lag spikes.
-//          Arena bounds keep entities within a fixed play area.
-//          Mouse aim is converted from screen pixels to world coordinates.
+//          Mode switch resets ship and camera target to avoid bad transitions.
+//          Collision stays 2D in X/Y; Z depth only gates when a rock is active.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const ARENA_WIDTH = 26;
 const ARENA_HEIGHT = 18;
 const MAX_DELTA_TIME = 0.1;
 const SPAWN_INTERVAL = 4.0;
+const DRIFT_SPEED = 10;
+const CAMERA_Z_OFFSET = 14;
+const CAMERA_LAG = 0.18;
+const CAMERA_DANGER_Z = 1.5;
 
 interface LiveAsteroid {
   state: AsteroidState;
@@ -70,6 +80,11 @@ export class Game {
   private spawnTimer = 0;
   private lastTime = 0;
   private running = true;
+  private mode: MovementMode = MovementMode.ARENA;
+  private cameraTarget: Vector3 = { x: 0, y: 0, z: 0 };
+  private readonly starfield: Starfield;
+  private readonly planetBeacon: Group;
+  private readonly hudModeLabel: HTMLElement;
   private readonly resizeHandler: () => void;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -80,7 +95,7 @@ export class Game {
     const height = window.innerHeight;
 
     this.camera = new PerspectiveCamera(60, width / height, 0.1, 1000);
-    this.camera.position.z = 20;
+    this.camera.position.z = CAMERA_Z_OFFSET;
 
     this.renderer = new WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(width, height);
@@ -95,13 +110,21 @@ export class Game {
     rim.position.set(-10, -5, -5);
     this.scene.add(rim);
 
-    this.scene.add(createStarfield());
+    this.starfield = new Starfield();
+    this.scene.add(this.starfield.getMesh());
+
+    this.planetBeacon = createPlanetBeacon();
+    this.planetBeacon.visible = false;
+    this.scene.add(this.planetBeacon);
 
     this.input = new InputManager();
 
     this.ship = new Ship(0, 0);
     this.shipMesh = createShipMesh();
     this.scene.add(this.shipMesh);
+
+    this.hudModeLabel = this.createHud();
+    this.updateHud();
 
     this.resizeHandler = (): void => {
       const w = window.innerWidth;
@@ -112,7 +135,7 @@ export class Game {
     };
     window.addEventListener('resize', this.resizeHandler);
 
-    this.spawnAsteroid(AsteroidSize.LARGE, { x: 0, y: 8 }, { x: 0, y: -1.5 });
+    this.spawnAsteroid(AsteroidSize.LARGE, { x: 0, y: 8, z: 0 }, { x: 0, y: -1.5, z: 0 });
   }
 
   start(): void {
@@ -144,10 +167,14 @@ export class Game {
       move: rawInput.move,
       aim: this.screenToWorld(rawInput.aim),
       fire: rawInput.fire,
+      toggleMode: rawInput.toggleMode,
     };
 
-    this.ship.update(input, deltaTime);
-    this.clampShipToArena();
+    if (input.toggleMode) {
+      this.switchMode(this.mode === MovementMode.ARENA ? MovementMode.DRIFT : MovementMode.ARENA);
+    }
+
+    this.ship.update(input, deltaTime, this.mode);
     this.updateShipMesh();
 
     if (input.fire && this.ship.canFire()) {
@@ -156,13 +183,62 @@ export class Game {
 
     this.updateProjectiles(deltaTime);
     this.updateAsteroids(deltaTime);
+
     this.spawnTimer -= deltaTime;
     if (this.spawnTimer <= 0) {
       this.spawnTimer = SPAWN_INTERVAL;
       this.spawnRandomAsteroid();
     }
 
+    this.starfield.update(deltaTime, this.mode, DRIFT_SPEED);
+    this.updateCamera(deltaTime);
     this.handleCollisions();
+  }
+
+  private createHud(): HTMLElement {
+    const label = document.createElement('div');
+    label.style.position = 'fixed';
+    label.style.top = '16px';
+    label.style.left = '16px';
+    label.style.color = 'white';
+    label.style.fontFamily = 'sans-serif';
+    label.style.fontSize = '14px';
+    label.style.textShadow = '0 1px 2px black';
+    label.style.pointerEvents = 'none';
+    label.style.userSelect = 'none';
+    document.body.appendChild(label);
+    return label;
+  }
+
+  private updateHud(): void {
+    const instructions = this.mode === MovementMode.ARENA
+      ? 'WASD / Arrows to strafe • Space / Click to fire • Tab: drift mode'
+      : 'WASD / Arrows to strafe • Space / Click to fire • Tab: arena mode';
+    this.hudModeLabel.textContent = `Mode: ${this.mode.toUpperCase()} — ${instructions}`;
+  }
+
+  private switchMode(nextMode: MovementMode): void {
+    this.mode = nextMode;
+    this.ship.state.position = { x: 0, y: 0, z: 0 };
+    this.ship.state.velocity = { x: 0, y: 0 };
+    this.ship.state.aim = { x: 1, y: 0 };
+    this.cameraTarget = { x: 0, y: 0, z: 0 };
+    this.planetBeacon.visible = nextMode === MovementMode.DRIFT;
+
+    for (const asteroid of this.asteroids) {
+      this.scene.remove(asteroid.mesh);
+      disposeAsteroidMesh(asteroid.mesh);
+    }
+    this.asteroids = [];
+
+    for (const projectile of this.projectiles) {
+      this.disposeProjectile(projectile);
+    }
+    this.projectiles = [];
+
+    this.spawnTimer = 0;
+    this.spawnRandomAsteroid();
+    this.updateHud();
   }
 
   private screenToWorld(screen: Vector2): Vector2 {
@@ -171,17 +247,8 @@ export class Game {
     const halfHeight = this.camera.position.z * Math.tan((this.camera.fov * Math.PI) / 360);
     const halfWidth = halfHeight * this.camera.aspect;
     return {
-      x: ndcX * halfWidth,
-      y: ndcY * halfHeight,
-    };
-  }
-
-  private clampShipToArena(): void {
-    const halfW = ARENA_WIDTH / 2;
-    const halfH = ARENA_HEIGHT / 2;
-    this.ship.state.position = {
-      x: Math.max(-halfW, Math.min(halfW, this.ship.state.position.x)),
-      y: Math.max(-halfH, Math.min(halfH, this.ship.state.position.y)),
+      x: ndcX * halfWidth + this.cameraTarget.x,
+      y: ndcY * halfHeight + this.cameraTarget.y,
     };
   }
 
@@ -197,9 +264,10 @@ export class Game {
       x: this.ship.state.aim.x * 0.9,
       y: this.ship.state.aim.y * 0.9,
     };
-    const spawn: Vector2 = {
+    const spawn: Vector3 = {
       x: this.ship.state.position.x + noseOffset.x,
       y: this.ship.state.position.y + noseOffset.y,
+      z: 0,
     };
     const state = createProjectile(spawn, this.ship.state.aim);
     const mesh = new Mesh(
@@ -227,34 +295,90 @@ export class Game {
 
   private updateAsteroids(deltaTime: number): void {
     for (const asteroid of this.asteroids) {
-      asteroid.state.position = {
-        x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
-        y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
-      };
-      asteroid.mesh.position.set(asteroid.state.position.x, asteroid.state.position.y, 0);
+      if (this.mode === MovementMode.DRIFT) {
+        asteroid.state.position = {
+          x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
+          y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
+          z: asteroid.state.position.z + (DRIFT_SPEED + asteroid.state.velocity.z) * deltaTime,
+        };
+
+        if (isAsteroidBehindPlayer(asteroid.state.position.z)) {
+          this.respawnAsteroidFarAhead(asteroid);
+        }
+
+        const scale = getAsteroidVisualScale(asteroid.state.position.z);
+        asteroid.mesh.scale.set(scale, scale, scale);
+      } else {
+        asteroid.state.position = {
+          x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
+          y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
+          z: 0,
+        };
+        asteroid.mesh.scale.set(1, 1, 1);
+      }
+
+      asteroid.mesh.position.set(asteroid.state.position.x, asteroid.state.position.y, asteroid.state.position.z);
       asteroid.mesh.rotation.x += deltaTime * 0.2;
       asteroid.mesh.rotation.y += deltaTime * 0.3;
     }
   }
 
-  private spawnAsteroid(size: AsteroidSize, position: Vector2, velocity: Vector2): void {
+  private respawnAsteroidFarAhead(asteroid: LiveAsteroid): void {
+    const spawnX = (Math.random() - 0.5) * ARENA_WIDTH * 1.5;
+    const spawnY = (Math.random() - 0.5) * ARENA_HEIGHT * 1.5;
+    const driftX = (Math.random() - 0.5) * 2;
+    const driftY = (Math.random() - 0.5) * 2;
+    asteroid.state.position = { x: spawnX, y: spawnY, z: ASTEROID_SPAWN_Z };
+    asteroid.state.velocity = { x: driftX, y: driftY, z: 0 };
+    asteroid.mesh.scale.set(0.1, 0.1, 0.1);
+  }
+
+  private spawnAsteroid(size: AsteroidSize, position: Vector3, velocity: Vector3): void {
     const state = createAsteroidState(size, position, velocity);
     const mesh = createAsteroidMesh(size);
-    mesh.position.set(position.x, position.y, 0);
+    const scale = this.mode === MovementMode.DRIFT ? getAsteroidVisualScale(position.z) : 1;
+    mesh.scale.set(scale, scale, scale);
+    mesh.position.set(position.x, position.y, position.z);
     this.asteroids.push({ state, mesh });
     this.scene.add(mesh);
   }
 
   private spawnRandomAsteroid(): void {
-    const x = (Math.random() - 0.5) * ARENA_WIDTH;
-    const y = ARENA_HEIGHT / 2 + 1;
-    const speed = 1.0 + Math.random();
-    const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.4;
-    const velocity = {
-      x: Math.cos(angle) * speed,
-      y: Math.sin(angle) * speed,
-    };
-    this.spawnAsteroid(AsteroidSize.LARGE, { x, y }, velocity);
+    if (this.mode === MovementMode.DRIFT) {
+      const x = (Math.random() - 0.5) * ARENA_WIDTH * 1.2;
+      const y = (Math.random() - 0.5) * ARENA_HEIGHT * 1.2;
+      const driftX = (Math.random() - 0.5) * 1.5;
+      const driftY = (Math.random() - 0.5) * 1.5;
+      this.spawnAsteroid(AsteroidSize.LARGE, { x, y, z: ASTEROID_SPAWN_Z }, { x: driftX, y: driftY, z: 0 });
+    } else {
+      const x = (Math.random() - 0.5) * ARENA_WIDTH;
+      const y = ARENA_HEIGHT / 2 + 1;
+      const speed = 1.0 + Math.random();
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.4;
+      const velocity = {
+        x: Math.cos(angle) * speed,
+        y: Math.sin(angle) * speed,
+        z: 0,
+      };
+      this.spawnAsteroid(AsteroidSize.LARGE, { x, y, z: 0 }, velocity);
+    }
+  }
+
+  private updateCamera(deltaTime: number): void {
+    if (this.mode === MovementMode.DRIFT) {
+      const t = Math.min(1, deltaTime / CAMERA_LAG);
+      this.cameraTarget = {
+        x: lerp(this.cameraTarget.x, this.ship.state.position.x, t),
+        y: lerp(this.cameraTarget.y, this.ship.state.position.y, t),
+        z: 0,
+      };
+      this.camera.position.set(this.cameraTarget.x, this.cameraTarget.y, CAMERA_Z_OFFSET);
+      this.camera.lookAt(this.ship.state.position.x, this.ship.state.position.y, 0);
+    } else {
+      this.cameraTarget = { x: this.ship.state.position.x, y: this.ship.state.position.y, z: 0 };
+      this.camera.position.set(this.cameraTarget.x, this.cameraTarget.y, CAMERA_Z_OFFSET);
+      this.camera.lookAt(this.ship.state.position.x, this.ship.state.position.y, 0);
+    }
   }
 
   private handleCollisions(): void {
@@ -263,10 +387,16 @@ export class Game {
     for (const asteroid of this.asteroids) {
       let hit = false;
       const asteroidRadius = SIZE_RADIUS[asteroid.state.size];
+      const zActive = this.mode === MovementMode.ARENA || Math.abs(asteroid.state.position.z) < CAMERA_DANGER_Z;
       const remainingProjectiles: LiveProjectile[] = [];
 
       for (const projectile of this.projectiles) {
-        if (!hit && circlesCollide(asteroid.state.position, asteroidRadius, projectile.state.position, PROJECTILE_RADIUS)) {
+        if (!hit && circlesCollide(
+          { x: asteroid.state.position.x, y: asteroid.state.position.y },
+          asteroidRadius,
+          { x: projectile.state.position.x, y: projectile.state.position.y },
+          PROJECTILE_RADIUS,
+        )) {
           hit = true;
           this.disposeProjectile(projectile);
         } else {
@@ -279,7 +409,12 @@ export class Game {
         this.destroyAsteroid(asteroid);
       } else {
         aliveAsteroids.push(asteroid);
-        if (circlesCollide(asteroid.state.position, asteroidRadius * 0.85, this.ship.state.position, SHIP_RADIUS)) {
+        if (zActive && circlesCollide(
+          { x: asteroid.state.position.x, y: asteroid.state.position.y },
+          asteroidRadius * 0.85,
+          { x: this.ship.state.position.x, y: this.ship.state.position.y },
+          SHIP_RADIUS,
+        )) {
           this.respawnShip();
           return;
         }
@@ -315,31 +450,9 @@ export class Game {
     }
     this.projectiles = [];
 
-    this.ship.state.position = { x: 0, y: 0 };
+    this.ship.state.position = { x: 0, y: 0, z: 0 };
     this.ship.state.velocity = { x: 0, y: 0 };
     this.ship.state.aim = { x: 1, y: 0 };
     this.ship.fireCooldown = 0;
   }
-}
-
-function createStarfield(): Points {
-  const geometry = new BufferGeometry();
-  const count = 1200;
-  const positions = new Float32Array(count * 3);
-  const sizes = new Float32Array(count);
-  for (let i = 0; i < count; i += 1) {
-    const i3 = i * 3;
-    positions[i3] = (Math.random() - 0.5) * 200;
-    positions[i3 + 1] = (Math.random() - 0.5) * 200;
-    positions[i3 + 2] = (Math.random() - 0.5) * 100;
-    sizes[i] = Math.random() * 0.2 + 0.05;
-  }
-  geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
-  geometry.setAttribute('size', new Float32BufferAttribute(sizes, 1));
-  const material = new PointsMaterial({
-    color: 0xffffff,
-    size: 0.12,
-    sizeAttenuation: true,
-  });
-  return new Points(geometry, material);
 }
