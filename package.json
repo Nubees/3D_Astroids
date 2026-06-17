@@ -1,0 +1,16 @@
+{
+  "name": "3d-astroids",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Browser-based 3D Asteroids-style game.",
+  "scripts": {
+    "headroom:start": "start \"HEADROOM Proxy\" /min cmd /c \".claude\\headroom-start.bat\"",
+    "headroom:stop": "cmd /c \".claude\\headroom-stop.bat\"",
+    "dev": "echo 'Dev server command not configured yet.'",
+    "build": "echo 'Build command not configured yet.'",
+    "typecheck": "echo 'Type check command not configured yet.'",
+    "lint": "echo 'Lint command not configured yet.'",
+    "preview": "echo 'Preview command not configured yet.'",
+    "test": "echo 'Test command not configured yet.'"
+  }
+}

@@ -37,6 +37,15 @@ Summary...
 - [[agent-team]] — the project agent roster and when to use each.
 - [[skills-index]] — the project skill roster.
 
+## Game design research
+
+- [[asteroids-official-lineage]] — official Atari Asteroids family tree (1979–2021).
+- [[asteroids-modern-descendants]] — modern clones, roguelites, loot shooters, and spiritual successors.
+- [[asteroids-next-edition-design-ideas]] — synthesis of research mapped to our “Next Edition” concept.
+- [[asteroids-next-edition-brainstorm]] — agent brainstorming session and adversarial review.
+- [[asteroids-next-edition-starter-kit]] — detailed Option A starter kit: weapons, asteroids, enemies, loot, phases, risks.
+- [[asteroids-next-edition-spec]] — authoritative Game Design Document / concept spec.
+
 ## Maintenance rule
 
 When a new RAW source is added or a decision changes, Claude should update or create a Wiki entry. Stale wiki entries should be marked with `(STALE — verified [date])` in the description or first line.

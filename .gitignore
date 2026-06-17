@@ -13,6 +13,9 @@ build/
 # Local Claude Code permissions cache
 .claude/settings.local.json
 
+# HEADROOM proxy logs
+.headroom/*.log
+
 # Remember logs and temporary working files (keep directory, ignore contents)
 .remember/logs/*.log
 .remember/tmp/
