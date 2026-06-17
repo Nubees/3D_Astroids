@@ -19,11 +19,8 @@ build/
 # Test artifacts (keep directory, ignore generated files)
 .test-artifacts/*.png
 .test-artifacts/*.zip
-.test-artifacts/*.log
 playwright-report/
 test-results/
-
-# Playwright MCP generated files
 .playwright-mcp/
 
 # Remember logs and temporary working files (keep directory, ignore contents)

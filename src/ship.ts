@@ -1,29 +1,21 @@
 import { ConeGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial } from 'three';
-import { InputState, MovementMode, ShipState } from './types';
-import {
-  ArenaBounds,
-  DriftConfig,
-  updateArenaMovement,
-  updateDriftMovement,
-  updateShipAim,
-} from './movement';
+import { Vector2, ShipState, InputState } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Ship Logic
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Procedural ship mesh + movement and mouse aim.
-// Setup: Game creates the mesh and owns the Ship instance.
-// Issues: Phase 1 baked arena movement directly into Ship.update. Phase 2 needs
-//         to switch between arena and drift movement modes cleanly.
-// Fix: Ship.update now accepts a MovementMode and delegates position/velocity
-//      math to pure helpers in movement.ts. Aim logic is shared.
+// Purpose: Procedural ship mesh + aim logic. Movement is now applied by the
+//          active MovementController so the same Ship can operate in arena or
+//          drift mode.
+// Setup: Game creates the mesh and owns the Ship instance. MovementController
+//        mutates ship.state via apply().
+// Issues: Phase 1 Ship.update combined movement and aim.
+// Fix: Split movement out to controllers; Ship keeps strafe input smoothing
+//      and aim only if the controller does not override velocity entirely.
 // Gotchas: Geometry points up (+Y) by default; rotate -90° around Z so nose is +X.
 //          Collision radius is smaller than visual radius for fair near-misses.
-//          Ship position is now Vector3; z stays 0 in both modes.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const SHIP_SPEED = 7;
-export const SHIP_ACCEL = 12;
 export const SHIP_RADIUS = 0.35;
 export const SHIP_FIRE_COOLDOWN = 0.154;
 
@@ -52,23 +44,20 @@ export class Ship {
 
   constructor(x = 0, y = -5) {
     this.state = {
-      position: { x, y, z: 0 },
+      position: { x, y },
       velocity: { x: 0, y: 0 },
       aim: { x: 1, y: 0 },
-      facing: { x: 1, y: 0 },
     };
   }
 
-  update(input: InputState, deltaTime: number, mode: MovementMode): void {
-    if (mode === MovementMode.ARENA) {
-      const bounds: ArenaBounds = { halfWidth: 13, halfHeight: 9 };
-      this.state = updateArenaMovement(this.state, input, deltaTime, bounds);
-    } else {
-      const driftConfig: DriftConfig = { shipSpeed: SHIP_SPEED + 1, shipAccel: SHIP_ACCEL + 2 };
-      this.state = updateDriftMovement(this.state, input, deltaTime, driftConfig);
-    }
+  update(input: InputState, deltaTime: number): void {
+    const aimDx = input.aim.x - this.state.position.x;
+    const aimDy = input.aim.y - this.state.position.y;
+    const aimLength = Math.hypot(aimDx, aimDy);
+    this.state.aim = aimLength > 0
+      ? { x: aimDx / aimLength, y: aimDy / aimLength }
+      : this.state.aim;
 
-    this.state.aim = updateShipAim(this.state, input);
     this.fireCooldown = Math.max(0, this.fireCooldown - deltaTime);
   }
 

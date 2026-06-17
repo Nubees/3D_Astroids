@@ -1,81 +1,63 @@
 import {
   AmbientLight,
+  BufferGeometry,
   Color,
   DirectionalLight,
+  Float32BufferAttribute,
   Group,
   Material,
   Mesh,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   PerspectiveCamera,
+  Points,
+  PointsMaterial,
   Scene,
   SphereGeometry,
+  TorusGeometry,
   WebGLRenderer,
 } from 'three';
 import { InputManager } from './input';
 import { Ship, createShipMesh, SHIP_RADIUS } from './ship';
-import {
-  createDriftProjectile,
-  createProjectile,
-  DRIFT_PROJECTILE_FORWARD_SPEED,
-  isProjectileDead,
-  PROJECTILE_RADIUS,
-  updateProjectile,
-} from './projectile';
+import { createProjectile, PROJECTILE_RADIUS, updateProjectile } from './projectile';
 import {
   AsteroidSize,
-  ASTEROID_DANGER_Z,
-  ASTEROID_PASS_Z,
-  ASTEROID_SPAWN_Z,
   SIZE_RADIUS,
   createAsteroidMesh,
   createAsteroidState,
   disposeAsteroidMesh,
-  getAsteroidVisualScale,
-  isAsteroidBehindPlayer,
   splitAsteroid,
 } from './asteroid';
 import { circlesCollide } from './utils/collision';
-import { AsteroidState, InputState, MovementMode, Projectile as ProjectileState, Vector2, Vector3 } from './types';
-import { Starfield } from './starfield';
-import { createPlanetBeacon } from './planet';
-import { lerp } from './movement';
+import {
+  AsteroidState,
+  InputState,
+  MovementController,
+  MovementMode,
+  Projectile as ProjectileState,
+  Vector2,
+} from './types';
+import { ArenaMovementController } from './movement/arena-controller';
+import { DriftMovementController } from './movement/drift-controller';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Own the Three.js scene, camera, renderer, and update/render loop.
-//          Phase 2 adds a second movement mode (drift) with into-the-screen
-//          streaming, soft camera follow, and a distant planet beacon.
 // Setup: Created with a canvas element; starts via requestAnimationFrame.
-// Issues: Phase 1 was arena-only. Phase 2 needs a clean toggle between arena
-//         and drift without breaking the sacred loop.
-// Fix: Added MovementMode state, drift asteroid spawning + pooling, layered
-//      streaming starfield, soft camera lag, and a mode-toggle HUD.
-// Gotchas: Delta time is clamped to avoid huge jumps after lag spikes.
-//          Mode switch resets ship and camera target to avoid bad transitions.
-//          Collision stays 2D in X/Y; Z depth only gates when a rock is active.
+// Issues: Phase 1 hard-coded arena movement inside Game.ts.
+// Fix: Phase 2 delegates movement, bounds, camera, spawning, and culling to a
+//      swappable MovementController. Arena is the default; 'M' toggles drift.
+// Gotchas: screenToWorld must add the camera position because the camera now
+//          moves in drift mode. Projectiles and asteroids are culled using the
+//          active controller's bounds, not fixed world limits.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const ARENA_WIDTH = 26;
-const ARENA_HEIGHT = 18;
 const MAX_DELTA_TIME = 0.1;
-const SPAWN_INTERVAL = 4.0;
-const DRIFT_SPEED = 10;
-const CAMERA_Z_OFFSET = 14;
-const CAMERA_LAG = 0.18;
-const CAMERA_DANGER_Z = 1.5;
-const DRIFT_CAMERA_BEHIND = 16;
-const DRIFT_CAMERA_ABOVE = 10;
-const DRIFT_CAMERA_DOWNWARD_ANGLE = 15 * (Math.PI / 180);
-const DRIFT_AIM_INTERVAL = 4.0;
-const DRIFT_AIM_HORZ_STRENGTH = 4.0;
 
 interface LiveAsteroid {
   state: AsteroidState;
   mesh: Group;
-  driftStart: Vector3;
-  driftTarget: Vector3;
-  driftTween: number;
 }
 
 interface LiveProjectile {
@@ -90,17 +72,13 @@ export class Game {
   private readonly input: InputManager;
   private readonly shipMesh: Group;
   private readonly ship: Ship;
+  private readonly starfield: Points;
+  private readonly beacon: Mesh;
   private projectiles: LiveProjectile[] = [];
   private asteroids: LiveAsteroid[] = [];
-  private spawnTimer = 0;
-  private driftAimTimer = DRIFT_AIM_INTERVAL;
+  private controller: MovementController;
   private lastTime = 0;
   private running = true;
-  private mode: MovementMode = MovementMode.ARENA;
-  private cameraTarget: Vector3 = { x: 0, y: 0, z: 0 };
-  private readonly starfield: Starfield;
-  private readonly planetBeacon: Group;
-  private readonly hudModeLabel: HTMLElement;
   private readonly resizeHandler: () => void;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -111,7 +89,7 @@ export class Game {
     const height = window.innerHeight;
 
     this.camera = new PerspectiveCamera(60, width / height, 0.1, 1000);
-    this.camera.position.z = CAMERA_Z_OFFSET;
+    this.camera.position.z = 20;
 
     this.renderer = new WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(width, height);
@@ -126,12 +104,11 @@ export class Game {
     rim.position.set(-10, -5, -5);
     this.scene.add(rim);
 
-    this.starfield = new Starfield();
-    this.scene.add(this.starfield.getMesh());
+    this.starfield = createStarfield();
+    this.scene.add(this.starfield);
 
-    this.planetBeacon = createPlanetBeacon();
-    this.planetBeacon.visible = false;
-    this.scene.add(this.planetBeacon);
+    this.beacon = createBeaconMesh();
+    this.scene.add(this.beacon);
 
     this.input = new InputManager();
 
@@ -139,8 +116,8 @@ export class Game {
     this.shipMesh = createShipMesh();
     this.scene.add(this.shipMesh);
 
-    this.hudModeLabel = this.createHud();
-    this.updateHud();
+    this.controller = new ArenaMovementController();
+    this.resetShipForController();
 
     this.resizeHandler = (): void => {
       const w = window.innerWidth;
@@ -150,12 +127,11 @@ export class Game {
       this.renderer.setSize(w, h);
     };
     window.addEventListener('resize', this.resizeHandler);
-
-    this.spawnAsteroid(AsteroidSize.LARGE, { x: 0, y: 8, z: 0 }, { x: 0, y: -1.5, z: 0 });
   }
 
   start(): void {
     this.lastTime = performance.now();
+    this.controller.spawnConfig.nextSpawnIn = 0.5;
     requestAnimationFrame(this.loop);
   }
 
@@ -178,90 +154,68 @@ export class Game {
   };
 
   private update(deltaTime: number): void {
+    if (this.input.consumeModeToggle()) {
+      this.toggleMode();
+    }
+
+    this.controller.update(deltaTime);
+    this.updateCamera();
+
     const rawInput = this.input.currentState();
     const input: InputState = {
       move: rawInput.move,
       aim: this.screenToWorld(rawInput.aim),
       fire: rawInput.fire,
-      toggleMode: rawInput.toggleMode,
     };
 
-    if (input.toggleMode) {
-      this.switchMode(this.mode === MovementMode.ARENA ? MovementMode.DRIFT : MovementMode.ARENA);
-    }
-
-    this.ship.update(input, deltaTime, this.mode);
-    this.updateShipMesh(input);
+    this.controller.apply(this.ship.state, input, deltaTime);
+    this.ship.state.position = this.controller.clampToBounds(this.ship.state.position);
+    this.ship.update(input, deltaTime);
 
     if (input.fire && this.ship.canFire()) {
       this.fireProjectile();
     }
 
+    this.updateShipMesh();
+    this.updateStarfield();
+    this.updateBeacon();
     this.updateProjectiles(deltaTime);
     this.updateAsteroids(deltaTime);
+    this.updateSpawning(deltaTime);
 
-    this.spawnTimer -= deltaTime;
-    if (this.spawnTimer <= 0) {
-      this.spawnTimer = SPAWN_INTERVAL;
-      this.spawnRandomAsteroid();
-    }
-
-    this.driftAimTimer -= deltaTime;
-    if (this.driftAimTimer <= 0) {
-      this.driftAimTimer = DRIFT_AIM_INTERVAL;
-      this.retargetDriftAsteroids();
-    }
-
-    this.starfield.update(deltaTime, this.mode, DRIFT_SPEED);
-    this.updateCamera(deltaTime);
     this.handleCollisions();
   }
 
-  private createHud(): HTMLElement {
-    const label = document.createElement('div');
-    label.style.position = 'fixed';
-    label.style.top = '16px';
-    label.style.left = '16px';
-    label.style.color = 'white';
-    label.style.fontFamily = 'sans-serif';
-    label.style.fontSize = '14px';
-    label.style.textShadow = '0 1px 2px black';
-    label.style.pointerEvents = 'none';
-    label.style.userSelect = 'none';
-    document.body.appendChild(label);
-    return label;
+  private toggleMode(): void {
+    const nextMode = this.controller.mode === MovementMode.ARENA ? MovementMode.DRIFT : MovementMode.ARENA;
+    this.setController(nextMode);
   }
 
-  private updateHud(): void {
-    const instructions = this.mode === MovementMode.ARENA
-      ? 'WASD / Arrows to strafe • Space / Click to fire • Tab: drift mode'
-      : 'WASD / Arrows to strafe • Space / Click to fire • Tab: arena mode';
-    this.hudModeLabel.textContent = `Mode: ${this.mode.toUpperCase()} — ${instructions}`;
+  private setController(mode: MovementMode): void {
+    this.clearProjectiles();
+    this.clearAsteroids();
+
+    this.controller = mode === MovementMode.ARENA
+      ? new ArenaMovementController()
+      : new DriftMovementController();
+
+    this.resetShipForController();
+    this.controller.spawnConfig.nextSpawnIn = 0.5;
+    this.updateCamera();
+    this.updateStarfield();
+    this.updateBeacon();
   }
 
-  private switchMode(nextMode: MovementMode): void {
-    this.mode = nextMode;
-    this.ship.state.position = { x: 0, y: 0, z: 0 };
+  private resetShipForController(): void {
+    this.ship.state.position = { ...this.controller.cameraPosition };
     this.ship.state.velocity = { x: 0, y: 0 };
     this.ship.state.aim = { x: 1, y: 0 };
-    this.ship.state.facing = { x: 1, y: 0 };
-    this.cameraTarget = { x: 0, y: 0, z: 0 };
-    this.planetBeacon.visible = nextMode === MovementMode.DRIFT;
+    this.ship.fireCooldown = 0;
+  }
 
-    for (const asteroid of this.asteroids) {
-      this.scene.remove(asteroid.mesh);
-      disposeAsteroidMesh(asteroid.mesh);
-    }
-    this.asteroids = [];
-
-    for (const projectile of this.projectiles) {
-      this.disposeProjectile(projectile);
-    }
-    this.projectiles = [];
-
-    this.spawnTimer = 0;
-    this.spawnRandomAsteroid();
-    this.updateHud();
+  private updateCamera(): void {
+    const center = this.controller.cameraPosition;
+    this.camera.position.set(center.x, center.y, 20);
   }
 
   private screenToWorld(screen: Vector2): Vector2 {
@@ -269,80 +223,30 @@ export class Game {
     const ndcY = -(screen.y / window.innerHeight) * 2 + 1;
     const halfHeight = this.camera.position.z * Math.tan((this.camera.fov * Math.PI) / 360);
     const halfWidth = halfHeight * this.camera.aspect;
-    // In drift mode the ship does not rotate with the mouse, so aim is anchored
-    // to the screen center (ship position) rather than the ship facing.
     return {
-      x: ndcX * halfWidth + this.cameraTarget.x,
-      y: ndcY * halfHeight + this.cameraTarget.y,
+      x: ndcX * halfWidth + this.camera.position.x,
+      y: ndcY * halfHeight + this.camera.position.y,
     };
   }
 
-  private updateShipMesh(input: InputState): void {
+  private updateShipMesh(): void {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
-
-    if (this.mode === MovementMode.DRIFT) {
-      // In drift mode the ship moves inwards (forward into the screen along -Z).
-      // Point the nose forward and bank/pitch toward the strafe input so the
-      // player can read steering. Down input (move.y > 0) pitches the nose
-      // downward because the camera is above the ship.
-      const strafeStrength = 3;
-      const verticalPitchStrength = 6;
-      const forwardDistance = 25;
-      const strafeLength = Math.hypot(input.move.x, input.move.y);
-      const moveDirX = strafeLength > 0.001 ? input.move.x / strafeLength : 0;
-      const moveDirY = strafeLength > 0.001 ? input.move.y / strafeLength : 0;
-
-      const targetX = this.ship.state.position.x + moveDirX * strafeStrength;
-      const targetY = this.ship.state.position.y - moveDirY * verticalPitchStrength;
-      const targetZ = this.ship.state.position.z - forwardDistance;
-
-      this.shipMesh.lookAt(targetX, targetY, targetZ);
-      // Ship nose is local +X. lookAt aligns local +Z with the target, so
-      // rotate -90 degrees around Y to make the nose (+X) point forward (-Z).
-      this.shipMesh.rotateY(-Math.PI / 2);
-      return;
-    }
-
-    // Arena mode: ship faces its 2D movement direction.
-    const moveLength = Math.hypot(input.move.x, input.move.y);
-    if (moveLength > 0.001) {
-      this.ship.state.facing = { x: input.move.x / moveLength, y: input.move.y / moveLength };
-    }
-    const angle = Math.atan2(this.ship.state.facing.y, this.ship.state.facing.x);
-    this.shipMesh.rotation.set(0, 0, angle);
+    const angle = Math.atan2(this.ship.state.aim.y, this.ship.state.aim.x);
+    this.shipMesh.rotation.z = angle;
   }
 
   private fireProjectile(): void {
     this.ship.resetCooldown();
-    let spawn: Vector3;
-
-    if (this.mode === MovementMode.ARENA) {
-      const noseOffset: Vector2 = {
-        x: this.ship.state.facing.x * 0.9,
-        y: this.ship.state.facing.y * 0.9,
-      };
-      spawn = {
-        x: this.ship.state.position.x + noseOffset.x,
-        y: this.ship.state.position.y + noseOffset.y,
-        z: 0,
-      };
-    } else {
-      // In drift mode the ship is angled into the screen; spawn at the center
-      // so the blaster still fires from the ship body toward the mouse aim.
-      spawn = { ...this.ship.state.position };
-    }
-
-    let state: ProjectileState;
-    if (this.mode === MovementMode.ARENA) {
-      state = createProjectile(spawn, this.ship.state.aim);
-    } else {
-      const aimOffset: Vector2 = {
-        x: this.ship.state.aim.x - this.ship.state.position.x,
-        y: this.ship.state.aim.y - this.ship.state.position.y,
-      };
-      state = createDriftProjectile(spawn, aimOffset, DRIFT_PROJECTILE_FORWARD_SPEED);
-    }
-
+    const direction = this.ship.state.aim;
+    const noseOffset: Vector2 = {
+      x: direction.x * 0.9,
+      y: direction.y * 0.9,
+    };
+    const spawn: Vector2 = {
+      x: this.ship.state.position.x + noseOffset.x,
+      y: this.ship.state.position.y + noseOffset.y,
+    };
+    const state = createProjectile(spawn, direction);
     const mesh = new Mesh(
       new SphereGeometry(PROJECTILE_RADIUS, 8, 8),
       new MeshBasicMaterial({ color: 0xaaddff }),
@@ -357,7 +261,8 @@ export class Game {
     for (const projectile of this.projectiles) {
       updateProjectile(projectile.state, deltaTime);
       projectile.mesh.position.set(projectile.state.position.x, projectile.state.position.y, 0);
-      if (isProjectileDead(projectile.state, 20)) {
+      const dead = projectile.state.lifetime <= 0 || this.controller.isOutsideCullBounds(projectile.state.position);
+      if (dead) {
         this.disposeProjectile(projectile);
       } else {
         alive.push(projectile);
@@ -367,142 +272,49 @@ export class Game {
   }
 
   private updateAsteroids(deltaTime: number): void {
+    const alive: LiveAsteroid[] = [];
     for (const asteroid of this.asteroids) {
-      if (this.mode === MovementMode.DRIFT) {
-        // Smoothly tween velocity between retarget keyframes so asteroids drift
-        // toward the player's area rather than flying in a straight line.
-        asteroid.driftTween = Math.min(1, asteroid.driftTween + deltaTime / DRIFT_AIM_INTERVAL);
-        asteroid.state.velocity = {
-          x: lerp(asteroid.driftStart.x, asteroid.driftTarget.x, asteroid.driftTween),
-          y: lerp(asteroid.driftStart.y, asteroid.driftTarget.y, asteroid.driftTween),
-          z: lerp(asteroid.driftStart.z, asteroid.driftTarget.z, asteroid.driftTween),
-        };
-
-        asteroid.state.position = {
-          x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
-          y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
-          z: asteroid.state.position.z + asteroid.state.velocity.z * deltaTime,
-        };
-
-        if (isAsteroidBehindPlayer(asteroid.state.position.z)) {
-          this.respawnAsteroidFarAhead(asteroid);
-        }
-
-        const scale = getAsteroidVisualScale(asteroid.state.position.z);
-        asteroid.mesh.scale.set(scale, scale, scale);
-      } else {
-        asteroid.state.position = {
-          x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
-          y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
-          z: 0,
-        };
-        asteroid.mesh.scale.set(1, 1, 1);
-      }
-
-      asteroid.mesh.position.set(asteroid.state.position.x, asteroid.state.position.y, asteroid.state.position.z);
+      asteroid.state.position = {
+        x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
+        y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
+      };
+      asteroid.mesh.position.set(asteroid.state.position.x, asteroid.state.position.y, 0);
       asteroid.mesh.rotation.x += deltaTime * 0.2;
       asteroid.mesh.rotation.y += deltaTime * 0.3;
+
+      if (this.controller.isOutsideCullBounds(asteroid.state.position)) {
+        this.scene.remove(asteroid.mesh);
+        disposeAsteroidMesh(asteroid.mesh);
+      } else {
+        alive.push(asteroid);
+      }
+    }
+    this.asteroids = alive;
+  }
+
+  private updateSpawning(deltaTime: number): void {
+    const cfg = this.controller.spawnConfig;
+    cfg.nextSpawnIn -= deltaTime;
+    if (cfg.nextSpawnIn <= 0) {
+      this.spawnRandomAsteroid();
+      cfg.nextSpawnIn = cfg.minInterval + Math.random() * (cfg.maxInterval - cfg.minInterval);
     }
   }
 
-  private retargetDriftAsteroids(): void {
-    if (this.mode !== MovementMode.DRIFT) return;
-
-    for (const asteroid of this.asteroids) {
-      const dx = this.ship.state.position.x - asteroid.state.position.x;
-      const dy = this.ship.state.position.y - asteroid.state.position.y;
-      const horizontalLength = Math.hypot(dx, dy);
-      const horizontalX = horizontalLength > 0.001 ? (dx / horizontalLength) * DRIFT_AIM_HORZ_STRENGTH : 0;
-      const horizontalY = horizontalLength > 0.001 ? (dy / horizontalLength) * DRIFT_AIM_HORZ_STRENGTH : 0;
-      const wobbleX = (Math.random() - 0.5) * 2;
-      const wobbleY = (Math.random() - 0.5) * 2;
-
-      asteroid.driftStart = { ...asteroid.state.velocity };
-      asteroid.driftTarget = {
-        x: horizontalX + wobbleX,
-        y: horizontalY + wobbleY,
-        z: DRIFT_SPEED,
-      };
-      asteroid.driftTween = 0;
-    }
-  }
-
-  private respawnAsteroidFarAhead(asteroid: LiveAsteroid): void {
-    const spawnX = (Math.random() - 0.5) * ARENA_WIDTH * 1.5;
-    const spawnY = (Math.random() - 0.5) * ARENA_HEIGHT * 1.5;
-    const driftX = (Math.random() - 0.5) * 2;
-    const driftY = (Math.random() - 0.5) * 2;
-    asteroid.state.position = { x: spawnX, y: spawnY, z: ASTEROID_SPAWN_Z };
-    asteroid.state.velocity = { x: driftX, y: driftY, z: DRIFT_SPEED };
-    asteroid.driftStart = { ...asteroid.state.velocity };
-    asteroid.driftTarget = { ...asteroid.state.velocity };
-    asteroid.driftTween = 0;
-  }
-
-  private spawnAsteroid(size: AsteroidSize, position: Vector3, velocity: Vector3): void {
+  private spawnAsteroid(size: AsteroidSize, position: Vector2, velocity: Vector2): void {
     const state = createAsteroidState(size, position, velocity);
     const mesh = createAsteroidMesh(size);
-    const scale = this.mode === MovementMode.DRIFT ? getAsteroidVisualScale(position.z) : 1;
-    mesh.scale.set(scale, scale, scale);
-    mesh.position.set(position.x, position.y, position.z);
-    this.asteroids.push({
-      state,
-      mesh,
-      driftStart: { ...velocity },
-      driftTarget: { ...velocity },
-      driftTween: 0,
-    });
+    mesh.position.set(position.x, position.y, 0);
+    this.asteroids.push({ state, mesh });
     this.scene.add(mesh);
   }
 
   private spawnRandomAsteroid(): void {
-    if (this.mode === MovementMode.DRIFT) {
-      const x = (Math.random() - 0.5) * ARENA_WIDTH * 1.2;
-      const y = (Math.random() - 0.5) * ARENA_HEIGHT * 1.2;
-      const driftX = (Math.random() - 0.5) * 1.5;
-      const driftY = (Math.random() - 0.5) * 1.5;
-      this.spawnAsteroid(AsteroidSize.LARGE, { x, y, z: ASTEROID_SPAWN_Z }, { x: driftX, y: driftY, z: DRIFT_SPEED });
-    } else {
-      const x = (Math.random() - 0.5) * ARENA_WIDTH;
-      const y = ARENA_HEIGHT / 2 + 1;
-      const speed = 1.0 + Math.random();
-      const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.4;
-      const velocity = {
-        x: Math.cos(angle) * speed,
-        y: Math.sin(angle) * speed,
-        z: 0,
-      };
-      this.spawnAsteroid(AsteroidSize.LARGE, { x, y, z: 0 }, velocity);
-    }
-  }
-
-  private updateCamera(deltaTime: number): void {
-    if (this.mode === MovementMode.DRIFT) {
-      const t = Math.min(1, deltaTime / CAMERA_LAG);
-      this.cameraTarget = {
-        x: lerp(this.cameraTarget.x, this.ship.state.position.x, t),
-        y: lerp(this.cameraTarget.y, this.ship.state.position.y, t),
-        z: 0,
-      };
-
-      // Strict chase camera: fixed behind and above the ship, then rotated
-      // downward by 15 degrees so it looks down toward the ship.
-      this.camera.position.set(
-        this.cameraTarget.x,
-        this.cameraTarget.y + DRIFT_CAMERA_ABOVE,
-        this.cameraTarget.z + DRIFT_CAMERA_BEHIND,
-      );
-      this.camera.lookAt(
-        this.cameraTarget.x,
-        this.cameraTarget.y,
-        this.cameraTarget.z,
-      );
-      this.camera.rotateX(-DRIFT_CAMERA_DOWNWARD_ANGLE);
-    } else {
-      this.cameraTarget = { x: this.ship.state.position.x, y: this.ship.state.position.y, z: 0 };
-      this.camera.position.set(this.cameraTarget.x, this.cameraTarget.y, CAMERA_Z_OFFSET);
-      this.camera.lookAt(this.ship.state.position.x, this.ship.state.position.y, 0);
-    }
+    this.spawnAsteroid(
+      AsteroidSize.LARGE,
+      this.controller.getSpawnPosition(),
+      this.controller.getSpawnVelocity(),
+    );
   }
 
   private handleCollisions(): void {
@@ -511,16 +323,10 @@ export class Game {
     for (const asteroid of this.asteroids) {
       let hit = false;
       const asteroidRadius = SIZE_RADIUS[asteroid.state.size];
-      const zActive = this.mode === MovementMode.ARENA || Math.abs(asteroid.state.position.z) < CAMERA_DANGER_Z;
       const remainingProjectiles: LiveProjectile[] = [];
 
       for (const projectile of this.projectiles) {
-        if (!hit && circlesCollide(
-          { x: asteroid.state.position.x, y: asteroid.state.position.y },
-          asteroidRadius,
-          { x: projectile.state.position.x, y: projectile.state.position.y },
-          PROJECTILE_RADIUS,
-        )) {
+        if (!hit && circlesCollide(asteroid.state.position, asteroidRadius, projectile.state.position, PROJECTILE_RADIUS)) {
           hit = true;
           this.disposeProjectile(projectile);
         } else {
@@ -533,12 +339,7 @@ export class Game {
         this.destroyAsteroid(asteroid);
       } else {
         aliveAsteroids.push(asteroid);
-        if (zActive && circlesCollide(
-          { x: asteroid.state.position.x, y: asteroid.state.position.y },
-          asteroidRadius * 0.85,
-          { x: this.ship.state.position.x, y: this.ship.state.position.y },
-          SHIP_RADIUS,
-        )) {
+        if (circlesCollide(asteroid.state.position, asteroidRadius * 0.85, this.ship.state.position, SHIP_RADIUS)) {
           this.respawnShip();
           return;
         }
@@ -568,16 +369,75 @@ export class Game {
     }
   }
 
-  private respawnShip(): void {
+  private clearProjectiles(): void {
     for (const projectile of this.projectiles) {
       this.disposeProjectile(projectile);
     }
     this.projectiles = [];
+  }
 
-    this.ship.state.position = { x: 0, y: 0, z: 0 };
+  private clearAsteroids(): void {
+    for (const asteroid of this.asteroids) {
+      this.scene.remove(asteroid.mesh);
+      disposeAsteroidMesh(asteroid.mesh);
+    }
+    this.asteroids = [];
+  }
+
+  private respawnShip(): void {
+    this.clearProjectiles();
+    this.ship.state.position = { ...this.controller.cameraPosition };
     this.ship.state.velocity = { x: 0, y: 0 };
     this.ship.state.aim = { x: 1, y: 0 };
-    this.ship.state.facing = { x: 1, y: 0 };
     this.ship.fireCooldown = 0;
   }
+
+  private updateStarfield(): void {
+    const center = this.controller.cameraPosition;
+    this.starfield.position.set(-center.x * 0.2, -center.y * 0.2, 0);
+  }
+
+  private updateBeacon(): void {
+    if (this.controller.mode === MovementMode.DRIFT) {
+      this.beacon.visible = true;
+      const center = this.controller.cameraPosition;
+      this.beacon.position.set(center.x + 40, 0, -5);
+    } else {
+      this.beacon.visible = false;
+    }
+  }
+}
+
+function createStarfield(): Points {
+  const geometry = new BufferGeometry();
+  const count = 1200;
+  const positions = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  for (let i = 0; i < count; i += 1) {
+    const i3 = i * 3;
+    positions[i3] = (Math.random() - 0.5) * 200;
+    positions[i3 + 1] = (Math.random() - 0.5) * 200;
+    positions[i3 + 2] = (Math.random() - 0.5) * 100;
+    sizes[i] = Math.random() * 0.2 + 0.05;
+  }
+  geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('size', new Float32BufferAttribute(sizes, 1));
+  const material = new PointsMaterial({
+    color: 0xffffff,
+    size: 0.12,
+    sizeAttenuation: true,
+  });
+  return new Points(geometry, material);
+}
+
+function createBeaconMesh(): Mesh {
+  const geometry = new TorusGeometry(2, 0.25, 8, 24);
+  const material = new MeshStandardMaterial({
+    color: 0xffaa00,
+    emissive: 0xff4400,
+    emissiveIntensity: 0.6,
+  });
+  const mesh = new Mesh(geometry, material);
+  mesh.rotation.x = Math.PI / 2;
+  return mesh;
 }

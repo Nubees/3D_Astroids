@@ -5,24 +5,20 @@ import {
   Mesh,
   MeshStandardMaterial,
 } from 'three';
-import { AsteroidSize as AsteroidSizeType, AsteroidState, Vector3 } from './types';
+import { AsteroidSize as AsteroidSizeType, AsteroidState, Vector2 } from './types';
 
 export { AsteroidSize } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Asteroid Logic
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Procedural Iron Slag asteroids with size tiers, health, splitting,
-//          and drift-mode depth scaling.
+// Purpose: Procedural Iron Slag asteroids with size tiers, health, and splitting.
 // Setup: Game owns the Three.js meshes; this module owns the data + math.
-// Issues: Phase 1 tracked only X/Y. Phase 2 needs asteroids to stream toward
-//         the player along Z and scale visually as they get closer.
-// Fix: Migrated AsteroidState position/velocity to Vector3. Added
-//      `getAsteroidVisualScale` to map Z depth to a render scale, and
-//      `isAsteroidBehindPlayer` for pooled respawn logic.
+// Issues: Phase 0 only built a static mesh; Phase 1 needs state and behavior.
+// Fix: Added AsteroidState, size/health/radius mapping, and a pure split
+//      function that returns child asteroids.
 // Gotchas: Split pieces inherit parent momentum plus an outward impulse so they
 //          drift apart. Visual radius and collision radius are independent.
-//          Collision in Game still uses X/Y at the danger plane (z near 0).
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SIZE_RADIUS: Record<AsteroidSizeType, number> = {
@@ -37,11 +33,7 @@ const SIZE_HEALTH: Record<AsteroidSizeType, number> = {
   [AsteroidSizeType.LARGE]: 4,
 };
 
-export const ASTEROID_SPAWN_Z = -100;
-export const ASTEROID_DANGER_Z = 0;
-export const ASTEROID_PASS_Z = 10;
-
-export function createAsteroidState(size: AsteroidSizeType, position: Vector3, velocity: Vector3): AsteroidState {
+export function createAsteroidState(size: AsteroidSizeType, position: Vector2, velocity: Vector2): AsteroidState {
   return {
     position,
     velocity,
@@ -62,15 +54,6 @@ export function createAsteroidMesh(size: AsteroidSizeType): Group {
   return asteroid;
 }
 
-export function getAsteroidVisualScale(z: number): number {
-  const t = (z - ASTEROID_SPAWN_Z) / (ASTEROID_DANGER_Z - ASTEROID_SPAWN_Z);
-  return Math.max(0.1, Math.min(t, 1.5));
-}
-
-export function isAsteroidBehindPlayer(z: number): boolean {
-  return z > ASTEROID_PASS_Z;
-}
-
 export function splitAsteroid(state: AsteroidState): AsteroidState[] {
   if (state.size === AsteroidSizeType.SMALL) {
     return [];
@@ -85,9 +68,8 @@ export function splitAsteroid(state: AsteroidState): AsteroidState[] {
     const velocity = {
       x: state.velocity.x + Math.cos(angle) * outwardSpeed,
       y: state.velocity.y + Math.sin(angle) * outwardSpeed,
-      z: state.velocity.z,
     };
-    return createAsteroidState(childSize, { ...state.position }, velocity);
+    return createAsteroidState(childSize, state.position, velocity);
   });
 }
 

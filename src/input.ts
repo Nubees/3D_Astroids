@@ -9,7 +9,7 @@ import { Vector2, InputState } from './types';
 // Fix: Track pressed keys in a Set; clear all keys on window blur.
 // Gotchas: preventDefault on movement/fire keys stops page scrolling. Mouse aim
 //          is stored as a screen-space point; Game converts it to world space.
-//          Tab toggles movement mode and must be edge-detected, not held.
+//          'M' is reserved for movement-mode toggle in Phase 2.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MOVEMENT_KEYS = new Set([
@@ -21,8 +21,8 @@ export class InputManager {
   private readonly keys = new Set<string>();
   private mouseX = 0;
   private mouseY = 0;
-  private firing = false;
-  private modeTogglePending = false;
+  private mouseDown = false;
+  private modeToggleRequested = false;
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
   private readonly onMouseMove: (event: MouseEvent) => void;
@@ -33,26 +33,24 @@ export class InputManager {
   constructor() {
     this.onKeyDown = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
-      if (MOVEMENT_KEYS.has(key)) {
+      if (MOVEMENT_KEYS.has(key) || key === ' ') {
         event.preventDefault();
       }
       if (key === ' ') {
-        event.preventDefault();
-        this.firing = true;
+        this.keys.add(key);
+      } else if (key === 'm') {
+        this.modeToggleRequested = true;
+      } else {
+        this.keys.add(key);
       }
-      if (key === 'tab') {
-        event.preventDefault();
-        this.modeTogglePending = true;
-      }
-      this.keys.add(key);
     };
 
     this.onKeyUp = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
-      if (key === ' ') {
-        this.firing = false;
-      }
       this.keys.delete(key);
+      if (key === ' ') {
+        // Handled by keydown toggle; no separate state needed.
+      }
     };
 
     this.onMouseMove = (event: MouseEvent): void => {
@@ -61,16 +59,16 @@ export class InputManager {
     };
 
     this.onMouseDown = (): void => {
-      this.firing = true;
+      this.mouseDown = true;
     };
 
     this.onMouseUp = (): void => {
-      this.firing = false;
+      this.mouseDown = false;
     };
 
     this.onBlur = (): void => {
       this.keys.clear();
-      this.firing = false;
+      this.mouseDown = false;
     };
 
     window.addEventListener('keydown', this.onKeyDown);
@@ -94,14 +92,17 @@ export class InputManager {
       ? { x: x / length, y: y / length }
       : { x: 0, y: 0 };
 
-    const state: InputState = {
+    return {
       move,
       aim: { x: this.mouseX, y: this.mouseY },
-      fire: this.firing,
-      toggleMode: this.modeTogglePending,
+      fire: this.keys.has(' ') || this.mouseDown,
     };
-    this.modeTogglePending = false;
-    return state;
+  }
+
+  consumeModeToggle(): boolean {
+    const requested = this.modeToggleRequested;
+    this.modeToggleRequested = false;
+    return requested;
   }
 
   destroy(): void {

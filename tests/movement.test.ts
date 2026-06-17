@@ -1,112 +1,121 @@
 import { describe, expect, it } from 'vitest';
-import { MovementMode } from '../src/types';
-import {
-  ARENA_SHIP_SPEED,
-  DEFAULT_ARENA_BOUNDS,
-  DEFAULT_DRIFT_CONFIG,
-  updateArenaMovement,
-  updateDriftMovement,
-  updateShipAim,
-} from '../src/movement';
+import { ArenaMovementController } from '../src/movement/arena-controller';
+import { DriftMovementController } from '../src/movement/drift-controller';
+import { InputState, ShipState } from '../src/types';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Movement Unit Tests
+// My Rules — Movement Controller Tests
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Verify pure movement helpers for arena and drift modes.
-// Setup: Vitest loads this file via vitest.config.ts.
-// Issues: Phase 2 extracted movement math from Ship into movement.ts.
-// Fix: Added coverage for acceleration, clamping, drift strafe, and aim.
-// Gotchas: Arena clamps position to bounds; drift allows free strafe. Both
-//          updaters preserve z=0 for the ship.
+// Purpose: Verify arena and drift controllers handle movement, bounds, camera,
+//          spawning, and culling independently.
+// Setup: Create fresh controllers and synthetic ship/input states.
+// Issues: None.
+// Fix: Added coverage for the new Phase 2 strategy classes.
+// Gotchas: Controllers mutate the provided ShipState. Tests must start with a
+//          fresh state to avoid cross-test interference.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const zeroState = () => ({
-  position: { x: 0, y: 0, z: 0 },
-  velocity: { x: 0, y: 0 },
-  aim: { x: 1, y: 0 },
-  facing: { x: 1, y: 0 },
-});
+function createShip(x = 0, y = 0): ShipState {
+  return {
+    position: { x, y },
+    velocity: { x: 0, y: 0 },
+    aim: { x: 1, y: 0 },
+  };
+}
 
-describe('updateArenaMovement', () => {
-  it('accelerates toward the input direction', () => {
-    const state = zeroState();
-    const input = { move: { x: 1, y: 0 }, aim: { x: 1, y: 0 }, fire: false, toggleMode: false };
-    const next = updateArenaMovement(state, input, 0.1, DEFAULT_ARENA_BOUNDS);
+const zeroInput: InputState = {
+  move: { x: 0, y: 0 },
+  aim: { x: 0, y: 0 },
+  fire: false,
+};
 
-    expect(next.velocity.x).toBeGreaterThan(0);
-    expect(next.velocity.x).toBeLessThanOrEqual(ARENA_SHIP_SPEED);
-  });
-
-  it('clamps position inside the arena bounds', () => {
-    const state = {
-      position: { x: 100, y: 100, z: 0 },
-      velocity: { x: 10, y: 10 },
-      aim: { x: 1, y: 0 },
-      facing: { x: 1, y: 0 },
+describe('ArenaMovementController', () => {
+  it('accelerates the ship toward the input direction', () => {
+    const ship = createShip();
+    const input: InputState = {
+      move: { x: 1, y: 0 },
+      aim: { x: 0, y: 0 },
+      fire: false,
     };
-    const input = { move: { x: 1, y: 1 }, aim: { x: 1, y: 0 }, fire: false, toggleMode: false };
-    const next = updateArenaMovement(state, input, 0.1, DEFAULT_ARENA_BOUNDS);
+    const controller = new ArenaMovementController();
 
-    expect(next.position.x).toBeLessThanOrEqual(DEFAULT_ARENA_BOUNDS.halfWidth);
-    expect(next.position.y).toBeLessThanOrEqual(DEFAULT_ARENA_BOUNDS.halfHeight);
+    controller.apply(ship, input, 1.0);
+
+    expect(ship.velocity.x).toBeCloseTo(7, 2);
+    expect(ship.position.x).toBeCloseTo(7, 2);
   });
 
-  it('keeps ship z at 0', () => {
-    const state = zeroState();
-    const input = { move: { x: 1, y: 0 }, aim: { x: 1, y: 0 }, fire: false, toggleMode: false };
-    const next = updateArenaMovement(state, input, 0.1, DEFAULT_ARENA_BOUNDS);
+  it('clamps positions inside arena bounds', () => {
+    const controller = new ArenaMovementController();
 
-    expect(next.position.z).toBe(0);
-  });
-});
-
-describe('updateDriftMovement', () => {
-  it('allows free strafe without arena clamping', () => {
-    const state = {
-      position: { x: 20, y: 20, z: 0 },
-      velocity: { x: 0, y: 0 },
-      aim: { x: 1, y: 0 },
-      facing: { x: 1, y: 0 },
-    };
-    const input = { move: { x: 1, y: 0 }, aim: { x: 1, y: 0 }, fire: false, toggleMode: false };
-    const next = updateDriftMovement(state, input, 0.1, DEFAULT_DRIFT_CONFIG);
-
-    expect(next.position.x).toBeGreaterThan(20);
+    expect(controller.clampToBounds({ x: 100, y: 0 }).x).toBe(13);
+    expect(controller.clampToBounds({ x: -100, y: 0 }).x).toBe(-13);
+    expect(controller.clampToBounds({ x: 0, y: 100 }).y).toBe(9);
+    expect(controller.clampToBounds({ x: 0, y: -100 }).y).toBe(-9);
   });
 
-  it('accelerates toward the input direction', () => {
-    const state = zeroState();
-    const input = { move: { x: 0, y: 1 }, aim: { x: 0, y: 1 }, fire: false, toggleMode: false };
-    const next = updateDriftMovement(state, input, 0.1, DEFAULT_DRIFT_CONFIG);
+  it('reports positions outside the cull bounds', () => {
+    const controller = new ArenaMovementController();
 
-    expect(next.velocity.y).toBeGreaterThan(0);
+    expect(controller.isOutsideCullBounds({ x: 16, y: 0 })).toBe(true);
+    expect(controller.isOutsideCullBounds({ x: 0, y: 12 })).toBe(true);
+    expect(controller.isOutsideCullBounds({ x: 0, y: 0 })).toBe(false);
   });
 
-  it('keeps ship z at 0', () => {
-    const state = zeroState();
-    const input = { move: { x: 0, y: 1 }, aim: { x: 0, y: 1 }, fire: false, toggleMode: false };
-    const next = updateDriftMovement(state, input, 0.1, DEFAULT_DRIFT_CONFIG);
+  it('spawns asteroids at the top of the arena', () => {
+    const controller = new ArenaMovementController();
 
-    expect(next.position.z).toBe(0);
+    const position = controller.getSpawnPosition();
+    expect(position.y).toBe(10);
+    expect(position.x).toBeGreaterThanOrEqual(-13);
+    expect(position.x).toBeLessThanOrEqual(13);
+
+    const velocity = controller.getSpawnVelocity();
+    expect(velocity.y).toBeLessThan(0);
   });
 });
 
-describe('updateShipAim', () => {
-  it('points toward the aim world position', () => {
-    const state = zeroState();
-    const input = { move: { x: 0, y: 0 }, aim: { x: 10, y: 0 }, fire: false, toggleMode: false };
-    const aim = updateShipAim(state, input);
+describe('DriftMovementController', () => {
+  it('pushes the ship forward even with no input', () => {
+    const ship = createShip();
+    const controller = new DriftMovementController();
 
-    expect(aim.x).toBeCloseTo(1);
-    expect(aim.y).toBeCloseTo(0);
+    controller.apply(ship, zeroInput, 1.0);
+
+    expect(ship.velocity.x).toBeCloseTo(3.5, 2);
+    expect(ship.position.x).toBeCloseTo(3.5, 2);
   });
 
-  it('preserves the previous aim when aim input is zero length', () => {
-    const state = zeroState();
-    const input = { move: { x: 0, y: 0 }, aim: { x: 0, y: 0 }, fire: false, toggleMode: false };
-    const aim = updateShipAim(state, input);
+  it('advances the camera with the forward current', () => {
+    const controller = new DriftMovementController();
 
-    expect(aim.x).toBeCloseTo(1);
-    expect(aim.y).toBeCloseTo(0);
+    controller.update(1.0);
+
+    expect(controller.cameraPosition.x).toBeCloseTo(9.5, 2);
+  });
+
+  it('clamps positions relative to the camera', () => {
+    const controller = new DriftMovementController();
+    controller.cameraPosition = { x: 100, y: 10 };
+
+    const clamped = controller.clampToBounds({ x: 200, y: 0 });
+    expect(clamped.x).toBe(112);
+    expect(clamped.y).toBe(2);
+  });
+
+  it('culls objects far outside the camera view', () => {
+    const controller = new DriftMovementController();
+    controller.cameraPosition = { x: 100, y: 0 };
+
+    expect(controller.isOutsideCullBounds({ x: 120, y: 0 })).toBe(false);
+    expect(controller.isOutsideCullBounds({ x: 200, y: 0 })).toBe(true);
+  });
+
+  it('spawns asteroids ahead of the camera', () => {
+    const controller = new DriftMovementController();
+    controller.cameraPosition = { x: 100, y: 0 };
+
+    const position = controller.getSpawnPosition();
+    expect(position.x).toBeGreaterThan(controller.cameraPosition.x + 20);
   });
 });
