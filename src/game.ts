@@ -255,25 +255,56 @@ export class Game {
 
   private updateShipMesh(input: InputState): void {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
+
+    if (this.mode === MovementMode.DRIFT) {
+      // In drift mode the ship flies into the screen. Orient it so its nose
+      // points along -Z (away from camera) with a small bias toward the strafe
+      // direction so it banks/pitches when the player steers.
+      const strafeStrength = 3;
+      const forwardDistance = 25;
+      const strafeLength = Math.hypot(input.move.x, input.move.y);
+      const strafeX = strafeLength > 0.001 ? (input.move.x / strafeLength) * strafeStrength : 0;
+      const strafeY = strafeLength > 0.001 ? (input.move.y / strafeLength) * strafeStrength : 0;
+
+      const targetX = this.ship.state.position.x + strafeX;
+      const targetY = this.ship.state.position.y + strafeY;
+      const targetZ = this.ship.state.position.z - forwardDistance;
+
+      this.shipMesh.lookAt(targetX, targetY, targetZ);
+      // Ship nose is local +X, but lookAt aligns local +Z with the target.
+      this.shipMesh.rotateY(Math.PI / 2);
+      return;
+    }
+
+    // Arena mode: ship faces its 2D movement direction.
     const moveLength = Math.hypot(input.move.x, input.move.y);
     if (moveLength > 0.001) {
       this.ship.state.facing = { x: input.move.x / moveLength, y: input.move.y / moveLength };
     }
     const angle = Math.atan2(this.ship.state.facing.y, this.ship.state.facing.x);
-    this.shipMesh.rotation.z = angle;
+    this.shipMesh.rotation.set(0, 0, angle);
   }
 
   private fireProjectile(): void {
     this.ship.resetCooldown();
-    const noseOffset: Vector2 = {
-      x: this.ship.state.facing.x * 0.9,
-      y: this.ship.state.facing.y * 0.9,
-    };
-    const spawn: Vector3 = {
-      x: this.ship.state.position.x + noseOffset.x,
-      y: this.ship.state.position.y + noseOffset.y,
-      z: 0,
-    };
+    let spawn: Vector3;
+
+    if (this.mode === MovementMode.ARENA) {
+      const noseOffset: Vector2 = {
+        x: this.ship.state.facing.x * 0.9,
+        y: this.ship.state.facing.y * 0.9,
+      };
+      spawn = {
+        x: this.ship.state.position.x + noseOffset.x,
+        y: this.ship.state.position.y + noseOffset.y,
+        z: 0,
+      };
+    } else {
+      // In drift mode the ship is angled into the screen; spawn at the center
+      // so the blaster still fires from the ship body toward the mouse aim.
+      spawn = { ...this.ship.state.position };
+    }
+
     const state = createProjectile(spawn, this.ship.state.aim);
     const mesh = new Mesh(
       new SphereGeometry(PROJECTILE_RADIUS, 8, 8),
