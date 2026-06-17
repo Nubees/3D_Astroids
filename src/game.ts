@@ -295,8 +295,9 @@ export class Game {
       const targetZ = this.ship.state.position.z - forwardDistance;
 
       this.shipMesh.lookAt(targetX, targetY, targetZ);
-      // Ship nose is local +X, but lookAt aligns local +Z with the target.
-      this.shipMesh.rotateY(Math.PI / 2);
+      // Ship nose is local +X. lookAt aligns local +Z with the target, so
+      // rotate -90 degrees around Y to make the nose (+X) point forward (-Z).
+      this.shipMesh.rotateY(-Math.PI / 2);
       return;
     }
 
