@@ -257,18 +257,18 @@ export class Game {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
 
     if (this.mode === MovementMode.DRIFT) {
-      // In drift mode the ship flies into the screen. Orient it so its nose
-      // points along -Z (away from camera) with a small bias toward the strafe
-      // direction so it banks/pitches when the player steers.
+      // In drift mode the camera is behind the ship. Point the ship's nose
+      // back toward the camera / out of the screen (+Z) with a strafe bias so
+      // steering banks the ship in that direction.
       const strafeStrength = 3;
-      const forwardDistance = 25;
+      const backDistance = 25;
       const strafeLength = Math.hypot(input.move.x, input.move.y);
       const strafeX = strafeLength > 0.001 ? (input.move.x / strafeLength) * strafeStrength : 0;
       const strafeY = strafeLength > 0.001 ? (input.move.y / strafeLength) * strafeStrength : 0;
 
       const targetX = this.ship.state.position.x + strafeX;
       const targetY = this.ship.state.position.y + strafeY;
-      const targetZ = this.ship.state.position.z - forwardDistance;
+      const targetZ = this.ship.state.position.z + backDistance;
 
       this.shipMesh.lookAt(targetX, targetY, targetZ);
       // Ship nose is local +X, but lookAt aligns local +Z with the target.
