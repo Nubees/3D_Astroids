@@ -9,7 +9,7 @@ import { Vector2, InputState } from './types';
 // Fix: Track pressed keys in a Set; clear all keys on window blur.
 // Gotchas: preventDefault on movement/fire keys stops page scrolling. Mouse aim
 //          is stored as a screen-space point; Game converts it to world space.
-//          'M' is reserved for movement-mode toggle in Phase 2.
+//          Mode toggle was removed after Phase 2 locked Arena as the main mode.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MOVEMENT_KEYS = new Set([
@@ -22,7 +22,6 @@ export class InputManager {
   private mouseX = 0;
   private mouseY = 0;
   private mouseDown = false;
-  private modeToggleRequested = false;
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
   private readonly onMouseMove: (event: MouseEvent) => void;
@@ -36,21 +35,12 @@ export class InputManager {
       if (MOVEMENT_KEYS.has(key) || key === ' ') {
         event.preventDefault();
       }
-      if (key === ' ') {
-        this.keys.add(key);
-      } else if (key === 'm') {
-        this.modeToggleRequested = true;
-      } else {
-        this.keys.add(key);
-      }
+      this.keys.add(key);
     };
 
     this.onKeyUp = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
       this.keys.delete(key);
-      if (key === ' ') {
-        // Handled by keydown toggle; no separate state needed.
-      }
     };
 
     this.onMouseMove = (event: MouseEvent): void => {
@@ -97,12 +87,6 @@ export class InputManager {
       aim: { x: this.mouseX, y: this.mouseY },
       fire: this.keys.has(' ') || this.mouseDown,
     };
-  }
-
-  consumeModeToggle(): boolean {
-    const requested = this.modeToggleRequested;
-    this.modeToggleRequested = false;
-    return requested;
   }
 
   destroy(): void {

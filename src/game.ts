@@ -14,7 +14,6 @@ import {
   PointsMaterial,
   Scene,
   SphereGeometry,
-  TorusGeometry,
   WebGLRenderer,
 } from 'three';
 import { InputManager } from './input';
@@ -32,13 +31,10 @@ import { circlesCollide } from './utils/collision';
 import {
   AsteroidState,
   InputState,
-  MovementController,
-  MovementMode,
   Projectile as ProjectileState,
   Vector2,
 } from './types';
 import { ArenaMovementController } from './movement/arena-controller';
-import { DriftMovementController } from './movement/drift-controller';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -46,11 +42,10 @@ import { DriftMovementController } from './movement/drift-controller';
 // Purpose: Own the Three.js scene, camera, renderer, and update/render loop.
 // Setup: Created with a canvas element; starts via requestAnimationFrame.
 // Issues: Phase 1 hard-coded arena movement inside Game.ts.
-// Fix: Phase 2 delegates movement, bounds, camera, spawning, and culling to a
-//      swappable MovementController. Arena is the default; 'M' toggles drift.
-// Gotchas: screenToWorld must add the camera position because the camera now
-//          moves in drift mode. Projectiles and asteroids are culled using the
-//          active controller's bounds, not fixed world limits.
+// Fix: Phase 2 extracted an ArenaMovementController strategy; drift was tested
+//      but the user decided to lock Arena as the main movement identity.
+// Gotchas: The MovementController abstraction is kept so drift can return as a
+//          variant mode later. Camera stays static at the world origin in Arena.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -73,10 +68,9 @@ export class Game {
   private readonly shipMesh: Group;
   private readonly ship: Ship;
   private readonly starfield: Points;
-  private readonly beacon: Mesh;
   private projectiles: LiveProjectile[] = [];
   private asteroids: LiveAsteroid[] = [];
-  private controller: MovementController;
+  private readonly controller: ArenaMovementController;
   private lastTime = 0;
   private running = true;
   private readonly resizeHandler: () => void;
@@ -107,9 +101,6 @@ export class Game {
     this.starfield = createStarfield();
     this.scene.add(this.starfield);
 
-    this.beacon = createBeaconMesh();
-    this.scene.add(this.beacon);
-
     this.input = new InputManager();
 
     this.ship = new Ship(0, 0);
@@ -117,7 +108,6 @@ export class Game {
     this.scene.add(this.shipMesh);
 
     this.controller = new ArenaMovementController();
-    this.resetShipForController();
 
     this.resizeHandler = (): void => {
       const w = window.innerWidth;
@@ -154,12 +144,7 @@ export class Game {
   };
 
   private update(deltaTime: number): void {
-    if (this.input.consumeModeToggle()) {
-      this.toggleMode();
-    }
-
-    this.controller.update(deltaTime);
-    this.updateCamera();
+    this.controller.update();
 
     const rawInput = this.input.currentState();
     const input: InputState = {
@@ -177,45 +162,11 @@ export class Game {
     }
 
     this.updateShipMesh();
-    this.updateStarfield();
-    this.updateBeacon();
     this.updateProjectiles(deltaTime);
     this.updateAsteroids(deltaTime);
     this.updateSpawning(deltaTime);
 
     this.handleCollisions();
-  }
-
-  private toggleMode(): void {
-    const nextMode = this.controller.mode === MovementMode.ARENA ? MovementMode.DRIFT : MovementMode.ARENA;
-    this.setController(nextMode);
-  }
-
-  private setController(mode: MovementMode): void {
-    this.clearProjectiles();
-    this.clearAsteroids();
-
-    this.controller = mode === MovementMode.ARENA
-      ? new ArenaMovementController()
-      : new DriftMovementController();
-
-    this.resetShipForController();
-    this.controller.spawnConfig.nextSpawnIn = 0.5;
-    this.updateCamera();
-    this.updateStarfield();
-    this.updateBeacon();
-  }
-
-  private resetShipForController(): void {
-    this.ship.state.position = { ...this.controller.cameraPosition };
-    this.ship.state.velocity = { x: 0, y: 0 };
-    this.ship.state.aim = { x: 1, y: 0 };
-    this.ship.fireCooldown = 0;
-  }
-
-  private updateCamera(): void {
-    const center = this.controller.cameraPosition;
-    this.camera.position.set(center.x, center.y, 20);
   }
 
   private screenToWorld(screen: Vector2): Vector2 {
@@ -224,8 +175,8 @@ export class Game {
     const halfHeight = this.camera.position.z * Math.tan((this.camera.fov * Math.PI) / 360);
     const halfWidth = halfHeight * this.camera.aspect;
     return {
-      x: ndcX * halfWidth + this.camera.position.x,
-      y: ndcY * halfHeight + this.camera.position.y,
+      x: ndcX * halfWidth,
+      y: ndcY * halfHeight,
     };
   }
 
@@ -369,42 +320,16 @@ export class Game {
     }
   }
 
-  private clearProjectiles(): void {
+  private respawnShip(): void {
     for (const projectile of this.projectiles) {
       this.disposeProjectile(projectile);
     }
     this.projectiles = [];
-  }
 
-  private clearAsteroids(): void {
-    for (const asteroid of this.asteroids) {
-      this.scene.remove(asteroid.mesh);
-      disposeAsteroidMesh(asteroid.mesh);
-    }
-    this.asteroids = [];
-  }
-
-  private respawnShip(): void {
-    this.clearProjectiles();
-    this.ship.state.position = { ...this.controller.cameraPosition };
+    this.ship.state.position = { x: 0, y: 0 };
     this.ship.state.velocity = { x: 0, y: 0 };
     this.ship.state.aim = { x: 1, y: 0 };
     this.ship.fireCooldown = 0;
-  }
-
-  private updateStarfield(): void {
-    const center = this.controller.cameraPosition;
-    this.starfield.position.set(-center.x * 0.2, -center.y * 0.2, 0);
-  }
-
-  private updateBeacon(): void {
-    if (this.controller.mode === MovementMode.DRIFT) {
-      this.beacon.visible = true;
-      const center = this.controller.cameraPosition;
-      this.beacon.position.set(center.x + 40, 0, -5);
-    } else {
-      this.beacon.visible = false;
-    }
   }
 }
 
@@ -428,16 +353,4 @@ function createStarfield(): Points {
     sizeAttenuation: true,
   });
   return new Points(geometry, material);
-}
-
-function createBeaconMesh(): Mesh {
-  const geometry = new TorusGeometry(2, 0.25, 8, 24);
-  const material = new MeshStandardMaterial({
-    color: 0xffaa00,
-    emissive: 0xff4400,
-    emissiveIntensity: 0.6,
-  });
-  const mesh = new Mesh(geometry, material);
-  mesh.rotation.x = Math.PI / 2;
-  return mesh;
 }

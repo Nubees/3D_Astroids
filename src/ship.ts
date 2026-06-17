@@ -4,14 +4,12 @@ import { Vector2, ShipState, InputState } from './types';
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Ship Logic
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Procedural ship mesh + aim logic. Movement is now applied by the
-//          active MovementController so the same Ship can operate in arena or
-//          drift mode.
-// Setup: Game creates the mesh and owns the Ship instance. MovementController
-//        mutates ship.state via apply().
+// Purpose: Procedural ship mesh + aim logic. Movement is applied by the
+//          active MovementController; Ship only handles aiming and fire cooldown.
+// Setup: Game creates the mesh and owns the Ship instance. The controller mutates
+//        ship.state via apply().
 // Issues: Phase 1 Ship.update combined movement and aim.
-// Fix: Split movement out to controllers; Ship keeps strafe input smoothing
-//      and aim only if the controller does not override velocity entirely.
+// Fix: Split movement out to controllers; Ship keeps only aim and fire timing.
 // Gotchas: Geometry points up (+Y) by default; rotate -90° around Z so nose is +X.
 //          Collision radius is smaller than visual radius for fair near-misses.
 // ═══════════════════════════════════════════════════════════════════════════
