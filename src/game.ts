@@ -13,7 +13,14 @@ import {
 } from 'three';
 import { InputManager } from './input';
 import { Ship, createShipMesh, SHIP_RADIUS } from './ship';
-import { createProjectile, isProjectileDead, PROJECTILE_RADIUS, updateProjectile } from './projectile';
+import {
+  createDriftProjectile,
+  createProjectile,
+  DRIFT_PROJECTILE_FORWARD_SPEED,
+  isProjectileDead,
+  PROJECTILE_RADIUS,
+  updateProjectile,
+} from './projectile';
 import {
   AsteroidSize,
   ASTEROID_DANGER_Z,
@@ -323,7 +330,17 @@ export class Game {
       spawn = { ...this.ship.state.position };
     }
 
-    const state = createProjectile(spawn, this.ship.state.aim);
+    let state: ProjectileState;
+    if (this.mode === MovementMode.ARENA) {
+      state = createProjectile(spawn, this.ship.state.aim);
+    } else {
+      const aimOffset: Vector2 = {
+        x: this.ship.state.aim.x - this.ship.state.position.x,
+        y: this.ship.state.aim.y - this.ship.state.position.y,
+      };
+      state = createDriftProjectile(spawn, aimOffset, DRIFT_PROJECTILE_FORWARD_SPEED);
+    }
+
     const mesh = new Mesh(
       new SphereGeometry(PROJECTILE_RADIUS, 8, 8),
       new MeshBasicMaterial({ color: 0xaaddff }),
