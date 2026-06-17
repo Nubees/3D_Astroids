@@ -65,10 +65,12 @@ export function updateArenaMovement(
 
   const rawX = state.position.x + velocity.x * deltaTime;
   const rawY = state.position.y + velocity.y * deltaTime;
+  const facing = getMovementFacing(input.move, state.facing);
 
   return {
     ...state,
     velocity,
+    facing,
     position: {
       x: clamp(rawX, -bounds.halfWidth, bounds.halfWidth),
       y: clamp(rawY, -bounds.halfHeight, bounds.halfHeight),
@@ -91,10 +93,12 @@ export function updateDriftMovement(
     x: state.velocity.x + (targetVx - state.velocity.x) * t,
     y: state.velocity.y + (targetVy - state.velocity.y) * t,
   };
+  const facing = getMovementFacing(input.move, state.facing);
 
   return {
     ...state,
     velocity,
+    facing,
     position: {
       x: state.position.x + velocity.x * deltaTime,
       y: state.position.y + velocity.y * deltaTime,
@@ -110,6 +114,13 @@ export function updateShipAim(state: ShipState, input: InputState): Vector2 {
   return aimLength > 0
     ? { x: aimDx / aimLength, y: aimDy / aimLength }
     : state.aim;
+}
+
+export function getMovementFacing(move: Vector2, currentFacing: Vector2): Vector2 {
+  const length = Math.hypot(move.x, move.y);
+  return length > 0.001
+    ? { x: move.x / length, y: move.y / length }
+    : currentFacing;
 }
 
 export function toVector3(v: Vector2, z = 0): Vector3 {

@@ -39,6 +39,7 @@ export interface ShipState {
   position: Vector3;
   velocity: Vector2;
   aim: Vector2;
+  facing: Vector2;
 }
 
 export interface Projectile {

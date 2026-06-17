@@ -55,6 +55,7 @@ export class Ship {
       position: { x, y, z: 0 },
       velocity: { x: 0, y: 0 },
       aim: { x: 1, y: 0 },
+      facing: { x: 1, y: 0 },
     };
   }
 

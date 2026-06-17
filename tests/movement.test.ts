@@ -24,6 +24,7 @@ const zeroState = () => ({
   position: { x: 0, y: 0, z: 0 },
   velocity: { x: 0, y: 0 },
   aim: { x: 1, y: 0 },
+  facing: { x: 1, y: 0 },
 });
 
 describe('updateArenaMovement', () => {
@@ -41,6 +42,7 @@ describe('updateArenaMovement', () => {
       position: { x: 100, y: 100, z: 0 },
       velocity: { x: 10, y: 10 },
       aim: { x: 1, y: 0 },
+      facing: { x: 1, y: 0 },
     };
     const input = { move: { x: 1, y: 1 }, aim: { x: 1, y: 0 }, fire: false, toggleMode: false };
     const next = updateArenaMovement(state, input, 0.1, DEFAULT_ARENA_BOUNDS);
@@ -64,6 +66,7 @@ describe('updateDriftMovement', () => {
       position: { x: 20, y: 20, z: 0 },
       velocity: { x: 0, y: 0 },
       aim: { x: 1, y: 0 },
+      facing: { x: 1, y: 0 },
     };
     const input = { move: { x: 1, y: 0 }, aim: { x: 1, y: 0 }, fire: false, toggleMode: false };
     const next = updateDriftMovement(state, input, 0.1, DEFAULT_DRIFT_CONFIG);

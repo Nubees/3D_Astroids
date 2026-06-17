@@ -175,7 +175,7 @@ export class Game {
     }
 
     this.ship.update(input, deltaTime, this.mode);
-    this.updateShipMesh();
+    this.updateShipMesh(input);
 
     if (input.fire && this.ship.canFire()) {
       this.fireProjectile();
@@ -222,6 +222,7 @@ export class Game {
     this.ship.state.position = { x: 0, y: 0, z: 0 };
     this.ship.state.velocity = { x: 0, y: 0 };
     this.ship.state.aim = { x: 1, y: 0 };
+    this.ship.state.facing = { x: 1, y: 0 };
     this.cameraTarget = { x: 0, y: 0, z: 0 };
     this.planetBeacon.visible = nextMode === MovementMode.DRIFT;
 
@@ -252,17 +253,21 @@ export class Game {
     };
   }
 
-  private updateShipMesh(): void {
+  private updateShipMesh(input: InputState): void {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
-    const angle = Math.atan2(this.ship.state.aim.y, this.ship.state.aim.x);
+    const moveLength = Math.hypot(input.move.x, input.move.y);
+    if (moveLength > 0.001) {
+      this.ship.state.facing = { x: input.move.x / moveLength, y: input.move.y / moveLength };
+    }
+    const angle = Math.atan2(this.ship.state.facing.y, this.ship.state.facing.x);
     this.shipMesh.rotation.z = angle;
   }
 
   private fireProjectile(): void {
     this.ship.resetCooldown();
     const noseOffset: Vector2 = {
-      x: this.ship.state.aim.x * 0.9,
-      y: this.ship.state.aim.y * 0.9,
+      x: this.ship.state.facing.x * 0.9,
+      y: this.ship.state.facing.y * 0.9,
     };
     const spawn: Vector3 = {
       x: this.ship.state.position.x + noseOffset.x,
@@ -453,6 +458,7 @@ export class Game {
     this.ship.state.position = { x: 0, y: 0, z: 0 };
     this.ship.state.velocity = { x: 0, y: 0 };
     this.ship.state.aim = { x: 1, y: 0 };
+    this.ship.state.facing = { x: 1, y: 0 };
     this.ship.fireCooldown = 0;
   }
 }
