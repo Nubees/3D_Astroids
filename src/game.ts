@@ -35,6 +35,21 @@ import {
   Vector2,
 } from './types';
 import { ArenaMovementController } from './movement/arena-controller';
+import {
+  ShieldState,
+  createShieldState,
+  updateShield,
+  absorbHit,
+  SHIELD_MAX_ENERGY,
+} from './shield';
+import {
+  WaveState,
+  awardBreak,
+  createWaveState,
+  getAsteroidBaseSpeed,
+  getSpawnInterval,
+  updateWave,
+} from './waves';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -46,6 +61,8 @@ import { ArenaMovementController } from './movement/arena-controller';
 //      but the user decided to lock Arena as the main movement identity.
 // Gotchas: The MovementController abstraction is kept so drift can return as a
 //          variant mode later. Camera stays static at the world origin in Arena.
+//          Shield is a panic button with energy and cooldown. Wave pacing
+//          increases spawn rate and asteroid speed over time.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -68,12 +85,17 @@ export class Game {
   private readonly shipMesh: Group;
   private readonly ship: Ship;
   private readonly starfield: Points;
+  private readonly shieldMesh: Mesh;
+  private readonly shield: ShieldState;
+  private readonly wave: WaveState;
   private projectiles: LiveProjectile[] = [];
   private asteroids: LiveAsteroid[] = [];
   private readonly controller: ArenaMovementController;
   private lastTime = 0;
   private running = true;
   private readonly resizeHandler: () => void;
+  private scoreElement: HTMLDivElement | null = null;
+  private waveElement: HTMLDivElement | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new Scene();
@@ -107,6 +129,11 @@ export class Game {
     this.shipMesh = createShipMesh();
     this.scene.add(this.shipMesh);
 
+    this.shield = createShieldState();
+    this.shieldMesh = createShieldMesh();
+    this.shipMesh.add(this.shieldMesh);
+
+    this.wave = createWaveState();
     this.controller = new ArenaMovementController();
 
     this.resizeHandler = (): void => {
@@ -117,6 +144,8 @@ export class Game {
       this.renderer.setSize(w, h);
     };
     window.addEventListener('resize', this.resizeHandler);
+
+    this.createHud();
   }
 
   start(): void {
@@ -129,6 +158,8 @@ export class Game {
     this.running = false;
     window.removeEventListener('resize', this.resizeHandler);
     this.input.destroy();
+    if (this.scoreElement) this.scoreElement.remove();
+    if (this.waveElement) this.waveElement.remove();
   }
 
   private loop = (time: number): void => {
@@ -151,7 +182,11 @@ export class Game {
       move: rawInput.move,
       aim: this.screenToWorld(rawInput.aim),
       fire: rawInput.fire,
+      shield: rawInput.shield,
     };
+
+    updateWave(this.wave, deltaTime);
+    updateShield(this.shield, input.shield, deltaTime);
 
     this.controller.apply(this.ship.state, input, deltaTime);
     this.ship.state.position = this.controller.clampToBounds(this.ship.state.position);
@@ -162,9 +197,11 @@ export class Game {
     }
 
     this.updateShipMesh();
+    this.updateShieldMesh();
     this.updateProjectiles(deltaTime);
     this.updateAsteroids(deltaTime);
     this.updateSpawning(deltaTime);
+    this.updateHud();
 
     this.handleCollisions();
   }
@@ -184,6 +221,12 @@ export class Game {
     this.shipMesh.position.set(this.ship.state.position.x, this.ship.state.position.y, 0);
     const angle = Math.atan2(this.ship.state.aim.y, this.ship.state.aim.x);
     this.shipMesh.rotation.z = angle;
+  }
+
+  private updateShieldMesh(): void {
+    this.shieldMesh.visible = this.shield.active;
+    const scale = 1.0 + (this.shield.energy / SHIELD_MAX_ENERGY) * 0.2;
+    this.shieldMesh.scale.set(scale, scale, scale);
   }
 
   private fireProjectile(): void {
@@ -248,7 +291,7 @@ export class Game {
     cfg.nextSpawnIn -= deltaTime;
     if (cfg.nextSpawnIn <= 0) {
       this.spawnRandomAsteroid();
-      cfg.nextSpawnIn = cfg.minInterval + Math.random() * (cfg.maxInterval - cfg.minInterval);
+      cfg.nextSpawnIn = getSpawnInterval(this.wave);
     }
   }
 
@@ -261,11 +304,13 @@ export class Game {
   }
 
   private spawnRandomAsteroid(): void {
-    this.spawnAsteroid(
-      AsteroidSize.LARGE,
-      this.controller.getSpawnPosition(),
-      this.controller.getSpawnVelocity(),
-    );
+    const baseSpeed = getAsteroidBaseSpeed(this.wave);
+    const position = this.controller.getSpawnPosition();
+    const velocity = {
+      x: (Math.random() - 0.5) * 0.5,
+      y: -(baseSpeed + Math.random() * 0.5),
+    };
+    this.spawnAsteroid(AsteroidSize.LARGE, position, velocity);
   }
 
   private handleCollisions(): void {
@@ -291,8 +336,10 @@ export class Game {
       } else {
         aliveAsteroids.push(asteroid);
         if (circlesCollide(asteroid.state.position, asteroidRadius * 0.85, this.ship.state.position, SHIP_RADIUS)) {
-          this.respawnShip();
-          return;
+          if (!absorbHit(this.shield, this.ship.state)) {
+            this.respawnShip();
+            return;
+          }
         }
       }
     }
@@ -301,6 +348,7 @@ export class Game {
   }
 
   private destroyAsteroid(target: LiveAsteroid): void {
+    awardBreak(this.wave, target.state.size);
     this.scene.remove(target.mesh);
     disposeAsteroidMesh(target.mesh);
     const children = splitAsteroid(target.state);
@@ -331,6 +379,38 @@ export class Game {
     this.ship.state.aim = { x: 1, y: 0 };
     this.ship.fireCooldown = 0;
   }
+
+  private createHud(): void {
+    this.scoreElement = document.createElement('div');
+    this.scoreElement.style.position = 'absolute';
+    this.scoreElement.style.top = '16px';
+    this.scoreElement.style.left = '16px';
+    this.scoreElement.style.color = '#ffffff';
+    this.scoreElement.style.fontFamily = 'monospace';
+    this.scoreElement.style.fontSize = '18px';
+    this.scoreElement.style.textShadow = '0 0 4px #000000';
+    document.body.appendChild(this.scoreElement);
+
+    this.waveElement = document.createElement('div');
+    this.waveElement.style.position = 'absolute';
+    this.waveElement.style.top = '16px';
+    this.waveElement.style.right = '16px';
+    this.waveElement.style.color = '#ffffff';
+    this.waveElement.style.fontFamily = 'monospace';
+    this.waveElement.style.fontSize = '18px';
+    this.waveElement.style.textShadow = '0 0 4px #000000';
+    document.body.appendChild(this.waveElement);
+  }
+
+  private updateHud(): void {
+    if (this.scoreElement) {
+      this.scoreElement.textContent = `SCORE ${this.wave.score}  BREAKS ${this.wave.asteroidsDestroyed}`;
+    }
+    if (this.waveElement) {
+      const nextIn = Math.max(0, this.wave.nextWaveIn).toFixed(1);
+      this.waveElement.textContent = `WAVE ${this.wave.waveNumber}  NEXT ${nextIn}`;
+    }
+  }
 }
 
 function createStarfield(): Points {
@@ -353,4 +433,15 @@ function createStarfield(): Points {
     sizeAttenuation: true,
   });
   return new Points(geometry, material);
+}
+
+function createShieldMesh(): Mesh {
+  const geometry = new SphereGeometry(SHIP_RADIUS * 1.6, 16, 16);
+  const material = new MeshBasicMaterial({
+    color: 0x00ffff,
+    transparent: true,
+    opacity: 0.25,
+    side: 2,
+  });
+  return new Mesh(geometry, material);
 }

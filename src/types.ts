@@ -20,6 +20,7 @@ export interface InputState {
   readonly move: Vector2;
   readonly aim: Vector2;
   readonly fire: boolean;
+  readonly shield: boolean;
 }
 
 export interface ShipState {

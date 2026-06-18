@@ -7,9 +7,9 @@ import { Vector2, InputState } from './types';
 // Setup: Created once by Game; reads window events and exposes currentState().
 // Issues: Without blur handling, held keys can stick when the tab loses focus.
 // Fix: Track pressed keys in a Set; clear all keys on window blur.
-// Gotchas: preventDefault on movement/fire keys stops page scrolling. Mouse aim
-//          is stored as a screen-space point; Game converts it to world space.
-//          Mode toggle was removed after Phase 2 locked Arena as the main mode.
+// Gotchas: preventDefault on movement/fire/shield keys stops page scrolling.
+//          Mouse aim is stored as a screen-space point; Game converts it to world
+//          space. Shield uses 'c' or right mouse button.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MOVEMENT_KEYS = new Set([
@@ -21,18 +21,20 @@ export class InputManager {
   private readonly keys = new Set<string>();
   private mouseX = 0;
   private mouseY = 0;
-  private mouseDown = false;
+  private leftMouseDown = false;
+  private rightMouseDown = false;
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
   private readonly onMouseMove: (event: MouseEvent) => void;
-  private readonly onMouseDown: () => void;
-  private readonly onMouseUp: () => void;
+  private readonly onMouseDown: (event: MouseEvent) => void;
+  private readonly onMouseUp: (event: MouseEvent) => void;
   private readonly onBlur: () => void;
+  private readonly onContextMenu: (event: MouseEvent) => void;
 
   constructor() {
     this.onKeyDown = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
-      if (MOVEMENT_KEYS.has(key) || key === ' ') {
+      if (MOVEMENT_KEYS.has(key) || key === ' ' || key === 'c') {
         event.preventDefault();
       }
       this.keys.add(key);
@@ -48,17 +50,31 @@ export class InputManager {
       this.mouseY = event.clientY;
     };
 
-    this.onMouseDown = (): void => {
-      this.mouseDown = true;
+    this.onMouseDown = (event: MouseEvent): void => {
+      if (event.button === 0) {
+        this.leftMouseDown = true;
+      } else if (event.button === 2) {
+        this.rightMouseDown = true;
+        event.preventDefault();
+      }
     };
 
-    this.onMouseUp = (): void => {
-      this.mouseDown = false;
+    this.onMouseUp = (event: MouseEvent): void => {
+      if (event.button === 0) {
+        this.leftMouseDown = false;
+      } else if (event.button === 2) {
+        this.rightMouseDown = false;
+      }
     };
 
     this.onBlur = (): void => {
       this.keys.clear();
-      this.mouseDown = false;
+      this.leftMouseDown = false;
+      this.rightMouseDown = false;
+    };
+
+    this.onContextMenu = (event: MouseEvent): void => {
+      event.preventDefault();
     };
 
     window.addEventListener('keydown', this.onKeyDown);
@@ -67,6 +83,7 @@ export class InputManager {
     window.addEventListener('mousedown', this.onMouseDown);
     window.addEventListener('mouseup', this.onMouseUp);
     window.addEventListener('blur', this.onBlur);
+    window.addEventListener('contextmenu', this.onContextMenu);
   }
 
   currentState(): InputState {
@@ -85,7 +102,8 @@ export class InputManager {
     return {
       move,
       aim: { x: this.mouseX, y: this.mouseY },
-      fire: this.keys.has(' ') || this.mouseDown,
+      fire: this.keys.has(' ') || this.leftMouseDown,
+      shield: this.keys.has('c') || this.rightMouseDown,
     };
   }
 
@@ -96,5 +114,6 @@ export class InputManager {
     window.removeEventListener('mousedown', this.onMouseDown);
     window.removeEventListener('mouseup', this.onMouseUp);
     window.removeEventListener('blur', this.onBlur);
+    window.removeEventListener('contextmenu', this.onContextMenu);
   }
 }
