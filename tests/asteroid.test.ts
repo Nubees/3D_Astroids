@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { AsteroidSize, createAsteroidState, splitAsteroid, SIZE_RADIUS } from '../src/asteroid';
+import {
+  AsteroidSize,
+  createAsteroidState,
+  resolveAsteroidCollision,
+  splitAsteroid,
+  SIZE_RADIUS,
+} from '../src/asteroid';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Asteroid Unit Tests
@@ -10,7 +16,8 @@ import { AsteroidSize, createAsteroidState, splitAsteroid, SIZE_RADIUS } from '.
 // Fix: Added tests for large → medium and medium → small split counts and
 //      positions.
 // Gotchas: splitAsteroid uses Math.random(); tests only check structural
-//          properties, not exact velocities.
+//          properties, not exact velocities. Collision tests use floating-point
+//          approximations because the resolver uses normalized normals.
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('splitAsteroid', () => {
@@ -42,5 +49,47 @@ describe('splitAsteroid', () => {
   it('does not split a small asteroid', () => {
     const parent = createAsteroidState(AsteroidSize.SMALL, { x: 0, y: 0 }, { x: 0, y: 0 });
     expect(splitAsteroid(parent)).toHaveLength(0);
+  });
+
+  it('marks targeted asteroids and keeps split children non-targeted', () => {
+    const targeted = createAsteroidState(AsteroidSize.LARGE, { x: 0, y: 0 }, { x: 0, y: 0 }, true);
+    expect(targeted.isTargeted).toBe(true);
+
+    const children = splitAsteroid(targeted);
+    children.forEach((child) => {
+      expect(child.isTargeted).toBe(false);
+    });
+  });
+});
+
+describe('resolveAsteroidCollision', () => {
+  it('swaps normal velocities for equal-size asteroids', () => {
+    const a = createAsteroidState(AsteroidSize.MEDIUM, { x: -1.05, y: 0 }, { x: 2, y: 0 });
+    const b = createAsteroidState(AsteroidSize.MEDIUM, { x: 1.05, y: 0 }, { x: -1, y: 0 });
+
+    resolveAsteroidCollision(a, b);
+
+    expect(a.velocity.x).toBeCloseTo(-1, 1);
+    expect(b.velocity.x).toBeCloseTo(2, 1);
+  });
+
+  it('leaves the larger asteroid unchanged and reflects the smaller one', () => {
+    const big = createAsteroidState(AsteroidSize.LARGE, { x: 0, y: 0 }, { x: 1, y: 0 });
+    const small = createAsteroidState(AsteroidSize.SMALL, { x: 2.5, y: 0 }, { x: -2, y: 0 });
+
+    resolveAsteroidCollision(big, small);
+
+    expect(big.velocity.x).toBeCloseTo(1, 2);
+    expect(small.velocity.x).toBeCloseTo(4, 1);
+  });
+
+  it('ignores collisions when either asteroid is targeted', () => {
+    const normal = createAsteroidState(AsteroidSize.MEDIUM, { x: -1.05, y: 0 }, { x: 2, y: 0 });
+    const targeted = createAsteroidState(AsteroidSize.MEDIUM, { x: 1.05, y: 0 }, { x: -2, y: 0 }, true);
+
+    resolveAsteroidCollision(normal, targeted);
+
+    expect(normal.velocity.x).toBeCloseTo(2, 2);
+    expect(targeted.velocity.x).toBeCloseTo(-2, 2);
   });
 });

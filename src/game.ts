@@ -27,6 +27,7 @@ import {
   createAsteroidMesh,
   createAsteroidState,
   disposeAsteroidMesh,
+  resolveAsteroidCollision,
   splitAsteroid,
 } from './asteroid';
 import { circlesCollide } from './utils/collision';
@@ -84,6 +85,9 @@ import {
 //          increases spawn rate and asteroid speed over time. Phase 4 adds scrap
 //          drops and a deployable Breather Zone that recharges shield, doubles
 //          score, labels the zone with floating text, and slows/repels asteroids.
+//          Asteroids now spawn from all arena edges; every 4th spawn is targeted
+//          at the player and ignores asteroid-vs-asteroid bounces, while other
+//          asteroids bounce off each other with larger asteroids acting as walls.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -137,6 +141,7 @@ export class Game {
   private breatherElement: HTMLDivElement | null = null;
   private activeFloatingTexts: FloatingText[] = [];
   private breatherWasActive = false;
+  private asteroidSpawnCount = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new Scene();
@@ -258,6 +263,7 @@ export class Game {
     this.updateBreatherMesh();
     this.updateProjectiles(deltaTime);
     this.updateAsteroids(deltaTime);
+    this.handleAsteroidCollisions();
     this.updateScrap(deltaTime);
     this.updateSpawning(deltaTime);
     this.updateHud();
@@ -411,9 +417,9 @@ export class Game {
     }
   }
 
-  private spawnAsteroid(size: AsteroidSize, position: Vector2, velocity: Vector2): void {
-    const state = createAsteroidState(size, position, velocity);
-    const mesh = createAsteroidMesh(size);
+  private spawnAsteroid(size: AsteroidSize, position: Vector2, velocity: Vector2, isTargeted = false): void {
+    const state = createAsteroidState(size, position, velocity, isTargeted);
+    const mesh = createAsteroidMesh(size, isTargeted);
     mesh.position.set(position.x, position.y, 0);
     this.asteroids.push({ state, mesh });
     this.scene.add(mesh);
@@ -422,11 +428,48 @@ export class Game {
   private spawnRandomAsteroid(): void {
     const baseSpeed = getAsteroidBaseSpeed(this.wave);
     const position = this.controller.getSpawnPosition();
-    const velocity = {
-      x: (Math.random() - 0.5) * 0.5,
-      y: -(baseSpeed + Math.random() * 0.5),
-    };
-    this.spawnAsteroid(AsteroidSize.LARGE, position, velocity);
+    this.asteroidSpawnCount += 1;
+
+    const isTargeted = this.asteroidSpawnCount % 4 === 0;
+    let velocity: Vector2;
+    if (isTargeted) {
+      const dx = this.ship.state.position.x - position.x;
+      const dy = this.ship.state.position.y - position.y;
+      const distance = Math.hypot(dx, dy);
+      const speed = baseSpeed * 1.2;
+      if (distance > 0.01) {
+        velocity = { x: (dx / distance) * speed, y: (dy / distance) * speed };
+      } else {
+        const inward = this.controller.getSpawnVelocity();
+        const inwardSpeed = Math.hypot(inward.x, inward.y);
+        velocity = inwardSpeed > 0
+          ? { x: (inward.x / inwardSpeed) * speed, y: (inward.y / inwardSpeed) * speed }
+          : { x: 0, y: -speed };
+      }
+    } else {
+      const inward = this.controller.getSpawnVelocity();
+      const inwardSpeed = Math.hypot(inward.x, inward.y);
+      const speed = baseSpeed * (0.8 + Math.random() * 0.4);
+      velocity = inwardSpeed > 0
+        ? { x: (inward.x / inwardSpeed) * speed, y: (inward.y / inwardSpeed) * speed }
+        : { x: 0, y: -speed };
+    }
+
+    this.spawnAsteroid(AsteroidSize.LARGE, position, velocity, isTargeted);
+  }
+
+  private handleAsteroidCollisions(): void {
+    for (let i = 0; i < this.asteroids.length; i += 1) {
+      const a = this.asteroids[i];
+      for (let j = i + 1; j < this.asteroids.length; j += 1) {
+        const b = this.asteroids[j];
+        const aRadius = SIZE_RADIUS[a.state.size];
+        const bRadius = SIZE_RADIUS[b.state.size];
+        if (circlesCollide(a.state.position, aRadius, b.state.position, bRadius)) {
+          resolveAsteroidCollision(a.state, b.state);
+        }
+      }
+    }
   }
 
   private handleCollisions(): void {

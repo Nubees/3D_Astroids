@@ -7,7 +7,8 @@ import { InputState, MovementController, MovementMode, ShipState, SpawnConfig, V
 // Setup: Used as the default movement mode.
 // Issues: None.
 // Fix: Extracted from Game.ts so drift mode can reuse the same controller slot.
-// Gotchas: Camera stays at origin; asteroids spawn at top of arena and drift down.
+// Gotchas: Camera stays at origin; asteroids spawn from any arena edge and drift
+//          inward to create unpredictable approach angles.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const ARENA_WIDTH = 26;
@@ -25,6 +26,7 @@ export class ArenaMovementController implements MovementController {
     maxInterval: SPAWN_MAX_INTERVAL,
     nextSpawnIn: 0,
   };
+  private lastSpawnPosition: Vector2 = { x: 0, y: 10 };
 
   apply(ship: ShipState, input: InputState, deltaTime: number): void {
     const targetVx = input.move.x * SHIP_SPEED;
@@ -52,14 +54,35 @@ export class ArenaMovementController implements MovementController {
   }
 
   getSpawnPosition(): Vector2 {
-    const x = (Math.random() - 0.5) * ARENA_WIDTH;
-    const y = ARENA_HEIGHT / 2 + 1;
-    return { x, y };
+    const halfW = ARENA_WIDTH / 2;
+    const halfH = ARENA_HEIGHT / 2;
+    const pad = 1.0;
+    const side = Math.floor(Math.random() * 4);
+
+    let position: Vector2;
+    switch (side) {
+      case 0: // top
+        position = { x: (Math.random() - 0.5) * ARENA_WIDTH, y: halfH + pad };
+        break;
+      case 1: // right
+        position = { x: halfW + pad, y: (Math.random() - 0.5) * ARENA_HEIGHT };
+        break;
+      case 2: // bottom
+        position = { x: (Math.random() - 0.5) * ARENA_WIDTH, y: -halfH - pad };
+        break;
+      default: // left
+        position = { x: -halfW - pad, y: (Math.random() - 0.5) * ARENA_HEIGHT };
+        break;
+    }
+    this.lastSpawnPosition = position;
+    return position;
   }
 
   getSpawnVelocity(): Vector2 {
     const speed = 1.0 + Math.random();
-    const angle = -Math.PI / 2 + (Math.random() - 0.5) * 0.4;
+    const baseAngle = Math.atan2(-this.lastSpawnPosition.y, -this.lastSpawnPosition.x);
+    const spread = 0.5;
+    const angle = baseAngle + (Math.random() - 0.5) * spread;
     return {
       x: Math.cos(angle) * speed,
       y: Math.sin(angle) * speed,

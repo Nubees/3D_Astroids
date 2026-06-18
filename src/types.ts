@@ -62,6 +62,7 @@ export interface AsteroidState {
   velocity: Vector2;
   size: AsteroidSize;
   health: number;
+  isTargeted: boolean;
 }
 
 export enum MovementMode {

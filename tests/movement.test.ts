@@ -66,16 +66,18 @@ describe('ArenaMovementController', () => {
     expect(controller.isOutsideCullBounds({ x: 0, y: 0 })).toBe(false);
   });
 
-  it('spawns asteroids at the top of the arena', () => {
+  it('spawns asteroids from any arena edge', () => {
     const controller = new ArenaMovementController();
 
     const position = controller.getSpawnPosition();
-    expect(position.y).toBe(10);
-    expect(position.x).toBeGreaterThanOrEqual(-13);
-    expect(position.x).toBeLessThanOrEqual(13);
+    const halfW = 26 / 2;
+    const halfH = 18 / 2;
+    const onEdge =
+      Math.abs(position.x) >= halfW || Math.abs(position.y) >= halfH;
+    expect(onEdge).toBe(true);
 
     const velocity = controller.getSpawnVelocity();
-    expect(velocity.y).toBeLessThan(0);
+    expect(Math.hypot(velocity.x, velocity.y)).toBeGreaterThan(0);
   });
 });
 
