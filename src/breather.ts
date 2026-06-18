@@ -10,17 +10,18 @@ import { ShieldState } from './shield';
 //        requests, duration countdown, and shield recharge.
 // Issues: Without a meter cost, the zone becomes spammable. Without a duration,
 //          it becomes a permanent safe corner.
-// Fix: Zone requires 8 scrap to deploy, lasts 6 seconds, and is centered on the
-//      ship at the moment of activation.
+// Fix: Zone requires 8 scrap to deploy, lasts 9 seconds with a 6.5 unit radius,
+//      and is centered on the ship at the moment of activation. Inside the zone
+//      score is doubled and asteroids slow down and are gently pushed outward.
 // Gotchas: The zone is fixed in world space; the player can leave it. Shield
 //          recharge only applies while the ship is inside the radius.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const BREATHER_METER_COST = 8;
-export const BREATHER_ZONE_RADIUS = 4.0;
-export const BREATHER_ZONE_DURATION = 6.0;
+export const BREATHER_ZONE_RADIUS = 6.5;
+export const BREATHER_ZONE_DURATION = 9.0;
 export const BREATHER_SHIELD_RECHARGE_MULTIPLIER = 5.0;
-export const BREATHER_SCORE_MULTIPLIER = 1.5;
+export const BREATHER_SCORE_MULTIPLIER = 2.0;
 
 export function createBreatherZoneState(): BreatherZoneState {
   return {

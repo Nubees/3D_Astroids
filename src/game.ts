@@ -15,6 +15,7 @@ import {
   RingGeometry,
   Scene,
   SphereGeometry,
+  Vector3,
   WebGLRenderer,
 } from 'three';
 import { InputManager } from './input';
@@ -81,8 +82,8 @@ import {
 //          variant mode later. Camera stays static at the world origin in Arena.
 //          Shield is a panic button with energy and cooldown. Wave pacing
 //          increases spawn rate and asteroid speed over time. Phase 4 adds scrap
-//          drops and a deployable Breather Zone that recharges shield and boosts
-//          score while the ship is inside.
+//          drops and a deployable Breather Zone that recharges shield, doubles
+//          score, labels the zone with floating text, and slows/repels asteroids.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -126,6 +127,7 @@ export class Game {
   private scoreElement: HTMLDivElement | null = null;
   private waveElement: HTMLDivElement | null = null;
   private breatherElement: HTMLDivElement | null = null;
+  private safeZoneLabel: HTMLDivElement | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new Scene();
@@ -199,6 +201,7 @@ export class Game {
     if (this.scoreElement) this.scoreElement.remove();
     if (this.waveElement) this.waveElement.remove();
     if (this.breatherElement) this.breatherElement.remove();
+    if (this.safeZoneLabel) this.safeZoneLabel.remove();
   }
 
   private loop = (time: number): void => {
@@ -282,7 +285,8 @@ export class Game {
     if (this.breather.active) {
       this.breatherMesh.position.set(this.breather.position.x, this.breather.position.y, 0);
       const pulse = 1.0 + Math.sin(this.breather.durationRemaining * 4) * 0.05;
-      this.breatherMesh.scale.set(pulse, pulse, pulse);
+      const scale = this.breather.radius * pulse;
+      this.breatherMesh.scale.set(scale, scale, scale);
     }
   }
 
@@ -325,6 +329,25 @@ export class Game {
   private updateAsteroids(deltaTime: number): void {
     const alive: LiveAsteroid[] = [];
     for (const asteroid of this.asteroids) {
+      if (this.breather.active) {
+        const dx = asteroid.state.position.x - this.breather.position.x;
+        const dy = asteroid.state.position.y - this.breather.position.y;
+        const distance = Math.hypot(dx, dy);
+        if (distance < this.breather.radius) {
+          // Slow asteroids inside the safe zone and push them outward.
+          const slowdown = Math.max(0.1, 1 - 3.0 * deltaTime);
+          const pushForce = 4.0;
+          const invDistance = 1 / distance;
+          const pushX = (dx * invDistance) * pushForce * deltaTime;
+          const pushY = (dy * invDistance) * pushForce * deltaTime;
+
+          asteroid.state.velocity = {
+            x: asteroid.state.velocity.x * slowdown + pushX,
+            y: asteroid.state.velocity.y * slowdown + pushY,
+          };
+        }
+      }
+
       asteroid.state.position = {
         x: asteroid.state.position.x + asteroid.state.velocity.x * deltaTime,
         y: asteroid.state.position.y + asteroid.state.velocity.y * deltaTime,
@@ -507,6 +530,20 @@ export class Game {
     this.breatherElement.style.fontSize = '18px';
     this.breatherElement.style.textShadow = '0 0 4px #000000';
     document.body.appendChild(this.breatherElement);
+
+    this.safeZoneLabel = document.createElement('div');
+    this.safeZoneLabel.textContent = 'SAFE Zone - Shield Recharge and Score(x2)Boost !!';
+    this.safeZoneLabel.style.position = 'absolute';
+    this.safeZoneLabel.style.color = '#00ffaa';
+    this.safeZoneLabel.style.fontFamily = 'monospace';
+    this.safeZoneLabel.style.fontSize = '16px';
+    this.safeZoneLabel.style.fontWeight = 'bold';
+    this.safeZoneLabel.style.textShadow = '0 0 6px #000000';
+    this.safeZoneLabel.style.whiteSpace = 'nowrap';
+    this.safeZoneLabel.style.pointerEvents = 'none';
+    this.safeZoneLabel.style.transform = 'translate(-50%, -120%)';
+    this.safeZoneLabel.style.display = 'none';
+    document.body.appendChild(this.safeZoneLabel);
   }
 
   private updateHud(): void {
@@ -525,6 +562,19 @@ export class Game {
         this.breatherElement.textContent = 'ZONE READY (X)';
       } else {
         this.breatherElement.textContent = `ZONE ${this.breather.meter}/${BREATHER_METER_COST}`;
+      }
+    }
+    if (this.safeZoneLabel) {
+      if (this.breather.active) {
+        const world = new Vector3(this.breather.position.x, this.breather.position.y, 0);
+        world.project(this.camera);
+        const x = (world.x * 0.5 + 0.5) * window.innerWidth;
+        const y = (-world.y * 0.5 + 0.5) * window.innerHeight;
+        this.safeZoneLabel.style.left = `${x}px`;
+        this.safeZoneLabel.style.top = `${y}px`;
+        this.safeZoneLabel.style.display = 'block';
+      } else {
+        this.safeZoneLabel.style.display = 'none';
       }
     }
   }
