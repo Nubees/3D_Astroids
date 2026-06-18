@@ -18,7 +18,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
-import { InputManager } from './input';
+import { InputManager, InputState } from './input';
 import { Ship, createShipMesh, SHIP_RADIUS } from './ship';
 import { createProjectile, PROJECTILE_RADIUS, updateProjectile } from './projectile';
 import {
@@ -34,7 +34,6 @@ import { circlesCollide } from './utils/collision';
 import {
   AsteroidState,
   BreatherZoneState,
-  InputState,
   Projectile as ProjectileState,
   ScrapState,
   Vector2,
@@ -45,6 +44,9 @@ import {
   createShieldState,
   updateShield,
   absorbHit,
+  shieldColor,
+  shieldPercent,
+  SHIELD_KNOCKBACK_BY_SIZE,
   SHIELD_MAX_ENERGY,
 } from './shield';
 import {
@@ -115,6 +117,12 @@ interface FloatingText {
   baseY: number;
 }
 
+interface ShieldArc {
+  mesh: Mesh;
+  age: number;
+  duration: number;
+}
+
 export class Game {
   private readonly scene: Scene;
   private readonly camera: PerspectiveCamera;
@@ -139,9 +147,12 @@ export class Game {
   private scoreElement: HTMLDivElement | null = null;
   private waveElement: HTMLDivElement | null = null;
   private breatherElement: HTMLDivElement | null = null;
+  private shieldElement: HTMLDivElement | null = null;
   private activeFloatingTexts: FloatingText[] = [];
+  private activeShieldArcs: ShieldArc[] = [];
   private breatherWasActive = false;
   private asteroidSpawnCount = 0;
+  private shieldShakeRemaining = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new Scene();
@@ -215,10 +226,22 @@ export class Game {
     if (this.scoreElement) this.scoreElement.remove();
     if (this.waveElement) this.waveElement.remove();
     if (this.breatherElement) this.breatherElement.remove();
+    if (this.shieldElement) this.shieldElement.remove();
     for (const text of this.activeFloatingTexts) {
       text.element.remove();
     }
     this.activeFloatingTexts = [];
+    for (const arc of this.activeShieldArcs) {
+      this.shipMesh.remove(arc.mesh);
+      arc.mesh.geometry.dispose();
+      const material = arc.mesh.material;
+      if (Array.isArray(material)) {
+        material.forEach((m: Material) => m.dispose());
+      } else {
+        material.dispose();
+      }
+    }
+    this.activeShieldArcs = [];
   }
 
   private loop = (time: number): void => {
@@ -241,12 +264,12 @@ export class Game {
       move: rawInput.move,
       aim: this.screenToWorld(rawInput.aim),
       fire: rawInput.fire,
-      shield: rawInput.shield,
       deployBreather: rawInput.deployBreather,
     };
 
     updateWave(this.wave, deltaTime);
-    updateShield(this.shield, input.shield, deltaTime);
+    const inBreatherZone = isInsideBreatherZone(this.breather, this.ship.state.position);
+    updateShield(this.shield, inBreatherZone, deltaTime);
     updateBreather(this.breather, this.shield, this.ship.state.position, input.deployBreather, deltaTime);
 
     this.controller.apply(this.ship.state, input, deltaTime);
@@ -266,8 +289,9 @@ export class Game {
     this.handleAsteroidCollisions();
     this.updateScrap(deltaTime);
     this.updateSpawning(deltaTime);
-    this.updateHud();
+    this.updateHud(deltaTime);
     this.updateFloatingTexts(deltaTime);
+    this.updateShieldArcs(deltaTime);
 
     this.handleCollisions();
   }
@@ -290,7 +314,7 @@ export class Game {
   }
 
   private updateShieldMesh(): void {
-    this.shieldMesh.visible = this.shield.active;
+    this.shieldMesh.visible = this.shield.energy > 0.01;
     const scale = 1.0 + (this.shield.energy / SHIELD_MAX_ENERGY) * 0.2;
     this.shieldMesh.scale.set(scale, scale, scale);
   }
@@ -495,7 +519,9 @@ export class Game {
       } else {
         aliveAsteroids.push(asteroid);
         if (circlesCollide(asteroid.state.position, asteroidRadius * 0.85, this.ship.state.position, SHIP_RADIUS)) {
-          if (!absorbHit(this.shield, this.ship.state)) {
+          if (absorbHit(this.shield, asteroid.state)) {
+            this.onShieldAbsorbedHit(asteroid.state);
+          } else {
             this.respawnShip();
             return;
           }
@@ -544,6 +570,65 @@ export class Game {
     }
   }
 
+  private onShieldAbsorbedHit(asteroid: AsteroidState): void {
+    // Push the ship away from the asteroid along the collision normal.
+    const dx = this.ship.state.position.x - asteroid.position.x;
+    const dy = this.ship.state.position.y - asteroid.position.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > 0.001) {
+      const force = SHIELD_KNOCKBACK_BY_SIZE[asteroid.size];
+      this.ship.state.velocity = {
+        x: this.ship.state.velocity.x + (dx / distance) * force,
+        y: this.ship.state.velocity.y + (dy / distance) * force,
+      };
+    }
+
+    this.spawnShieldArc(asteroid.position);
+    this.shieldShakeRemaining = 0.25;
+  }
+
+  private spawnShieldArc(asteroidPosition: Vector2): void {
+    const dx = asteroidPosition.x - this.ship.state.position.x;
+    const dy = asteroidPosition.y - this.ship.state.position.y;
+    const angle = Math.atan2(dy, dx);
+
+    const geometry = new RingGeometry(SHIP_RADIUS * 1.3, SHIP_RADIUS * 1.7, 32, 1, angle - 0.5, 1.0);
+    const material = new MeshBasicMaterial({
+      color: 0x88ffff,
+      transparent: true,
+      opacity: 0.9,
+      side: 2,
+    });
+    const mesh = new Mesh(geometry, material);
+    mesh.position.z = 0.2;
+    this.shipMesh.add(mesh);
+
+    this.activeShieldArcs.push({ mesh, age: 0, duration: 0.25 });
+  }
+
+  private updateShieldArcs(deltaTime: number): void {
+    const alive: ShieldArc[] = [];
+    for (const arc of this.activeShieldArcs) {
+      arc.age += deltaTime;
+      if (arc.age >= arc.duration) {
+        this.shipMesh.remove(arc.mesh);
+        arc.mesh.geometry.dispose();
+        const material = arc.mesh.material;
+        if (Array.isArray(material)) {
+          material.forEach((m: Material) => m.dispose());
+        } else {
+          material.dispose();
+        }
+        continue;
+      }
+      const progress = arc.age / arc.duration;
+      const opacity = 0.9 * (1 - progress);
+      (arc.mesh.material as MeshBasicMaterial).opacity = opacity;
+      alive.push(arc);
+    }
+    this.activeShieldArcs = alive;
+  }
+
   private respawnShip(): void {
     for (const projectile of this.projectiles) {
       this.disposeProjectile(projectile);
@@ -586,6 +671,17 @@ export class Game {
     this.breatherElement.style.fontSize = '18px';
     this.breatherElement.style.textShadow = '0 0 4px #000000';
     document.body.appendChild(this.breatherElement);
+
+    this.shieldElement = document.createElement('div');
+    this.shieldElement.style.position = 'absolute';
+    this.shieldElement.style.top = '80px';
+    this.shieldElement.style.left = '16px';
+    this.shieldElement.style.fontFamily = 'monospace';
+    this.shieldElement.style.fontSize = '18px';
+    this.shieldElement.style.fontWeight = 'bold';
+    this.shieldElement.style.textShadow = '0 0 4px #000000';
+    this.shieldElement.style.transition = 'color 0.2s ease';
+    document.body.appendChild(this.shieldElement);
   }
 
   private spawnFloatingText(text: string, delaySeconds: number): void {
@@ -620,7 +716,7 @@ export class Game {
     });
   }
 
-  private updateHud(): void {
+  private updateHud(deltaTime: number): void {
     if (this.scoreElement) {
       this.scoreElement.textContent = `SCORE ${this.wave.score}  BREAKS ${this.wave.asteroidsDestroyed}`;
     }
@@ -636,6 +732,20 @@ export class Game {
         this.breatherElement.textContent = 'ZONE READY (X)';
       } else {
         this.breatherElement.textContent = `ZONE ${this.breather.meter}/${BREATHER_METER_COST}`;
+      }
+    }
+    if (this.shieldElement) {
+      const percent = shieldPercent(this.shield);
+      this.shieldElement.textContent = `SHIELD ${percent}`;
+      this.shieldElement.style.color = shieldColor(percent);
+
+      this.shieldShakeRemaining = Math.max(0, this.shieldShakeRemaining - deltaTime);
+      if (this.shieldShakeRemaining > 0) {
+        const shakeX = (Math.random() - 0.5) * 6;
+        const shakeY = (Math.random() - 0.5) * 6;
+        this.shieldElement.style.transform = `translate(${shakeX}px, ${shakeY}px)`;
+      } else {
+        this.shieldElement.style.transform = 'translate(0, 0)';
       }
     }
     if (this.breather.active && !this.breatherWasActive) {

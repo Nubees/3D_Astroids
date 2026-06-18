@@ -1,4 +1,5 @@
-import { InputState, MovementController, MovementMode, ShipState, SpawnConfig, Vector2 } from '../types';
+import { MovementController, MovementMode, ShipState, SpawnConfig, Vector2 } from '../types';
+import { InputState } from '../input';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Arena Movement Controller

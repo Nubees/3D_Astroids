@@ -16,13 +16,6 @@ export interface Vector2 {
   readonly y: number;
 }
 
-export interface InputState {
-  readonly move: Vector2;
-  readonly aim: Vector2;
-  readonly fire: boolean;
-  readonly shield: boolean;
-  readonly deployBreather: boolean;
-}
 
 export interface ScrapState {
   position: Vector2;
@@ -82,6 +75,8 @@ export interface SpawnConfig {
   readonly maxInterval: number;
   nextSpawnIn: number;
 }
+
+import { InputState } from './input';
 
 export interface MovementController {
   readonly mode: MovementMode;

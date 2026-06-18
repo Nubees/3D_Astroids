@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ArenaMovementController } from '../src/movement/arena-controller';
 import { DriftMovementController } from '../src/movement/drift-controller';
-import { InputState, ShipState } from '../src/types';
+import { InputState } from '../src/input';
+import { ShipState } from '../src/types';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Movement Controller Tests
@@ -27,7 +28,6 @@ const zeroInput: InputState = {
   move: { x: 0, y: 0 },
   aim: { x: 0, y: 0 },
   fire: false,
-  shield: false,
   deployBreather: false,
 };
 
@@ -38,7 +38,6 @@ describe('ArenaMovementController', () => {
       move: { x: 1, y: 0 },
       aim: { x: 0, y: 0 },
       fire: false,
-      shield: false,
       deployBreather: false,
     };
     const controller = new ArenaMovementController();

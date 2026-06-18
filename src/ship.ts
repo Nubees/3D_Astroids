@@ -1,5 +1,6 @@
 import { ConeGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial } from 'three';
-import { Vector2, ShipState, InputState } from './types';
+import { Vector2, ShipState } from './types';
+import { InputState } from './input';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Ship Logic
