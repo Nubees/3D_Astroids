@@ -103,6 +103,14 @@ interface LiveScrap {
   mesh: Mesh;
 }
 
+interface FloatingText {
+  element: HTMLDivElement;
+  age: number;
+  duration: number;
+  baseX: number;
+  baseY: number;
+}
+
 export class Game {
   private readonly scene: Scene;
   private readonly camera: PerspectiveCamera;
@@ -127,7 +135,8 @@ export class Game {
   private scoreElement: HTMLDivElement | null = null;
   private waveElement: HTMLDivElement | null = null;
   private breatherElement: HTMLDivElement | null = null;
-  private safeZoneLabel: HTMLDivElement | null = null;
+  private activeFloatingTexts: FloatingText[] = [];
+  private breatherWasActive = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new Scene();
@@ -201,7 +210,10 @@ export class Game {
     if (this.scoreElement) this.scoreElement.remove();
     if (this.waveElement) this.waveElement.remove();
     if (this.breatherElement) this.breatherElement.remove();
-    if (this.safeZoneLabel) this.safeZoneLabel.remove();
+    for (const text of this.activeFloatingTexts) {
+      text.element.remove();
+    }
+    this.activeFloatingTexts = [];
   }
 
   private loop = (time: number): void => {
@@ -249,6 +261,7 @@ export class Game {
     this.updateScrap(deltaTime);
     this.updateSpawning(deltaTime);
     this.updateHud();
+    this.updateFloatingTexts(deltaTime);
 
     this.handleCollisions();
   }
@@ -530,20 +543,38 @@ export class Game {
     this.breatherElement.style.fontSize = '18px';
     this.breatherElement.style.textShadow = '0 0 4px #000000';
     document.body.appendChild(this.breatherElement);
+  }
 
-    this.safeZoneLabel = document.createElement('div');
-    this.safeZoneLabel.textContent = 'SAFE Zone - Shield Recharge and Score(x2)Boost !!';
-    this.safeZoneLabel.style.position = 'absolute';
-    this.safeZoneLabel.style.color = '#00ffaa';
-    this.safeZoneLabel.style.fontFamily = 'monospace';
-    this.safeZoneLabel.style.fontSize = '16px';
-    this.safeZoneLabel.style.fontWeight = 'bold';
-    this.safeZoneLabel.style.textShadow = '0 0 6px #000000';
-    this.safeZoneLabel.style.whiteSpace = 'nowrap';
-    this.safeZoneLabel.style.pointerEvents = 'none';
-    this.safeZoneLabel.style.transform = 'translate(-50%, -120%)';
-    this.safeZoneLabel.style.display = 'none';
-    document.body.appendChild(this.safeZoneLabel);
+  private spawnFloatingText(text: string, delaySeconds: number): void {
+    const world = new Vector3(this.breather.position.x, this.breather.position.y, 0);
+    world.project(this.camera);
+    const baseX = (world.x * 0.5 + 0.5) * window.innerWidth;
+    const baseY = (-world.y * 0.5 + 0.5) * window.innerHeight;
+
+    const element = document.createElement('div');
+    element.textContent = text;
+    element.style.position = 'absolute';
+    element.style.left = `${baseX}px`;
+    element.style.top = `${baseY}px`;
+    element.style.color = '#00ffaa';
+    element.style.fontFamily = 'monospace';
+    element.style.fontSize = '16px';
+    element.style.fontWeight = 'bold';
+    element.style.textShadow = '0 0 6px #000000';
+    element.style.whiteSpace = 'nowrap';
+    element.style.pointerEvents = 'none';
+    element.style.transform = 'translate(-50%, -120%)';
+    element.style.opacity = '1';
+    element.style.display = 'none';
+    document.body.appendChild(element);
+
+    this.activeFloatingTexts.push({
+      element,
+      age: -delaySeconds,
+      duration: 2.0,
+      baseX,
+      baseY,
+    });
   }
 
   private updateHud(): void {
@@ -564,19 +595,33 @@ export class Game {
         this.breatherElement.textContent = `ZONE ${this.breather.meter}/${BREATHER_METER_COST}`;
       }
     }
-    if (this.safeZoneLabel) {
-      if (this.breather.active) {
-        const world = new Vector3(this.breather.position.x, this.breather.position.y, 0);
-        world.project(this.camera);
-        const x = (world.x * 0.5 + 0.5) * window.innerWidth;
-        const y = (-world.y * 0.5 + 0.5) * window.innerHeight;
-        this.safeZoneLabel.style.left = `${x}px`;
-        this.safeZoneLabel.style.top = `${y}px`;
-        this.safeZoneLabel.style.display = 'block';
-      } else {
-        this.safeZoneLabel.style.display = 'none';
-      }
+    if (this.breather.active && !this.breatherWasActive) {
+      this.spawnFloatingText('Safe Zone here', 0.0);
+      this.spawnFloatingText('Recharge Shields', 1.2);
+      this.spawnFloatingText('2x Score Booster', 2.4);
     }
+    this.breatherWasActive = this.breather.active;
+  }
+
+  private updateFloatingTexts(deltaTime: number): void {
+    const alive: FloatingText[] = [];
+    for (const text of this.activeFloatingTexts) {
+      text.age += deltaTime;
+      if (text.age >= text.duration) {
+        text.element.remove();
+        continue;
+      }
+      if (text.age >= 0) {
+        const progress = text.age / text.duration;
+        const driftPixels = 30 * text.age;
+        text.element.style.display = 'block';
+        text.element.style.top = `${text.baseY - driftPixels}px`;
+        text.element.style.left = `${text.baseX}px`;
+        text.element.style.opacity = `${1 - progress}`;
+      }
+      alive.push(text);
+    }
+    this.activeFloatingTexts = alive;
   }
 }
 
