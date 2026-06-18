@@ -59,17 +59,19 @@ export function getAsteroidBaseSpeed(wave: WaveState): number {
   return BASE_SPEED + (MAX_SPEED - BASE_SPEED) * pressure;
 }
 
-export function awardBreak(wave: WaveState, size: AsteroidSize): void {
+export function awardBreak(wave: WaveState, size: AsteroidSize, scoreMultiplier = 1.0): void {
   wave.asteroidsDestroyed += 1;
+  let base = 0;
   switch (size) {
     case AsteroidSize.SMALL:
-      wave.score += POINTS_PER_SMALL;
+      base = POINTS_PER_SMALL;
       break;
     case AsteroidSize.MEDIUM:
-      wave.score += POINTS_PER_MEDIUM;
+      base = POINTS_PER_MEDIUM;
       break;
     case AsteroidSize.LARGE:
-      wave.score += POINTS_PER_LARGE;
+      base = POINTS_PER_LARGE;
       break;
   }
+  wave.score += Math.round(base * scoreMultiplier);
 }

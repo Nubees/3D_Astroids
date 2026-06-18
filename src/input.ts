@@ -34,7 +34,7 @@ export class InputManager {
   constructor() {
     this.onKeyDown = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
-      if (MOVEMENT_KEYS.has(key) || key === ' ' || key === 'c') {
+      if (MOVEMENT_KEYS.has(key) || key === ' ' || key === 'c' || key === 'x') {
         event.preventDefault();
       }
       this.keys.add(key);
@@ -104,6 +104,7 @@ export class InputManager {
       aim: { x: this.mouseX, y: this.mouseY },
       fire: this.keys.has(' ') || this.leftMouseDown,
       shield: this.keys.has('c') || this.rightMouseDown,
+      deployBreather: this.keys.has('x'),
     };
   }
 

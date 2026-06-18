@@ -21,6 +21,21 @@ export interface InputState {
   readonly aim: Vector2;
   readonly fire: boolean;
   readonly shield: boolean;
+  readonly deployBreather: boolean;
+}
+
+export interface ScrapState {
+  position: Vector2;
+  velocity: Vector2;
+  lifetime: number;
+}
+
+export interface BreatherZoneState {
+  active: boolean;
+  position: Vector2;
+  radius: number;
+  durationRemaining: number;
+  meter: number;
 }
 
 export interface ShipState {

@@ -28,6 +28,7 @@ const zeroInput: InputState = {
   aim: { x: 0, y: 0 },
   fire: false,
   shield: false,
+  deployBreather: false,
 };
 
 describe('ArenaMovementController', () => {
@@ -38,6 +39,7 @@ describe('ArenaMovementController', () => {
       aim: { x: 0, y: 0 },
       fire: false,
       shield: false,
+      deployBreather: false,
     };
     const controller = new ArenaMovementController();
 

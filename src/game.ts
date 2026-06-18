@@ -12,6 +12,7 @@ import {
   PerspectiveCamera,
   Points,
   PointsMaterial,
+  RingGeometry,
   Scene,
   SphereGeometry,
   WebGLRenderer,
@@ -30,8 +31,10 @@ import {
 import { circlesCollide } from './utils/collision';
 import {
   AsteroidState,
+  BreatherZoneState,
   InputState,
   Projectile as ProjectileState,
+  ScrapState,
   Vector2,
 } from './types';
 import { ArenaMovementController } from './movement/arena-controller';
@@ -50,6 +53,21 @@ import {
   getSpawnInterval,
   updateWave,
 } from './waves';
+import {
+  createScrap,
+  isScrapCollected,
+  isScrapExpired,
+  magnetPull,
+  scrapDropChance,
+  updateScrap,
+} from './scrap';
+import {
+  BREATHER_METER_COST,
+  BREATHER_SCORE_MULTIPLIER,
+  createBreatherZoneState,
+  isInsideBreatherZone,
+  updateBreather,
+} from './breather';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -62,7 +80,9 @@ import {
 // Gotchas: The MovementController abstraction is kept so drift can return as a
 //          variant mode later. Camera stays static at the world origin in Arena.
 //          Shield is a panic button with energy and cooldown. Wave pacing
-//          increases spawn rate and asteroid speed over time.
+//          increases spawn rate and asteroid speed over time. Phase 4 adds scrap
+//          drops and a deployable Breather Zone that recharges shield and boosts
+//          score while the ship is inside.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -77,6 +97,11 @@ interface LiveProjectile {
   mesh: Mesh;
 }
 
+interface LiveScrap {
+  state: ScrapState;
+  mesh: Mesh;
+}
+
 export class Game {
   private readonly scene: Scene;
   private readonly camera: PerspectiveCamera;
@@ -86,16 +111,21 @@ export class Game {
   private readonly ship: Ship;
   private readonly starfield: Points;
   private readonly shieldMesh: Mesh;
+  private readonly magnetRing: Mesh;
+  private readonly breatherMesh: Mesh;
   private readonly shield: ShieldState;
   private readonly wave: WaveState;
+  private readonly breather: BreatherZoneState;
   private projectiles: LiveProjectile[] = [];
   private asteroids: LiveAsteroid[] = [];
+  private scrap: LiveScrap[] = [];
   private readonly controller: ArenaMovementController;
   private lastTime = 0;
   private running = true;
   private readonly resizeHandler: () => void;
   private scoreElement: HTMLDivElement | null = null;
   private waveElement: HTMLDivElement | null = null;
+  private breatherElement: HTMLDivElement | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new Scene();
@@ -133,6 +163,14 @@ export class Game {
     this.shieldMesh = createShieldMesh();
     this.shipMesh.add(this.shieldMesh);
 
+    this.magnetRing = createMagnetRing();
+    this.shipMesh.add(this.magnetRing);
+
+    this.breather = createBreatherZoneState();
+    this.breatherMesh = createBreatherMesh();
+    this.breatherMesh.visible = false;
+    this.scene.add(this.breatherMesh);
+
     this.wave = createWaveState();
     this.controller = new ArenaMovementController();
 
@@ -160,6 +198,7 @@ export class Game {
     this.input.destroy();
     if (this.scoreElement) this.scoreElement.remove();
     if (this.waveElement) this.waveElement.remove();
+    if (this.breatherElement) this.breatherElement.remove();
   }
 
   private loop = (time: number): void => {
@@ -183,10 +222,12 @@ export class Game {
       aim: this.screenToWorld(rawInput.aim),
       fire: rawInput.fire,
       shield: rawInput.shield,
+      deployBreather: rawInput.deployBreather,
     };
 
     updateWave(this.wave, deltaTime);
     updateShield(this.shield, input.shield, deltaTime);
+    updateBreather(this.breather, this.shield, this.ship.state.position, input.deployBreather, deltaTime);
 
     this.controller.apply(this.ship.state, input, deltaTime);
     this.ship.state.position = this.controller.clampToBounds(this.ship.state.position);
@@ -198,8 +239,11 @@ export class Game {
 
     this.updateShipMesh();
     this.updateShieldMesh();
+    this.updateMagnetRing();
+    this.updateBreatherMesh();
     this.updateProjectiles(deltaTime);
     this.updateAsteroids(deltaTime);
+    this.updateScrap(deltaTime);
     this.updateSpawning(deltaTime);
     this.updateHud();
 
@@ -227,6 +271,19 @@ export class Game {
     this.shieldMesh.visible = this.shield.active;
     const scale = 1.0 + (this.shield.energy / SHIELD_MAX_ENERGY) * 0.2;
     this.shieldMesh.scale.set(scale, scale, scale);
+  }
+
+  private updateMagnetRing(): void {
+    this.magnetRing.visible = true;
+  }
+
+  private updateBreatherMesh(): void {
+    this.breatherMesh.visible = this.breather.active;
+    if (this.breather.active) {
+      this.breatherMesh.position.set(this.breather.position.x, this.breather.position.y, 0);
+      const pulse = 1.0 + Math.sin(this.breather.durationRemaining * 4) * 0.05;
+      this.breatherMesh.scale.set(pulse, pulse, pulse);
+    }
   }
 
   private fireProjectile(): void {
@@ -284,6 +341,29 @@ export class Game {
       }
     }
     this.asteroids = alive;
+  }
+
+  private updateScrap(deltaTime: number): void {
+    const alive: LiveScrap[] = [];
+    for (const piece of this.scrap) {
+      updateScrap(piece.state, deltaTime);
+      magnetPull(piece.state, this.ship.state.position, deltaTime);
+      piece.mesh.position.set(piece.state.position.x, piece.state.position.y, 0);
+
+      if (isScrapCollected(piece.state, this.ship.state.position)) {
+        this.breather.meter = Math.min(BREATHER_METER_COST, this.breather.meter + 1);
+        this.scene.remove(piece.mesh);
+        piece.mesh.geometry.dispose();
+        (piece.mesh.material as Material).dispose();
+      } else if (isScrapExpired(piece.state)) {
+        this.scene.remove(piece.mesh);
+        piece.mesh.geometry.dispose();
+        (piece.mesh.material as Material).dispose();
+      } else {
+        alive.push(piece);
+      }
+    }
+    this.scrap = alive;
   }
 
   private updateSpawning(deltaTime: number): void {
@@ -348,13 +428,30 @@ export class Game {
   }
 
   private destroyAsteroid(target: LiveAsteroid): void {
-    awardBreak(this.wave, target.state.size);
+    const multiplier = isInsideBreatherZone(this.breather, this.ship.state.position)
+      ? BREATHER_SCORE_MULTIPLIER
+      : 1.0;
+    awardBreak(this.wave, target.state.size, multiplier);
+    this.spawnScrapFromAsteroid(target);
     this.scene.remove(target.mesh);
     disposeAsteroidMesh(target.mesh);
     const children = splitAsteroid(target.state);
     for (const child of children) {
       this.spawnAsteroid(child.size, child.position, child.velocity);
     }
+  }
+
+  private spawnScrapFromAsteroid(target: LiveAsteroid): void {
+    if (Math.random() > scrapDropChance(target.state.size)) return;
+
+    const state = createScrap(target.state.position);
+    const mesh = new Mesh(
+      new SphereGeometry(0.12, 6, 6),
+      new MeshBasicMaterial({ color: 0xffcc00 }),
+    );
+    mesh.position.set(state.position.x, state.position.y, 0);
+    this.scrap.push({ state, mesh });
+    this.scene.add(mesh);
   }
 
   private disposeProjectile(projectile: LiveProjectile): void {
@@ -400,6 +497,16 @@ export class Game {
     this.waveElement.style.fontSize = '18px';
     this.waveElement.style.textShadow = '0 0 4px #000000';
     document.body.appendChild(this.waveElement);
+
+    this.breatherElement = document.createElement('div');
+    this.breatherElement.style.position = 'absolute';
+    this.breatherElement.style.top = '48px';
+    this.breatherElement.style.left = '16px';
+    this.breatherElement.style.color = '#ffcc00';
+    this.breatherElement.style.fontFamily = 'monospace';
+    this.breatherElement.style.fontSize = '18px';
+    this.breatherElement.style.textShadow = '0 0 4px #000000';
+    document.body.appendChild(this.breatherElement);
   }
 
   private updateHud(): void {
@@ -409,6 +516,16 @@ export class Game {
     if (this.waveElement) {
       const nextIn = Math.max(0, this.wave.nextWaveIn).toFixed(1);
       this.waveElement.textContent = `WAVE ${this.wave.waveNumber}  NEXT ${nextIn}`;
+    }
+    if (this.breatherElement) {
+      if (this.breather.active) {
+        const remaining = this.breather.durationRemaining.toFixed(1);
+        this.breatherElement.textContent = `ZONE ACTIVE ${remaining}`;
+      } else if (this.breather.meter >= BREATHER_METER_COST) {
+        this.breatherElement.textContent = 'ZONE READY (X)';
+      } else {
+        this.breatherElement.textContent = `ZONE ${this.breather.meter}/${BREATHER_METER_COST}`;
+      }
     }
   }
 }
@@ -444,4 +561,30 @@ function createShieldMesh(): Mesh {
     side: 2,
   });
   return new Mesh(geometry, material);
+}
+
+function createMagnetRing(): Mesh {
+  const geometry = new RingGeometry(2.3, 2.5, 32);
+  const material = new MeshBasicMaterial({
+    color: 0xffcc00,
+    transparent: true,
+    opacity: 0.12,
+    side: 2,
+  });
+  const mesh = new Mesh(geometry, material);
+  mesh.position.z = -0.5;
+  return mesh;
+}
+
+function createBreatherMesh(): Mesh {
+  const geometry = new SphereGeometry(1, 32, 32);
+  const material = new MeshBasicMaterial({
+    color: 0xffaa00,
+    transparent: true,
+    opacity: 0.15,
+    side: 2,
+  });
+  const mesh = new Mesh(geometry, material);
+  mesh.scale.set(4, 4, 4);
+  return mesh;
 }
