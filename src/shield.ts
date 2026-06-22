@@ -1,4 +1,4 @@
-import { AsteroidSize, AsteroidState } from './types';
+import { AsteroidKind, AsteroidSize, AsteroidState } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Shield System
@@ -71,6 +71,26 @@ export function absorbHit(shield: ShieldState, asteroid: AsteroidState): boolean
   shield.energy = Math.max(0, shield.energy - damage);
   shield.hitAbsorbedThisFrame = true;
   return true;
+}
+
+/**
+ * Absorb a small impact (e.g., a shard or projectile) sized like a small
+ * asteroid. Returns true if the shield absorbed the blow.
+ *
+ * Purpose: lets non-asteroid impactors (shards, future projectiles) use the
+ * same shield math without constructing a fake AsteroidState.
+ */
+export function absorbShardHit(shield: ShieldState): boolean {
+  return absorbHit(shield, {
+    position: { x: 0, y: 0 },
+    velocity: { x: 0, y: 0 },
+    size: AsteroidSize.SMALL,
+    health: 1,
+    maxHealth: 1,
+    isTargeted: false,
+    kind: AsteroidKind.IRON,
+    fractured: false,
+  });
 }
 
 export function shieldPercent(shield: ShieldState): number {

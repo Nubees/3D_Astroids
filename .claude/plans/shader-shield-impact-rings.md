@@ -94,3 +94,16 @@ impact ring buffer, and helpers.
 3. `npm run build` → succeeds.
 4. Dev-server screenshot shows a faint blue bubble; manual or scripted death can
    verify impact rings if needed (visual smoke test).
+
+---
+
+## Status: Completed (2026-06-22)
+
+Closed by user sign-off. Verified against current source:
+
+- `src/shield-visuals.ts` — self-contained module with `ShieldMaterialUniforms` (uTime, uBaseColor, Fresnel/hex uniforms, uHitPositions[8], uHitTimes[8], uRingSpeed/uRingWidth/uRingMaxRadius); `createShieldMesh(radius)` builds a `ShaderMaterial` with additive blending, depthWrite disabled, geodesic-distance impact rings, Fresnel rim, and procedural hex-grid tint; `addShieldImpact`, `updateShieldImpacts`, `setShieldEnergy` round out the API.
+- `src/game.ts` — old `spawnShieldArc` / `updateShieldArcs` / `ShieldArc` / `activeShieldArcs` removed; shield mesh created via `createShieldVisualMesh`; `onShieldAbsorbedHit` calls `addShieldImpact(this.shieldMesh, contactPoint, this.ship.state.position)`; per-frame `updateShieldImpacts` and energy-driven `setShieldEnergy` keep the bubble alive; `respawnShip()` clears active impacts; `stop()` disposes geometry + shader material.
+- `tests/shield-visuals.test.ts` — verifies `createShieldMesh` returns a `ShaderMaterial`, `addShieldImpact` writes into uniforms, and aged impacts are removed.
+- Impact ring math uses `acos(clamp(dot, -1, 1))` to avoid NaN at antipodal points.
+
+Verification: `npm run typecheck` ✅, `npm test` ✅, `npm run build` ✅.

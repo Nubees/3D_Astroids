@@ -65,3 +65,16 @@ count down `3`, `2`, `1` before gameplay resumes.
   `pressKey` phase begins.
 - Countdown text should be readable and not conflict with the score HUD; center it
   and make it larger.
+
+---
+
+## Status: Completed (2026-06-22)
+
+Closed by user sign-off. Verified against current source:
+
+- `src/input.ts` — `anyKeyHit` flag set on every `keydown`; `consumeAnyKeyHit(): boolean` returns the flag and clears it on read.
+- `src/game.ts` — `respawnPhase: 'none' | 'exploding' | 'pressKey' | 'countdown'` state machine drives `updateRespawn()`; `countdownTimer` decremented each frame; `respawnShip()` clears asteroids, projectiles, and scrap before the press-key phase begins.
+- HUD — `resumeElement` centered large white monospace text doubles as both the "Press a Key to resume" prompt and the 3-2-1 countdown display; removed by `stop()`.
+- `tests/input.test.ts` — verifies `consumeAnyKeyHit()` is one-shot.
+
+Verification: `npm run typecheck` ✅, `npm test` ✅, `npm run build` ✅.

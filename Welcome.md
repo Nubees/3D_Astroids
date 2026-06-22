@@ -13,10 +13,12 @@
 **Main branch:** `master`.  
 **Repository:** `https://github.com/Nubees/3D_Astroids.git`
 
-**Latest gate status (as of 2026-06-22):**
-- `npm run typecheck` → pass.
-- `npm test` → 112 Vitest tests + 1 Playwright screenshot test pass.
-- `npm run build` → production build succeeds.
+**Latest gate status (as of 2026-06-22, after Phase 6 + 6b Crystal Shard Swarm + Cascade):**
+- `npm run typecheck` → pass (0 errors).
+- `npm test` → **179 Vitest** tests + **10 Playwright** screenshot tests pass (1 Phase 0 + 9 Phase 6b cascade).
+- `npm run build` → production build succeeds (73.61 kB main bundle).
+
+See `RELEASE_NOTES.md` for the latest release entry.
 
 ---
 
@@ -126,15 +128,9 @@ This project uses a three-layer knowledge system. Do not violate ownership rules
 
 ## 5. What's Next (Pending Plans)
 
-The following `.claude/plans/` files represent the next agreed work. Do not start them without confirming with the user unless explicitly told to proceed.
+The polish-bucket plans previously listed here (`ship-explosion-drift.md`, `respawn-clear-and-countdown.md`, `shader-shield-impact-rings.md`) are all completed as of 2026-06-22 — see `.claude/plans/README.md` for the full status table.
 
-| Plan | What It Covers | Status |
-|------|----------------|--------|
-| `.claude/plans/ship-explosion-drift.md` | Ship explosion particles on death, inertia-based ship drift, shield knockback bounce. | Pending |
-| `.claude/plans/respawn-clear-and-countdown.md` | On respawn: clear threats, show "Press a Key to resume", then `3-2-1` countdown. | Pending |
-| `.claude/plans/shader-shield-impact-rings.md` | Replace simple shield sphere with shader-based energy bubble + impact ripples. | Pending |
-
-**Outstanding phase recommendations** (from memory): proceed with Phase 6 Shard Swarm or Phase 7 pickups after the pending plans above.
+**Outstanding phase recommendations** (from memory): proceed with Phase 6 Shard Swarm or Phase 7 pickups.
 
 ---
 
