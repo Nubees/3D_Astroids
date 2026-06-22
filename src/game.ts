@@ -1224,7 +1224,8 @@ export class Game {
     }
     if (isPerfectApplicable(shardsAbsorbed)) {
       hookBonus += 250;
-      hookTexts.push({ text: '+250 PERFECT', color: '#ffffff' });
+      // Vivid lime — rare and rewarding.
+      hookTexts.push({ text: '+250 PERFECT', color: '#aaff00' });
     }
 
     // Apply scoring — base crystal score gets the breather 2× multiplier, but
@@ -1233,12 +1234,32 @@ export class Game {
     const baseCrystalScore = inBreather ? tier.bonus * BREATHER_SCORE_MULTIPLIER : tier.bonus;
     this.wave.score += baseCrystalScore + hookBonus;
 
-    // Floating text: tier label (if any) + hook labels.
+    // Floating text: tier label (if any) + hook labels, staggered vertically
+    // and temporally so they don't bunch at the same pixel. Each text is
+    // bumped 28px up and 0.18s later than the previous so the cascade reads
+    // like a clear sequence rather than overlapping noise.
+    let textIndex = 0;
     if (tier.text) {
-      this.spawnFloatingTextAt(tier.text, target.state.position, 0.0, tier.color);
+      this.spawnFloatingTextAt(
+        tier.text,
+        target.state.position,
+        textIndex * 0.18,
+        tier.color,
+        textIndex * 28,
+        22,
+      );
+      textIndex++;
     }
     for (const hook of hookTexts) {
-      this.spawnFloatingTextAt(hook.text, target.state.position, 0.0, hook.color);
+      this.spawnFloatingTextAt(
+        hook.text,
+        target.state.position,
+        textIndex * 0.18,
+        hook.color,
+        textIndex * 28,
+        20,
+      );
+      textIndex++;
     }
 
     // Death explosion: 1 shockwave ring + scale-up + fade tween (the new
@@ -1637,11 +1658,20 @@ export class Game {
     this.spawnFloatingTextAt(text, world, delaySeconds);
   }
 
-  private spawnFloatingTextAt(text: string, worldPosition: Vector2, delaySeconds: number, color = '#00ffaa'): void {
+  private spawnFloatingTextAt(
+    text: string,
+    worldPosition: Vector2,
+    delaySeconds: number,
+    color = '#00ffaa',
+    verticalOffset = 0,
+    fontSize = 16,
+  ): void {
     const world = new Vector3(worldPosition.x, worldPosition.y, 0);
     world.project(this.camera);
     const baseX = (world.x * 0.5 + 0.5) * window.innerWidth;
-    const baseY = (-world.y * 0.5 + 0.5) * window.innerHeight;
+    // verticalOffset shifts the initial spawn position upward (negative = up)
+    // so multiple texts from the same event do not bunch at the same pixel.
+    const baseY = (-world.y * 0.5 + 0.5) * window.innerHeight - verticalOffset;
 
     const element = document.createElement('div');
     element.textContent = text;
@@ -1650,9 +1680,9 @@ export class Game {
     element.style.top = `${baseY}px`;
     element.style.color = color;
     element.style.fontFamily = 'monospace';
-    element.style.fontSize = '16px';
+    element.style.fontSize = `${fontSize}px`;
     element.style.fontWeight = 'bold';
-    element.style.textShadow = '0 0 6px #000000';
+    element.style.textShadow = '0 0 6px #000000, 0 0 3px #000000';
     element.style.whiteSpace = 'nowrap';
     element.style.pointerEvents = 'none';
     element.style.transform = 'translate(-50%, -120%)';
@@ -1712,24 +1742,34 @@ export class Game {
   // ═══════════════════════════════════════════════════════════════════════
   // My Rules — updateFloatingTexts
   // ───────────────────────────────────────────────────────────────────────
-  // Purpose:  Tick every active floating-text entry — fade, drift, and
-  //           remove DOM when expired.
+  // Purpose:  Tick every active floating-text entry — fade, drift, sway,
+  //           and remove DOM when expired.
   // Setup:    Called once per frame from the main update loop with the
   //           frame delta. Spawning happens via spawnFloatingTextAt which
   //           appends a div to document.body and pushes a FloatingText
   //           record into this.activeFloatingTexts.
-  // Issues:   The alive list was never populated (no `alive.push(text)` in
-  //           the loop), so every entry was implicitly dropped from
+  // Issues:   1) The alive list was never populated (no `alive.push(text)`
+  //           in the loop), so every entry was implicitly dropped from
   //           this.activeFloatingTexts after one frame. Result: text
   //           appeared, stayed frozen at full opacity at its spawn
   //           position, never drifted, never removed from the DOM. Delayed
   //           texts (breather "Recharge Shields" / "2x Score Booster")
   //           never reached `age >= 0` so never became visible.
-  // Fix:      Added `alive.push(text)` for non-expired entries, mirroring
-  //           the canonical pattern in updateCrystalDeathTweens (line ~1014).
-  //           Now entries persist across frames, age accumulates toward
-  //           duration, the DOM element is removed at expiry, and delayed
-  //           texts count down their negative age into the visible region.
+  //           2) Crystal scoring tier + hook text spawned at the SAME
+  //           pixel, SAME frame, SAME font — three or four strings piled
+  //           on top of each other, illegible.
+  // Fix:      1) Added `alive.push(text)` for non-expired entries,
+  //           mirroring the canonical pattern in updateCrystalDeathTweens
+  //           (line ~1014). Now entries persist across frames, age
+  //           accumulates toward duration, the DOM element is removed at
+  //           expiry, and delayed texts count down their negative age into
+  //           the visible region.
+  //           2) spawnFloatingTextAt now accepts a `verticalOffset` and
+  //           `fontSize` param. The crystal kill site staggers each text
+  //           by 28 px vertically and 0.18 s temporally, uses 20-22 px
+  //           font, and a unique vibrant color per tier. Drift bumped
+  //           from 30 → 50 px/s and a ±4 px sin sway added so the float
+  //           feels floaty.
   // Gotchas:  `text.element.remove()` mutates the DOM. Do not reparent the
   //           element after remove() — create a fresh div in
   //           spawnFloatingTextAt if you need to reuse it.
@@ -1744,10 +1784,14 @@ export class Game {
       }
       if (text.age >= 0) {
         const progress = text.age / text.duration;
-        const driftPixels = 30 * text.age;
+        // 50 px/s upward drift makes the float feel pronounced instead of
+        // barely-perceptible. The horizontal sway is a small sin-wave jitter
+        // (±4 px) so the text doesn't rise in a perfectly straight line.
+        const driftPixels = 50 * text.age;
+        const swayPixels = 4 * Math.sin(text.age * 4);
         text.element.style.display = 'block';
         text.element.style.top = `${text.baseY - driftPixels}px`;
-        text.element.style.left = `${text.baseX}px`;
+        text.element.style.left = `${text.baseX + swayPixels}px`;
         text.element.style.opacity = `${1 - progress}`;
       }
       alive.push(text);
@@ -1822,6 +1866,19 @@ export class Game {
       y: crystal.state.position.y,
       fractured: crystal.state.fractured,
     };
+  }
+
+  /**
+   * Force-kill a crystal as if the player shot it. Triggers the full
+   * destroyCrystal path including the score-tier + hook floating text
+   * emission. Screenshot hook for visual verification of scoring text.
+   * Returns the new total wave score, or null if the crystal was missing.
+   */
+  debugKillCrystal(id: number): { score: number } | null {
+    const crystal = this.asteroids.find((a) => a.id === id);
+    if (!crystal) return null;
+    this.destroyCrystal(crystal);
+    return { score: this.wave.score };
   }
 }
 

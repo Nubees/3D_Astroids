@@ -81,15 +81,19 @@ export interface TierBonus {
  */
 export function computeTimeBonusTier(elapsed: number): TierBonus {
   if (elapsed <= 0) {
-    return { bonus: 100, text: '+100 CLEAN KILL', color: '#66ddee' };
+    // Bright cyan — instant reward for the perfect play.
+    return { bonus: 100, text: '+100 CLEAN KILL', color: '#00ffe5' };
   }
   if (elapsed < ULTRA_CLEAN_WINDOW_SECONDS) {
-    return { bonus: 75, text: '+75 ULTRA CLEAN', color: '#ffdd44' };
+    // Vivid gold — the player got in fast, treat it like a medal.
+    return { bonus: 75, text: '+75 ULTRA CLEAN', color: '#ffcc00' };
   }
   if (elapsed < SATURATION_DURATION_SECONDS) {
-    return { bonus: 25, text: null, color: '#4488aa' };
+    // Hot orange — late but not dead yet.
+    return { bonus: 25, text: '+25 LATE', color: '#ff7733' };
   }
-  return { bonus: 10, text: '+10 SURVIVOR', color: '#888888' };
+  // Dim silver — the cascade ran out on its own.
+  return { bonus: 10, text: '+10 SURVIVOR', color: '#bbbbbb' };
 }
 
 /**

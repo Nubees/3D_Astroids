@@ -35,6 +35,7 @@ async function main(): Promise<void> {
   (window as unknown as { __game: Game; __hooks: unknown }).__hooks = {
     spawnCrystalAt: (x: number, y: number) => game.debugSpawnCrystalAt(x, y),
     fractureCrystal: (id: number) => game.debugFractureCrystal(id),
+    killCrystal: (id: number) => game.debugKillCrystal(id),
     setGameTime: (s: number) => game.debugSetGameTime(s),
     getCrystal: (id: number) => game.debugGetCrystal(id),
   };

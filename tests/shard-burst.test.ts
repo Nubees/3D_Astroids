@@ -150,20 +150,21 @@ describe('computeTimeBonusTier', () => {
     const tier = computeTimeBonusTier(0);
     expect(tier.bonus).toBe(100);
     expect(tier.text).toBe('+100 CLEAN KILL');
-    expect(tier.color).toBe('#66ddee');
+    expect(tier.color).toBe('#00ffe5');
   });
 
   it('awards ULTRA CLEAN (+75) within the 4s window', () => {
     const tier = computeTimeBonusTier(3.99);
     expect(tier.bonus).toBe(75);
     expect(tier.text).toBe('+75 ULTRA CLEAN');
-    expect(tier.color).toBe('#ffdd44');
+    expect(tier.color).toBe('#ffcc00');
   });
 
-  it('awards LATE (+25) between 4s and 10s, no text', () => {
+  it('awards LATE (+25) between 4s and 10s with hot-orange text', () => {
     const tier = computeTimeBonusTier(4.01);
     expect(tier.bonus).toBe(25);
-    expect(tier.text).toBeNull();
+    expect(tier.text).toBe('+25 LATE');
+    expect(tier.color).toBe('#ff7733');
   });
 
   it('awards LATE (+25) at 9.99s, just before saturation', () => {
@@ -171,11 +172,11 @@ describe('computeTimeBonusTier', () => {
     expect(tier.bonus).toBe(25);
   });
 
-  it('awards SURVIVOR (+10) after 10s with grey text', () => {
+  it('awards SURVIVOR (+10) after 10s with silver text', () => {
     const tier = computeTimeBonusTier(10.01);
     expect(tier.bonus).toBe(10);
     expect(tier.text).toBe('+10 SURVIVOR');
-    expect(tier.color).toBe('#888888');
+    expect(tier.color).toBe('#bbbbbb');
   });
 
   it('boundary: ULTRA_CLEAN_WINDOW_SECONDS is 4.0', () => {
