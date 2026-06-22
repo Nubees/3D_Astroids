@@ -1709,6 +1709,31 @@ export class Game {
     this.breatherWasActive = this.breather.active;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // My Rules — updateFloatingTexts
+  // ───────────────────────────────────────────────────────────────────────
+  // Purpose:  Tick every active floating-text entry — fade, drift, and
+  //           remove DOM when expired.
+  // Setup:    Called once per frame from the main update loop with the
+  //           frame delta. Spawning happens via spawnFloatingTextAt which
+  //           appends a div to document.body and pushes a FloatingText
+  //           record into this.activeFloatingTexts.
+  // Issues:   The alive list was never populated (no `alive.push(text)` in
+  //           the loop), so every entry was implicitly dropped from
+  //           this.activeFloatingTexts after one frame. Result: text
+  //           appeared, stayed frozen at full opacity at its spawn
+  //           position, never drifted, never removed from the DOM. Delayed
+  //           texts (breather "Recharge Shields" / "2x Score Booster")
+  //           never reached `age >= 0` so never became visible.
+  // Fix:      Added `alive.push(text)` for non-expired entries, mirroring
+  //           the canonical pattern in updateCrystalDeathTweens (line ~1014).
+  //           Now entries persist across frames, age accumulates toward
+  //           duration, the DOM element is removed at expiry, and delayed
+  //           texts count down their negative age into the visible region.
+  // Gotchas:  `text.element.remove()` mutates the DOM. Do not reparent the
+  //           element after remove() — create a fresh div in
+  //           spawnFloatingTextAt if you need to reuse it.
+  // ═══════════════════════════════════════════════════════════════════════
   private updateFloatingTexts(deltaTime: number): void {
     const alive: FloatingText[] = [];
     for (const text of this.activeFloatingTexts) {
@@ -1725,6 +1750,7 @@ export class Game {
         text.element.style.left = `${text.baseX}px`;
         text.element.style.opacity = `${1 - progress}`;
       }
+      alive.push(text);
     }
     this.activeFloatingTexts = alive;
   }
