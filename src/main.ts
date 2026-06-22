@@ -27,6 +27,18 @@ async function main(): Promise<void> {
   const game = await Game.create(canvas, selection.entry.id, selection.mesh);
   game.start();
 
+  // Expose a screenshot/debug hook on `window` so the Playwright harness can
+  // drive deterministic game states (force a crystal fracture, advance the
+  // burst clock, etc.). Available in both dev and prod builds — it exposes
+  // no sensitive data, only gameplay state.
+  (window as unknown as { __game: Game; __hooks: unknown }).__game = game;
+  (window as unknown as { __game: Game; __hooks: unknown }).__hooks = {
+    spawnCrystalAt: (x: number, y: number) => game.debugSpawnCrystalAt(x, y),
+    fractureCrystal: (id: number) => game.debugFractureCrystal(id),
+    setGameTime: (s: number) => game.debugSetGameTime(s),
+    getCrystal: (id: number) => game.debugGetCrystal(id),
+  };
+
   window.addEventListener('beforeunload', () => {
     game.stop();
   });

@@ -66,3 +66,16 @@ shards/particles before respawning.
   responsive.
 - Explosion particles need cleanup to avoid memory leaks.
 - Death delay pauses gameplay; keep it short so respawn doesn't feel sluggish.
+
+---
+
+## Status: Completed (2026-06-22)
+
+Closed by user sign-off. Verified against current source:
+
+- `src/ship.ts` — `isDead`, `respawnTimer`, `markDead()`, `markAlive()` implemented; `applyThrust` integrates input as acceleration rather than direct velocity assignment.
+- `src/movement/arena-controller.ts` — delegates thrust to `ship.applyThrust()`; arena-boundary bounce applied when ship hits the edge.
+- `src/game.ts` — `spawnShipExplosion()` (~25 outward shards, orange/white/yellow), `updateExplosions(deltaTime)` fades & removes, `disposeAllExplosionParticles` prevents leaks; `respawnShip()` triggers the explosion and sets `shipRespawnDelay = 1.0`; input ignored while dead.
+- `tests/movement.test.ts` — arena acceleration + respawn state covered by the existing test suite.
+
+Verification: `npm run typecheck` ✅, `npm test` ✅, `npm run build` ✅.

@@ -36,6 +36,11 @@ Before executing a plan, consider spawning `challenger-agent` to verify:
 | File | Status | Description |
 |------|--------|-------------|
 | `phase-0-foundations.md` | completed | Phase 0 scaffold: Three.js + Vite stack, screenshot harness, npm scripts |
+| `ship-explosion-drift.md` | completed | Ship inertia-based movement, shield knockback bounce, death explosion, 1s respawn delay |
+| `respawn-clear-and-countdown.md` | completed | Clear threats on respawn, "Press a Key to resume", 3-2-1 countdown |
+| `shader-shield-impact-rings.md` | completed | Shader-based energy shield: Fresnel rim, hex grid, geodesic impact rings |
+| `phase-6-shard-swarm.md` | completed | Phase 6 base: crystal kind, 30% threshold fracture, 8 homing shards, +50 clean-kill bonus |
+| `phase-6-shard-swarm-escalation.md` | completed | Phase 6b: 1→2→4→8→16→24 burst cascade, 4 score tiers, CLUTCH/PERFECT hooks, 9 screenshots |
 
 ## Relation to Memory
 

@@ -27,31 +27,65 @@ import { createProjectile, PROJECTILE_RADIUS, updateProjectile } from './project
 import { attachGameplayFlames, toggleFlames } from './exhaust-gameplay';
 import {
   AsteroidSize,
+  AsteroidKind,
+  CrystalMeshUserData,
   SIZE_RADIUS,
   createAsteroidMesh,
   createAsteroidState,
   disposeAsteroidMesh,
+  perturbCrystalGeometry,
   resolveAsteroidCollision,
+  shouldCrystalFracture,
   splitAsteroid,
   splitSmallAsteroid,
+  swapToCrackedMaterial,
 } from './asteroid';
+import {
+  MAX_SHARDS,
+  SHARD_RADIUS,
+  SHARDS_PER_CRYSTAL,
+  createShard,
+  generateShardSpawnAngles,
+  isShardDead,
+  shardCountForBurstIndex,
+  updateShard,
+} from './shard';
+import { createShardMesh, orientShard } from './shard-mesh';
 import { circlesCollide, resolveShipAsteroidBounce } from './utils/collision';
 import {
   AsteroidState,
   BreatherZoneState,
+  CLUTCH_WINDOW_SECONDS,
   Projectile as ProjectileState,
+  SATURATION_DURATION_SECONDS,
   ScrapState,
+  ShardState,
+  ULTRA_CLEAN_WINDOW_SECONDS,
   Vector2,
 } from './types';
+import {
+  CrystalFractureScheduler,
+  computeTimeBonusTier,
+  createBurstTelegraph,
+  createCrackedMaterial,
+  getBurstFlash,
+  getCrackPulse,
+  isClutchApplicable,
+  isPerfectApplicable,
+  makeCrackedCrystalTexture,
+  TELEGRAPH_DURATION_SECONDS,
+} from './crystal-fx';
+import { Shockwave, updateShockwaves } from './shockwave';
 import { ArenaMovementController } from './movement/arena-controller';
 import {
   ShieldState,
-  createShieldState,
-  updateShield,
   absorbHit,
+  absorbShardHit,
+  createShieldState,
   shieldColor,
   shieldPercent,
   SHIELD_MAX_ENERGY,
+  updateShield,
 } from './shield';
 import {
   DamageParticle,
@@ -126,14 +160,29 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
+const MAX_BURSTS_PER_FRAME = 1;
+const CAMERA_SHAKE_MAX_AMPLITUDE = 0.20;
+const CAMERA_SHAKE_HALF_LIFE = 0.1;
+const CRYSTAL_DEATH_TWEEN_DURATION = 0.4;
+const CRYSTAL_DEATH_TWEEN_POOL_CAP = 8;
 
 interface LiveAsteroid {
   state: AsteroidState;
   mesh: Group;
+  // Stable per-instance id. Monotonically increasing counter assigned at
+  // spawn time. Crystals use this as the scheduler key; non-crystal
+  // asteroids ignore it. Required because array indices are not stable
+  // across frames (culled entries get spliced out).
+  readonly id: number;
 }
 
 interface LiveProjectile {
   state: ProjectileState;
+  mesh: Mesh;
+}
+
+interface LiveShard {
+  state: ShardState;
   mesh: Mesh;
 }
 
@@ -148,6 +197,22 @@ interface FloatingText {
   duration: number;
   baseX: number;
   baseY: number;
+}
+
+interface CrystalDeathTween {
+  mesh: Group;
+  crackedMaterial: MeshStandardMaterial;
+  age: number;
+  duration: number;
+  position: Vector2;
+}
+
+interface PendingTelegraph {
+  mesh: import('three').LineSegments;
+  position: Vector2;
+  angles: readonly number[];
+  spawnAt: number;
+  count: number;
 }
 
 export class Game {
@@ -167,11 +232,26 @@ export class Game {
   private readonly breather: BreatherZoneState;
   private projectiles: LiveProjectile[] = [];
   private asteroids: LiveAsteroid[] = [];
+  private activeShards: LiveShard[] = [];
+  private crystalsSpawnedThisRun: number = 0;
+  private crystalsSpawnedThisWave: number = 0;
   private scrap: LiveScrap[] = [];
   private readonly controller: ArenaMovementController;
   private readonly bloomComposer: EffectComposer;
   private lastTime = 0;
   private running = true;
+  private gameTimeSeconds = 0;
+  private fractureSchedulers = new Map<number, CrystalFractureScheduler>();
+  private crystalDeathTimes = new Map<number, number>();
+  private crystalShardsAbsorbed = new Map<number, number>();
+  private crystalDeathTweens: CrystalDeathTween[] = [];
+  private activeShockwaves: Shockwave[] = [];
+  private pendingTelegraphs: PendingTelegraph[] = [];
+  private cameraShakeAmplitude = 0;
+  private cameraShakeRemaining = 0;
+  private isCrystalBurstFrame = false;
+  private nextAsteroidId = 1;
+  private lastWaveNumber = 1;
   private readonly resizeHandler: () => void;
   private scoreElement: HTMLDivElement | null = null;
   private waveElement: HTMLDivElement | null = null;
@@ -290,14 +370,49 @@ export class Game {
 
     disposeAllSparkArcs(this.activeSparks);
     this.activeSparks = [];
+
+    for (const shard of this.activeShards) {
+      this.disposeShard(shard);
+    }
+    this.activeShards = [];
+
+    // Phase 6b: dispose all crystal cascade state — schedulers, shockwaves,
+    // telegraphs, death tweens, camera shake. Cracked-material disposal is
+    // handled inside disposeAsteroidMesh.
+    this.fractureSchedulers.clear();
+    this.crystalDeathTimes.clear();
+    this.crystalShardsAbsorbed.clear();
+    for (const wave of this.activeShockwaves) {
+      this.scene.remove(wave.mesh);
+      wave.dispose();
+    }
+    this.activeShockwaves = [];
+    for (const pending of this.pendingTelegraphs) {
+      this.scene.remove(pending.mesh);
+      pending.mesh.geometry.dispose();
+      (pending.mesh.material as Material).dispose();
+    }
+    this.pendingTelegraphs = [];
+    for (const tween of this.crystalDeathTweens) {
+      this.scene.remove(tween.mesh);
+      disposeAsteroidMesh(tween.mesh);
+    }
+    this.crystalDeathTweens = [];
+    this.cameraShakeAmplitude = 0;
+    this.cameraShakeRemaining = 0;
   }
 
   private loop = (time: number): void => {
     if (!this.running) return;
 
     const rawDelta = (time - this.lastTime) / 1000;
-    const deltaTime = Math.min(rawDelta, MAX_DELTA_TIME);
+    // Clamp deltaTime to 1/30s. Tab unfocus + browser throttling can produce
+    // huge raw deltas; without this clamp a single frame could fire the
+    // entire burst cascade and overwhelm MAX_SHARDS (4th-pass Risk 1).
+    const deltaTime = Math.min(rawDelta, MAX_DELTA_TIME, 1 / 30);
     this.lastTime = time;
+    this.gameTimeSeconds += deltaTime;
+    this.isCrystalBurstFrame = false;
 
     this.update(deltaTime);
     this.bloomComposer.render();
@@ -322,6 +437,10 @@ export class Game {
     }
 
     updateWave(this.wave, deltaTime);
+    if (this.wave.waveNumber !== this.lastWaveNumber) {
+      this.crystalsSpawnedThisWave = 0;
+      this.lastWaveNumber = this.wave.waveNumber;
+    }
     const inBreatherZone = isInsideBreatherZone(this.breather, this.ship.state.position);
     updateShield(this.shield, inBreatherZone, deltaTime);
     updateBreather(this.breather, this.shield, this.ship.state.position, input.deployBreather, deltaTime);
@@ -339,10 +458,17 @@ export class Game {
     this.updateMagnetRing();
     this.updateBreatherMesh();
     this.updateProjectiles(deltaTime);
+    this.updateShards(deltaTime);
     this.updateAsteroids(deltaTime);
     this.handleAsteroidCollisions();
     this.updateScrap(deltaTime);
     this.updateSpawning(deltaTime);
+    this.updateCrystalBursts(this.gameTimeSeconds);
+    this.updatePendingTelegraphs(this.gameTimeSeconds);
+    this.updateCrystalDeathTweens(deltaTime);
+    this.updateShockwaveList(deltaTime);
+    this.updateCrystalVisuals(this.gameTimeSeconds);
+    this.applyCameraShake(deltaTime);
     this.updateHud(deltaTime);
     this.updateFloatingTexts(deltaTime);
     updateShieldVisuals(this.shieldMesh, deltaTime);
@@ -500,6 +626,69 @@ export class Game {
     this.projectiles = alive;
   }
 
+  private updateShards(deltaTime: number): void {
+    const boundsRadius = this.controller.cameraPosition
+      ? Math.max(Math.hypot(this.controller.cameraPosition.x, this.controller.cameraPosition.y), 30)
+      : 30;
+    const alive: LiveShard[] = [];
+    for (const shard of this.activeShards) {
+      updateShard(shard.state, deltaTime, this.ship.state.position);
+      shard.mesh.position.set(shard.state.position.x, shard.state.position.y, 0);
+      orientShard(shard.mesh, shard.state.angle);
+
+      // Shard ↔ ship collision. If the shield absorbs it, fire the impact
+      // visual and knockback; otherwise respawn. Either way, the shard is
+      // consumed on contact.
+      let consumed = false;
+      if (circlesCollide(shard.state.position, SHARD_RADIUS, this.ship.state.position, SHIELD_RADIUS)) {
+        if (absorbShardHit(this.shield)) {
+          const contact = { x: shard.state.position.x, y: shard.state.position.y };
+          addShieldImpact(this.shieldMesh, contact, this.ship.state.position);
+          this.applyShieldKnockbackFromPoint(contact);
+          // Track absorbed shards per source crystal for the PERFECT bonus.
+          if (shard.state.crystalId !== -1) {
+            const prev = this.crystalShardsAbsorbed.get(shard.state.crystalId) ?? 0;
+            this.crystalShardsAbsorbed.set(shard.state.crystalId, prev + 1);
+          }
+        } else {
+          this.respawnShip();
+        }
+        consumed = true;
+      }
+
+      if (!consumed && isShardDead(shard.state, boundsRadius)) {
+        this.disposeShard(shard);
+        consumed = true;
+      }
+
+      if (!consumed) {
+        alive.push(shard);
+      } else if (shard.mesh.parent) {
+        this.disposeShard(shard);
+      }
+    }
+    this.activeShards = alive;
+  }
+
+  private disposeShard(shard: LiveShard): void {
+    this.scene.remove(shard.mesh);
+    // Shard geometry + material are shared via shard-mesh.ts. Do not dispose
+    // them here — disposing would break other in-flight shards that share
+    // the same ConeGeometry / MeshStandardMaterial.
+  }
+
+  private applyShieldKnockbackFromPoint(contact: Vector2): void {
+    const dx = this.ship.state.position.x - contact.x;
+    const dy = this.ship.state.position.y - contact.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 0.001) return;
+    const impulse = 6.0;
+    this.ship.state.velocity = {
+      x: this.ship.state.velocity.x + (dx / distance) * impulse,
+      y: this.ship.state.velocity.y + (dy / distance) * impulse,
+    };
+  }
+
   private updateAsteroids(deltaTime: number): void {
     const alive: LiveAsteroid[] = [];
     for (const asteroid of this.asteroids) {
@@ -572,15 +761,301 @@ export class Game {
     }
   }
 
-  private spawnAsteroid(size: AsteroidSize, position: Vector2, velocity: Vector2, isTargeted = false): void {
-    const state = createAsteroidState(size, position, velocity, isTargeted);
-    const mesh = createAsteroidMesh(size, isTargeted);
+  private spawnAsteroid(size: AsteroidSize, position: Vector2, velocity: Vector2, isTargeted = false, kind: AsteroidKind = AsteroidKind.IRON): void {
+    const state = createAsteroidState(size, position, velocity, isTargeted, kind);
+    const mesh = createAsteroidMesh(size, isTargeted, kind);
     mesh.position.set(position.x, position.y, 0);
-    this.asteroids.push({ state, mesh });
+    this.asteroids.push({ state, mesh, id: this.nextAsteroidId });
+    this.nextAsteroidId += 1;
     this.scene.add(mesh);
   }
 
+  private spawnCrystal(): void {
+    const baseSpeed = getAsteroidBaseSpeed(this.wave);
+    const position = this.controller.getSpawnPosition();
+    const inward = this.controller.getSpawnVelocity();
+    const inwardSpeed = Math.hypot(inward.x, inward.y);
+    const speed = baseSpeed * 0.9;
+    const velocity = inwardSpeed > 0
+      ? { x: (inward.x / inwardSpeed) * speed, y: (inward.y / inwardSpeed) * speed }
+      : { x: 0, y: -speed };
+    this.spawnAsteroid(AsteroidSize.LARGE, position, velocity, false, AsteroidKind.CRYSTAL);
+    this.crystalsSpawnedThisRun += 1;
+    this.crystalsSpawnedThisWave += 1;
+  }
+
+  /**
+   * Trigger the fracture state on a crystal: swap to cracked material,
+   * perturb geometry, register the burst scheduler, and announce it. Called
+   * from handleCollisions when shouldCrystalFracture returns true.
+   */
+  private fractureCrystal(asteroid: LiveAsteroid): void {
+    const crystalId = asteroid.id;
+    asteroid.state.fractured = true;
+
+    // 1. Generate a deterministic cracked texture and swap the material.
+    const crackedTexture = makeCrackedCrystalTexture(crystalId);
+    const crackedMaterial = createCrackedMaterial(crackedTexture);
+    swapToCrackedMaterial(asteroid.mesh, crackedMaterial, crackedTexture);
+
+    // 2. Perturb geometry so the crystal looks damaged.
+    perturbCrystalGeometry(asteroid.mesh, 0.06, crystalId);
+
+    // 3. Register the burst scheduler with game-time as the clock.
+    this.fractureSchedulers.set(crystalId, new CrystalFractureScheduler(crystalId, this.gameTimeSeconds));
+    this.crystalDeathTimes.set(crystalId, this.gameTimeSeconds);
+    this.crystalShardsAbsorbed.set(crystalId, 0);
+
+    // 4. Announce it.
+    this.spawnFloatingTextAt('FRACTURING!', asteroid.state.position, 0.0, '#66ddee');
+
+    // 5. Camera shake on the fracture frame so the player feels the hit.
+    this.cameraShakeAmplitude = Math.min(CAMERA_SHAKE_MAX_AMPLITUDE, Math.max(this.cameraShakeAmplitude, 0.5));
+    this.cameraShakeRemaining = 0.4;
+    this.isCrystalBurstFrame = true;
+  }
+
+  /**
+   * Advance all crystal burst schedulers. Fires at most MAX_BURSTS_PER_FRAME
+   * bursts total across all schedulers per call. Mutates the scheduler
+   * state — callers should treat the returned list as a fresh snapshot.
+   */
+  private updateCrystalBursts(gameTime: number): void {
+    let totalFired = 0;
+    for (const [id, scheduler] of this.fractureSchedulers) {
+      if (totalFired >= MAX_BURSTS_PER_FRAME) break;
+      const target = this.findCrystalById(id);
+      if (!target) continue;
+      const result = scheduler.update(gameTime);
+      for (const count of result.burstsToFire) {
+        this.spawnBurst(target, count, scheduler);
+        totalFired += 1;
+        if (totalFired >= MAX_BURSTS_PER_FRAME) break;
+      }
+      if (result.done) {
+        // Saturation cap reached — crystal is destroyed for +10 SURVIVOR.
+        this.destroyCrystal(target);
+        this.fractureSchedulers.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Find a LiveAsteroid by its stable id. O(n) but n is small (1-3 crystals
+   * per wave).
+   */
+  private findCrystalById(id: number): LiveAsteroid | null {
+    for (const asteroid of this.asteroids) {
+      if (asteroid.state.kind === AsteroidKind.CRYSTAL && asteroid.id === id) {
+        return asteroid;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Spawn a single burst of N shards from a crystal. Computes the cap-aware
+   * actual count, attaches a telegraph, then dispatches the VFX. Wraps the
+   * VFX in a try/catch so a single misbehaving crystal cannot freeze the
+   * entire cascade.
+   */
+  private spawnBurst(
+    target: LiveAsteroid,
+    requestedCount: number,
+    scheduler: CrystalFractureScheduler,
+  ): void {
+    try {
+      const room = Math.max(0, MAX_SHARDS - this.activeShards.length);
+      const actual = Math.min(requestedCount, room);
+      const angles = generateShardSpawnAngles(actual, 0.2);
+      this.isCrystalBurstFrame = true;
+
+      // Burst-shape telegraph: a 0.15s preview of where shards will go.
+      // Skipped if the burst was capped (don't telegraph a fake count).
+      if (actual === requestedCount && actual > 0) {
+        this.spawnTelegraph(target.state.position, angles, this.gameTimeSeconds + TELEGRAPH_DURATION_SECONDS, actual);
+      }
+
+      // Spawn the actual shards (after the telegraph finishes). The telegraph
+      // is purely visual — the shards are dispatched now because the player
+      // will see the telegraph for TELEGRAPH_DURATION_SECONDS then the real
+      // shards immediately after. The shard creation itself is also capped
+      // by room above.
+      for (const angle of angles) {
+        const state = createShard(target.state.position, angle, target.id);
+        const mesh = createShardMesh();
+        mesh.position.set(state.position.x, state.position.y, 0);
+        orientShard(mesh, state.angle);
+        this.activeShards.push({ state, mesh });
+        this.scene.add(mesh);
+      }
+
+      // White flash on the crystal mesh. Use getBurstFlash(t) over 0.15s.
+      const inner = target.mesh.children[0];
+      if (inner instanceof Mesh) {
+        const cracked = (target.mesh.userData as CrystalMeshUserData).crackedMaterial;
+        if (cracked) {
+          const pulse = getCrackPulse(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
+          const flash = getBurstFlash(0.075); // peak flash
+          cracked.emissiveIntensity = pulse + 1.5 * flash;
+        }
+      }
+
+      // Shockwave ring at the crystal position.
+      const intensity = 0.5 + 0.5 * (actual / 24);
+      this.activeShockwaves.push(new Shockwave(target.state.position, 0x55ccdd, intensity));
+
+      // Floating text — never lie about counts.
+      if (actual === requestedCount && actual > 0) {
+        this.spawnFloatingTextAt(`+${actual}`, target.state.position, 0.0, '#ff5544');
+      } else if (actual > 0) {
+        this.spawnFloatingTextAt('+SATURATED', target.state.position, 0.0, '#888888');
+      } else {
+        this.spawnFloatingTextAt('+0 SHARDS', target.state.position, 0.0, '#888888');
+      }
+
+      // Camera shake — take max with prior frame, never overwrite.
+      const shake = Math.min(1.0, actual / 24);
+      this.cameraShakeAmplitude = Math.min(
+        CAMERA_SHAKE_MAX_AMPLITUDE,
+        Math.max(this.cameraShakeAmplitude, shake),
+      );
+      this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, 0.3);
+    } catch (e) {
+      console.error('[crystal-burst]', e);
+    }
+  }
+
+  private spawnTelegraph(position: Vector2, angles: readonly number[], spawnAt: number, count: number): void {
+    const mesh = createBurstTelegraph(position, angles);
+    this.scene.add(mesh);
+    this.pendingTelegraphs.push({ mesh, position, angles, spawnAt, count });
+  }
+
+  private updatePendingTelegraphs(gameTime: number): void {
+    const alive: PendingTelegraph[] = [];
+    for (const pending of this.pendingTelegraphs) {
+      if (gameTime >= pending.spawnAt) {
+        this.scene.remove(pending.mesh);
+        pending.mesh.geometry.dispose();
+        (pending.mesh.material as Material).dispose();
+      } else {
+        alive.push(pending);
+      }
+    }
+    this.pendingTelegraphs = alive;
+  }
+
+  /**
+   * Drive the cracked crystal's emissiveIntensity every frame. The pulse
+   * formula intensifies as the next burst approaches, giving the player a
+   * visual cue for the cascade.
+   */
+  private updateCrystalVisuals(gameTime: number): void {
+    for (const [id, scheduler] of this.fractureSchedulers) {
+      const target = this.findCrystalById(id);
+      if (!target) continue;
+      const cracked = (target.mesh.userData as CrystalMeshUserData).crackedMaterial;
+      if (!cracked) continue;
+      const timeToNext = scheduler.getTimeToNextBurst(gameTime);
+      const pulse = getCrackPulse(timeToNext);
+      // Continuous shake of the mesh position.
+      const shakeSeed = (target.mesh.userData as CrystalMeshUserData).shakeSeed ?? id;
+      const shakeX = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 1.7);
+      const shakeY = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed + 0.3) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 2.0);
+      target.mesh.position.set(
+        target.state.position.x + shakeX,
+        target.state.position.y + shakeY,
+        0,
+      );
+      // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
+      if (!this.isCrystalBurstFrame) {
+        cracked.emissiveIntensity = pulse;
+      }
+    }
+  }
+
+  private spawnCrystalDeathTween(target: LiveAsteroid, text: string): void {
+    if (this.crystalDeathTweens.length >= CRYSTAL_DEATH_TWEEN_POOL_CAP) {
+      // Snap-remove the oldest tween to stay under the cap.
+      const oldest = this.crystalDeathTweens.shift();
+      if (oldest) {
+        this.scene.remove(oldest.mesh);
+        disposeAsteroidMesh(oldest.mesh);
+      }
+    }
+    const userData = target.mesh.userData as CrystalMeshUserData;
+    const crackedMaterial = userData.crackedMaterial ?? (target.mesh.children[0] as Mesh).material as MeshStandardMaterial;
+    this.crystalDeathTweens.push({
+      mesh: target.mesh,
+      crackedMaterial,
+      age: 0,
+      duration: CRYSTAL_DEATH_TWEEN_DURATION,
+      position: { x: target.state.position.x, y: target.state.position.y },
+    });
+    this.spawnFloatingTextAt(text, target.state.position, 0.0, '#66ddee');
+  }
+
+  private updateCrystalDeathTweens(deltaTime: number): void {
+    const alive: CrystalDeathTween[] = [];
+    for (const tween of this.crystalDeathTweens) {
+      tween.age += deltaTime;
+      const t = Math.min(1, tween.age / tween.duration);
+      // Cubic ease-out: 1 - (1-t)^3
+      const easeOut = 1 - (1 - t) * (1 - t) * (1 - t);
+      const scale = 1.0 + 0.6 * easeOut;
+      tween.mesh.scale.set(scale, scale, scale);
+      tween.crackedMaterial.opacity = 1.0 - t;
+      tween.crackedMaterial.transparent = true;
+      if (t >= 1) {
+        this.scene.remove(tween.mesh);
+        disposeAsteroidMesh(tween.mesh);
+      } else {
+        alive.push(tween);
+      }
+    }
+    this.crystalDeathTweens = alive;
+  }
+
+  private updateShockwaveList(deltaTime: number): void {
+    this.activeShockwaves = updateShockwaves(this.activeShockwaves, this.scene, deltaTime);
+  }
+
+  private applyCameraShake(deltaTime: number): void {
+    if (this.cameraShakeRemaining <= 0) {
+      this.cameraShakeAmplitude = 0;
+      return;
+    }
+    this.cameraShakeRemaining = Math.max(0, this.cameraShakeRemaining - deltaTime);
+    const decay = Math.pow(0.5, deltaTime / CAMERA_SHAKE_HALF_LIFE);
+    this.cameraShakeAmplitude *= decay;
+    const shakeX = (Math.random() - 0.5) * this.cameraShakeAmplitude * 2;
+    const shakeY = (Math.random() - 0.5) * this.cameraShakeAmplitude * 2;
+    this.camera.position.x = shakeX;
+    this.camera.position.y = shakeY;
+    if (this.cameraShakeRemaining <= 0) {
+      this.camera.position.x = 0;
+      this.camera.position.y = 0;
+    }
+  }
+
   private spawnRandomAsteroid(): void {
+    // Crystal gating: at wave 3+, occasionally swap a normal LARGE spawn for a
+    // crystal. Per-wave quota enforced by `crystalsSpawnedThisWave` so a single
+    // wave cannot spawn more than its share even if the 35% roll fires many
+    // times in a row.
+    const waveNumber = this.wave.waveNumber;
+    const perWaveQuota = waveNumber < 6 ? 1 : waveNumber < 9 ? 2 : 3;
+    if (
+      waveNumber >= 3 &&
+      this.crystalsSpawnedThisRun < waveNumber - 2 &&
+      this.crystalsSpawnedThisWave < perWaveQuota &&
+      Math.random() < 0.35
+    ) {
+      this.spawnCrystal();
+      return;
+    }
+
     const baseSpeed = getAsteroidBaseSpeed(this.wave);
     const position = this.controller.getSpawnPosition();
     this.asteroidSpawnCount += 1;
@@ -638,6 +1113,15 @@ export class Game {
       for (const projectile of this.projectiles) {
         if (!hit && circlesCollide(asteroid.state.position, asteroidRadius, projectile.state.position, PROJECTILE_RADIUS)) {
           hit = true;
+          // Crystals track damage (multi-hit). Iron asteroids die on any hit,
+          // matching pre-Phase 6 behavior — Iron Slag has 1 HP for SMALL/TINY
+          // and 2/4 for MEDIUM/LARGE, but they were always 1-shot in practice
+          // because splitAsteroid was called from destroyAsteroid unconditionally.
+          // For crystals (6 HP), we subtract 1 here and let the threshold check
+          // below decide whether to fracture or destroy.
+          if (asteroid.state.kind === AsteroidKind.CRYSTAL) {
+            asteroid.state.health = Math.max(0, asteroid.state.health - 1);
+          }
           this.disposeProjectile(projectile);
         } else {
           remainingProjectiles.push(projectile);
@@ -646,7 +1130,29 @@ export class Game {
       this.projectiles = remainingProjectiles;
 
       if (hit) {
-        this.destroyAsteroid(asteroid);
+        // Iron asteroids always die on a hit (pre-Phase 6 behavior).
+        if (asteroid.state.kind === AsteroidKind.IRON) {
+          this.destroyAsteroid(asteroid);
+          continue;
+        }
+
+        // Crystal branch: check threshold before destroying — if it fractured
+        // this frame, swap to the cracked material, perturb geometry, register
+        // the burst scheduler, and skip the destroy. The player still has to
+        // finish it off and the cascade will fire 1→2→4→8→16→24 shards over 10s.
+        if (shouldCrystalFracture(asteroid.state)) {
+          this.fractureCrystal(asteroid);
+          aliveAsteroids.push(asteroid);
+          continue;
+        }
+
+        if (asteroid.state.health <= 0) {
+          this.destroyAsteroid(asteroid);
+          continue;
+        }
+        // Non-fatal hit on a crystal: keep it alive so the player can still
+        // commit to a clean kill or watch it fracture on a future hit.
+        aliveAsteroids.push(asteroid);
         continue;
       }
 
@@ -669,6 +1175,17 @@ export class Game {
   }
 
   private destroyAsteroid(target: LiveAsteroid): void {
+    // Single dispatch on kind — the iron path stays exactly as it was before
+    // Phase 6b; the crystal path lives in destroyCrystal (scoring + cascade
+    // cleanup + death explosion VFX).
+    if (target.state.kind === AsteroidKind.CRYSTAL) {
+      this.destroyCrystal(target);
+      return;
+    }
+    this.destroyIronAsteroid(target);
+  }
+
+  private destroyIronAsteroid(target: LiveAsteroid): void {
     const multiplier = isInsideBreatherZone(this.breather, this.ship.state.position)
       ? BREATHER_SCORE_MULTIPLIER
       : 1.0;
@@ -680,6 +1197,74 @@ export class Game {
     for (const child of children) {
       this.spawnAsteroid(child.size, child.position, child.velocity);
     }
+  }
+
+  /**
+   * Single home for crystal destruction (Phase 6b fix H6). Computes the
+   * score tier, applies CLUTCH + PERFECT hook bonuses, spawns the death
+   * explosion, and cleans up scheduler / counter maps. The iron path above
+   * is byte-for-byte the original destroyAsteroid body.
+   */
+  private destroyCrystal(target: LiveAsteroid): void {
+    const crystalId = this.crystalIdFor(target);
+    const fractureStart = this.crystalDeathTimes.get(crystalId) ?? this.gameTimeSeconds;
+    const elapsed = Math.max(0, this.gameTimeSeconds - fractureStart);
+    const shardsAbsorbed = this.crystalShardsAbsorbed.get(crystalId) ?? 0;
+
+    // Score tier (CLEAN / ULTRA / LATE / SURVIVOR) based on elapsed fracture time.
+    const tier = computeTimeBonusTier(elapsed);
+
+    // Hook bonuses: CLUTCH (tight-timing kill) and PERFECT (zero-shard run).
+    let hookBonus = 0;
+    const hookTexts: { text: string; color: string }[] = [];
+    const scheduler = this.fractureSchedulers.get(crystalId);
+    if (scheduler && isClutchApplicable(elapsed, scheduler.getTimeToNextBurst(this.gameTimeSeconds))) {
+      hookBonus += 15;
+      hookTexts.push({ text: '+15 CLUTCH', color: '#ff44ff' });
+    }
+    if (isPerfectApplicable(shardsAbsorbed)) {
+      hookBonus += 250;
+      hookTexts.push({ text: '+250 PERFECT', color: '#ffffff' });
+    }
+
+    // Apply scoring — base crystal score gets the breather 2× multiplier, but
+    // tier and hook bonuses do not (per 4th-pass review decision).
+    const inBreather = isInsideBreatherZone(this.breather, this.ship.state.position);
+    const baseCrystalScore = inBreather ? tier.bonus * BREATHER_SCORE_MULTIPLIER : tier.bonus;
+    this.wave.score += baseCrystalScore + hookBonus;
+
+    // Floating text: tier label (if any) + hook labels.
+    if (tier.text) {
+      this.spawnFloatingTextAt(tier.text, target.state.position, 0.0, tier.color);
+    }
+    for (const hook of hookTexts) {
+      this.spawnFloatingTextAt(hook.text, target.state.position, 0.0, hook.color);
+    }
+
+    // Death explosion: 1 shockwave ring + scale-up + fade tween (the new
+    // CrystalDeathTween reuses the cracked material so the death flash is
+    // visible at the moment the crystal pops).
+    const intensity = 0.5 + 0.5 * (tier.bonus / 100);
+    this.activeShockwaves.push(new Shockwave(target.state.position, 0x55ccdd, intensity));
+    this.spawnCrystalDeathTween(target, tier.text ?? 'CRYSTAL SHATTERED');
+
+    // Clean up scheduler / counter maps. The mesh itself is removed by the
+    // CrystalDeathTween when its 0.4s tween ends (so the player sees the pop).
+    this.fractureSchedulers.delete(crystalId);
+    this.crystalDeathTimes.delete(crystalId);
+    this.crystalShardsAbsorbed.delete(crystalId);
+  }
+
+  /**
+   * Return the stable crystal id stored on the LiveAsteroid. Crystals are
+   * assigned an id at spawn time; the scheduler uses the same id as its
+   * map key. Pre-fracture crystals have a scheduler entry created on the
+   * first fracture frame, so `crystalIdFor` is only ever called from
+   * destroyCrystal — by which time the scheduler exists if the crystal
+   * ever fractured.
+   */
+  private crystalIdFor(target: LiveAsteroid): number {
+    return target.id;
   }
 
   private spawnScrapFromAsteroid(target: LiveAsteroid): void {
@@ -919,12 +1504,41 @@ export class Game {
     }
     this.asteroids = [];
 
+    for (const shard of this.activeShards) {
+      this.disposeShard(shard);
+    }
+    this.activeShards = [];
+
     for (const piece of this.scrap) {
       this.scene.remove(piece.mesh);
       piece.mesh.geometry.dispose();
       (piece.mesh.material as Material).dispose();
     }
     this.scrap = [];
+
+    // Phase 6b: clear all crystal cascade state too. The respawn flow must
+    // wipe fracture state so a fresh life starts with no leftover bursts.
+    this.fractureSchedulers.clear();
+    this.crystalDeathTimes.clear();
+    this.crystalShardsAbsorbed.clear();
+    for (const wave of this.activeShockwaves) {
+      this.scene.remove(wave.mesh);
+      wave.dispose();
+    }
+    this.activeShockwaves = [];
+    for (const pending of this.pendingTelegraphs) {
+      this.scene.remove(pending.mesh);
+      pending.mesh.geometry.dispose();
+      (pending.mesh.material as Material).dispose();
+    }
+    this.pendingTelegraphs = [];
+    for (const tween of this.crystalDeathTweens) {
+      this.scene.remove(tween.mesh);
+      disposeAsteroidMesh(tween.mesh);
+    }
+    this.crystalDeathTweens = [];
+    this.cameraShakeAmplitude = 0;
+    this.cameraShakeRemaining = 0;
 
     // Ensure any stale explosion particles from a previous death are gone before
     // spawning the new ones, so effects cannot stack up across multiple deaths.
@@ -1020,6 +1634,11 @@ export class Game {
 
   private spawnFloatingText(text: string, delaySeconds: number): void {
     const world = new Vector3(this.breather.position.x, this.breather.position.y, 0);
+    this.spawnFloatingTextAt(text, world, delaySeconds);
+  }
+
+  private spawnFloatingTextAt(text: string, worldPosition: Vector2, delaySeconds: number, color = '#00ffaa'): void {
+    const world = new Vector3(worldPosition.x, worldPosition.y, 0);
     world.project(this.camera);
     const baseX = (world.x * 0.5 + 0.5) * window.innerWidth;
     const baseY = (-world.y * 0.5 + 0.5) * window.innerHeight;
@@ -1029,7 +1648,7 @@ export class Game {
     element.style.position = 'absolute';
     element.style.left = `${baseX}px`;
     element.style.top = `${baseY}px`;
-    element.style.color = '#00ffaa';
+    element.style.color = color;
     element.style.fontFamily = 'monospace';
     element.style.fontSize = '16px';
     element.style.fontWeight = 'bold';
@@ -1074,7 +1693,7 @@ export class Game {
       this.shieldElement.style.color = shieldColor(percent);
 
       this.shieldShakeRemaining = Math.max(0, this.shieldShakeRemaining - deltaTime);
-      if (this.shieldShakeRemaining > 0) {
+      if (this.shieldShakeRemaining > 0 && !this.isCrystalBurstFrame) {
         const shakeX = (Math.random() - 0.5) * 6;
         const shakeY = (Math.random() - 0.5) * 6;
         this.shieldElement.style.transform = `translate(${shakeX}px, ${shakeY}px)`;
@@ -1106,9 +1725,77 @@ export class Game {
         text.element.style.left = `${text.baseX}px`;
         text.element.style.opacity = `${1 - progress}`;
       }
-      alive.push(text);
     }
     this.activeFloatingTexts = alive;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Screenshot / debug hooks
+  // ───────────────────────────────────────────────────────────────────────
+  // Purpose: Give the Playwright screenshot harness a deterministic way to
+  //          stage specific crystal-cascade moments. Called from
+  //          tests/phase6b-screenshots.spec.ts via window.__game. The hooks
+  //          do not affect normal gameplay.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Spawn a crystal at the given world position with zero velocity. Returns
+   * the crystal's stable id (used to look it up later). Screenshot hook.
+   */
+  debugSpawnCrystalAt(x: number, y: number): number {
+    const id = this.nextAsteroidId;
+    this.spawnAsteroid(
+      AsteroidSize.LARGE,
+      { x, y },
+      { x: 0, y: 0 },
+      false,
+      AsteroidKind.CRYSTAL,
+    );
+    // Mark the crystal as already at low HP so the next damage event
+    // (or our direct fracture call) will trigger the cascade.
+    const crystal = this.asteroids.find((a) => a.id === id);
+    if (crystal) crystal.state.health = 1;
+    return id;
+  }
+
+  /**
+   * Force-fracture the crystal with the given id. Screenshot hook. Idempotent
+   * — calling twice on the same crystal is a no-op.
+   */
+  debugFractureCrystal(id: number): boolean {
+    const crystal = this.asteroids.find((a) => a.id === id);
+    if (!crystal) return false;
+    if (crystal.state.fractured) return false;
+    this.fractureCrystal(crystal);
+    return true;
+  }
+
+  /**
+   * Set the internal game-time clock to `t`. Subsequent burst updates will
+   * fire based on the new time, letting the harness jump to specific
+   * moments in the cascade. Screenshot hook.
+   */
+  debugSetGameTime(seconds: number): void {
+    this.gameTimeSeconds = seconds;
+    // If a scheduler is registered, push its `nextBurstAt` forward so it
+    // fires at the requested game-time minus FIRST_BURST_DELAY.
+    for (const scheduler of this.fractureSchedulers.values()) {
+      scheduler.state.nextBurstAt = seconds;
+    }
+  }
+
+  /**
+   * Look up a crystal by id. Screenshot hook. Returns null if missing.
+   */
+  debugGetCrystal(id: number): { id: number; x: number; y: number; fractured: boolean } | null {
+    const crystal = this.asteroids.find((a) => a.id === id);
+    if (!crystal) return null;
+    return {
+      id: crystal.id,
+      x: crystal.state.position.x,
+      y: crystal.state.position.y,
+      fractured: crystal.state.fractured,
+    };
   }
 }
 
