@@ -975,7 +975,7 @@ export class Game {
     }
   }
 
-  private spawnCrystalDeathTween(target: LiveAsteroid, text: string): void {
+  private spawnCrystalDeathTween(target: LiveAsteroid): void {
     if (this.crystalDeathTweens.length >= CRYSTAL_DEATH_TWEEN_POOL_CAP) {
       // Snap-remove the oldest tween to stay under the cap.
       const oldest = this.crystalDeathTweens.shift();
@@ -993,7 +993,9 @@ export class Game {
       duration: CRYSTAL_DEATH_TWEEN_DURATION,
       position: { x: target.state.position.x, y: target.state.position.y },
     });
-    this.spawnFloatingTextAt(text, target.state.position, 0.0, '#66ddee');
+    // No floating text here — destroyCrystal already emits the tier/hook text
+    // at the kill site with proper staggered vertical + temporal offsets.
+    // Spawning a second copy here would cause a duplicate at the same pixel.
   }
 
   private updateCrystalDeathTweens(deltaTime: number): void {
@@ -1234,19 +1236,22 @@ export class Game {
     const baseCrystalScore = inBreather ? tier.bonus * BREATHER_SCORE_MULTIPLIER : tier.bonus;
     this.wave.score += baseCrystalScore + hookBonus;
 
-    // Floating text: tier label (if any) + hook labels, staggered vertically
-    // and temporally so they don't bunch at the same pixel. Each text is
-    // bumped 28px up and 0.18s later than the previous so the cascade reads
-    // like a clear sequence rather than overlapping noise.
+    // Floating text: tier label (if any) + hook labels, staggered so they
+    // read as a clear vertical cascade rather than a tangled pile. Each text
+    // gets 60px of vertical room and 0.35s of temporal headroom so the player
+    // can actually read each line before the next appears. Horizontal fan-out
+    // (±40px per text) keeps the lines from stacking directly on top of one
+    // another when several share the same spawn instant.
     let textIndex = 0;
     if (tier.text) {
       this.spawnFloatingTextAt(
         tier.text,
         target.state.position,
-        textIndex * 0.18,
+        textIndex * 0.35,
         tier.color,
-        textIndex * 28,
-        22,
+        textIndex * 60,
+        textIndex * 40 - 40,
+        26,
       );
       textIndex++;
     }
@@ -1254,10 +1259,11 @@ export class Game {
       this.spawnFloatingTextAt(
         hook.text,
         target.state.position,
-        textIndex * 0.18,
+        textIndex * 0.35,
         hook.color,
-        textIndex * 28,
-        20,
+        textIndex * 60,
+        textIndex * 40 - 40,
+        22,
       );
       textIndex++;
     }
@@ -1267,7 +1273,7 @@ export class Game {
     // visible at the moment the crystal pops).
     const intensity = 0.5 + 0.5 * (tier.bonus / 100);
     this.activeShockwaves.push(new Shockwave(target.state.position, 0x55ccdd, intensity));
-    this.spawnCrystalDeathTween(target, tier.text ?? 'CRYSTAL SHATTERED');
+    this.spawnCrystalDeathTween(target);
 
     // Clean up scheduler / counter maps. The mesh itself is removed by the
     // CrystalDeathTween when its 0.4s tween ends (so the player sees the pop).
@@ -1664,11 +1670,12 @@ export class Game {
     delaySeconds: number,
     color = '#00ffaa',
     verticalOffset = 0,
+    horizontalOffset = 0,
     fontSize = 16,
   ): void {
     const world = new Vector3(worldPosition.x, worldPosition.y, 0);
     world.project(this.camera);
-    const baseX = (world.x * 0.5 + 0.5) * window.innerWidth;
+    const baseX = (world.x * 0.5 + 0.5) * window.innerWidth + horizontalOffset;
     // verticalOffset shifts the initial spawn position upward (negative = up)
     // so multiple texts from the same event do not bunch at the same pixel.
     const baseY = (-world.y * 0.5 + 0.5) * window.innerHeight - verticalOffset;
@@ -1693,7 +1700,7 @@ export class Game {
     this.activeFloatingTexts.push({
       element,
       age: -delaySeconds,
-      duration: 2.0,
+      duration: 3.5,
       baseX,
       baseY,
     });
@@ -1764,12 +1771,13 @@ export class Game {
   //           accumulates toward duration, the DOM element is removed at
   //           expiry, and delayed texts count down their negative age into
   //           the visible region.
-  //           2) spawnFloatingTextAt now accepts a `verticalOffset` and
-  //           `fontSize` param. The crystal kill site staggers each text
-  //           by 28 px vertically and 0.18 s temporally, uses 20-22 px
-  //           font, and a unique vibrant color per tier. Drift bumped
-  //           from 30 → 50 px/s and a ±4 px sin sway added so the float
-  //           feels floaty.
+  //           2) spawnFloatingTextAt now accepts a `verticalOffset`,
+  //           `horizontalOffset`, and `fontSize` param. The crystal kill
+  //           site staggers each text by 60 px vertically, 0.35 s
+  //           temporally, and ±40 px horizontally, using 22-26 px font
+  //           and a unique vibrant color per tier. Duration bumped 2.0 →
+  //           3.5 s and drift 50 → 70 px/s so the cascade is clearly
+  //           readable as a sequence rather than a fast pop.
   // Gotchas:  `text.element.remove()` mutates the DOM. Do not reparent the
   //           element after remove() — create a fresh div in
   //           spawnFloatingTextAt if you need to reuse it.
@@ -1784,10 +1792,11 @@ export class Game {
       }
       if (text.age >= 0) {
         const progress = text.age / text.duration;
-        // 50 px/s upward drift makes the float feel pronounced instead of
-        // barely-perceptible. The horizontal sway is a small sin-wave jitter
-        // (±4 px) so the text doesn't rise in a perfectly straight line.
-        const driftPixels = 50 * text.age;
+        // 70 px/s upward drift — over a 3.5s lifetime each text travels ~245px,
+        // which is enough to read each line individually. The horizontal sway
+        // is a small sin-wave jitter (±4 px) so the text doesn't rise in a
+        // perfectly straight line.
+        const driftPixels = 70 * text.age;
         const swayPixels = 4 * Math.sin(text.age * 4);
         text.element.style.display = 'block';
         text.element.style.top = `${text.baseY - driftPixels}px`;
