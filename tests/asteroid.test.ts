@@ -4,6 +4,7 @@ import {
   createAsteroidState,
   resolveAsteroidCollision,
   splitAsteroid,
+  splitSmallAsteroid,
   SIZE_RADIUS,
 } from '../src/asteroid';
 
@@ -46,9 +47,21 @@ describe('splitAsteroid', () => {
     });
   });
 
-  it('does not split a small asteroid', () => {
+  it('does not split a small asteroid via splitAsteroid', () => {
     const parent = createAsteroidState(AsteroidSize.SMALL, { x: 0, y: 0 }, { x: 0, y: 0 });
     expect(splitAsteroid(parent)).toHaveLength(0);
+  });
+
+  it('splits a small asteroid into two tiny asteroids via splitSmallAsteroid', () => {
+    const parent = createAsteroidState(AsteroidSize.SMALL, { x: 0, y: 0 }, { x: 0, y: 0 });
+    const children = splitSmallAsteroid(parent);
+
+    expect(children).toHaveLength(2);
+    children.forEach((child) => {
+      expect(child.size).toBe(AsteroidSize.TINY);
+      expect(child.position.x).toBeCloseTo(0);
+      expect(child.position.y).toBeCloseTo(0);
+    });
   });
 
   it('marks targeted asteroids and keeps split children non-targeted', () => {

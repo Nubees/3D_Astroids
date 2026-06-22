@@ -24,12 +24,14 @@ export { AsteroidSize } from './types';
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SIZE_RADIUS: Record<AsteroidSizeType, number> = {
+  [AsteroidSizeType.TINY]: 0.25,
   [AsteroidSizeType.SMALL]: 0.55,
   [AsteroidSizeType.MEDIUM]: 1.1,
   [AsteroidSizeType.LARGE]: 2.2,
 };
 
 const SIZE_HEALTH: Record<AsteroidSizeType, number> = {
+  [AsteroidSizeType.TINY]: 1,
   [AsteroidSizeType.SMALL]: 1,
   [AsteroidSizeType.MEDIUM]: 2,
   [AsteroidSizeType.LARGE]: 4,
@@ -69,7 +71,7 @@ export function createAsteroidMesh(size: AsteroidSizeType, isTargeted = false): 
 }
 
 export function splitAsteroid(state: AsteroidState): AsteroidState[] {
-  if (state.size === AsteroidSizeType.SMALL) {
+  if (state.size === AsteroidSizeType.SMALL || state.size === AsteroidSizeType.TINY) {
     return [];
   }
 
@@ -85,6 +87,28 @@ export function splitAsteroid(state: AsteroidState): AsteroidState[] {
     };
     // Split children are normal bouncing asteroids, never targeted.
     return createAsteroidState(childSize, state.position, velocity, false);
+  });
+}
+
+/**
+ * Split a small asteroid into two tiny pieces (used when a small asteroid
+ * survives a shield impact).
+ */
+export function splitSmallAsteroid(state: AsteroidState): AsteroidState[] {
+  if (state.size !== AsteroidSizeType.SMALL) {
+    return [];
+  }
+
+  const outwardSpeed = 2.5;
+  const baseAngle = Math.random() * Math.PI * 2;
+
+  return [0, 1].map((index) => {
+    const angle = baseAngle + index * Math.PI;
+    const velocity = {
+      x: state.velocity.x + Math.cos(angle) * outwardSpeed,
+      y: state.velocity.y + Math.sin(angle) * outwardSpeed,
+    };
+    return createAsteroidState(AsteroidSizeType.TINY, state.position, velocity, false);
   });
 }
 

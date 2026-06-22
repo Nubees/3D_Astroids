@@ -1,0 +1,175 @@
+.ship-select-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 24px;
+  box-sizing: border-box;
+  pointer-events: none;
+  z-index: 10;
+  background: radial-gradient(circle at center, transparent 30%, rgba(5, 5, 16, 0.6) 80%);
+  font-family: monospace;
+  color: #ffffff;
+}
+
+.ship-select-title {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: #00eaff;
+  text-shadow: 0 0 12px rgba(0, 234, 255, 0.6);
+  pointer-events: auto;
+}
+
+/* My Rules — Ship Hangar launcher icon in the top-left of the overlay. */
+.ship-select-hangar-icon {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  appearance: none;
+  border: 1px solid rgba(0, 234, 255, 0.45);
+  background: rgba(0, 20, 40, 0.75);
+  color: #00eaff;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  clip-path: polygon(
+    0 0,
+    calc(100% - 8px) 0,
+    100% 8px,
+    100% 100%,
+    8px 100%,
+    0 calc(100% - 8px)
+  );
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.ship-select-hangar-icon:hover {
+  transform: scale(1.08);
+  border-color: #00eaff;
+  box-shadow: 0 0 18px rgba(0, 234, 255, 0.45);
+  background: rgba(0, 40, 70, 0.85);
+}
+
+.ship-select-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 18px;
+  color: #00eaff;
+  animation: ship-select-pulse 1.2s infinite ease-in-out;
+  pointer-events: auto;
+}
+
+@keyframes ship-select-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.ship-select-info {
+  position: absolute;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  max-width: 480px;
+  pointer-events: auto;
+}
+
+.ship-select-info-name {
+  font-size: 24px;
+  font-weight: bold;
+  color: #00eaff;
+  text-shadow: 0 0 8px rgba(0, 234, 255, 0.5);
+  margin-bottom: 6px;
+}
+
+.ship-select-info-desc {
+  font-size: 14px;
+  color: #aaccff;
+  line-height: 1.4;
+}
+
+.ship-select-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  width: 100%;
+  max-width: 1200px;
+  pointer-events: auto;
+}
+
+@media (max-width: 1199px) {
+  .ship-select-grid { grid-template-columns: repeat(4, 1fr); }
+}
+
+@media (max-width: 899px) {
+  .ship-select-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+@media (max-width: 599px) {
+  .ship-select-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.ship-select-card {
+  appearance: none;
+  border: 1px solid rgba(0, 234, 255, 0.35);
+  background: rgba(0, 20, 40, 0.75);
+  clip-path: polygon(
+    0 0,
+    calc(100% - 10px) 0,
+    100% 10px,
+    100% 100%,
+    10px 100%,
+    0 calc(100% - 10px)
+  );
+  color: #ffffff;
+  padding: 12px 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.ship-select-card:hover,
+.ship-select-card.focused {
+  transform: scale(1.05);
+  border-color: #00eaff;
+  box-shadow: 0 0 18px rgba(0, 234, 255, 0.45);
+  background: rgba(0, 40, 70, 0.85);
+}
+
+.ship-select-card-number {
+  font-size: 10px;
+  color: #88aaff;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
+.ship-select-card-name {
+  font-size: 15px;
+  font-weight: bold;
+  color: #ffffff;
+  letter-spacing: 0.5px;
+}
+
+.ship-select-hint {
+  margin-top: 14px;
+  font-size: 12px;
+  color: #88aaff;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  pointer-events: auto;
+}

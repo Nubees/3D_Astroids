@@ -45,6 +45,7 @@ export interface Projectile {
 }
 
 export enum AsteroidSize {
+  TINY = 'tiny',
   SMALL = 'small',
   MEDIUM = 'medium',
   LARGE = 'large',

@@ -19,8 +19,8 @@ import { AsteroidSize, createAsteroidState } from '../src/asteroid';
 // Setup: Create a fresh shield state and synthetic asteroid states.
 // Issues: None.
 // Fix: Updated coverage for the new passive armor model.
-// Gotchas: The shield recharges slowly out of combat and rapidly inside the
-//          Breather Zone. A hit that exactly empties the shield is still absorbed.
+// Gotchas: The shield recharges ONLY inside the Breather Zone; outside the zone
+//          energy stays flat. A hit that exactly empties the shield is still absorbed.
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('ShieldState', () => {
@@ -30,19 +30,19 @@ describe('ShieldState', () => {
     expect(shield.hitAbsorbedThisFrame).toBe(false);
   });
 
-  it('recharges out of combat', () => {
+  it('does not recharge outside the breather zone', () => {
     const shield = createShieldState();
-    shield.energy = 0.0;
+    shield.energy = 0.5;
     updateShield(shield, false, 4.0);
-    expect(shield.energy).toBeGreaterThan(0);
-    expect(shield.energy).toBeLessThanOrEqual(SHIELD_MAX_ENERGY);
+    expect(shield.energy).toBe(0.5);
   });
 
-  it('recharges faster inside the breather zone', () => {
+  it('recharges inside the breather zone', () => {
     const shield = createShieldState();
     shield.energy = 0.0;
     updateShield(shield, true, 1.0);
     expect(shield.energy).toBeGreaterThan(0);
+    expect(shield.energy).toBeLessThanOrEqual(SHIELD_MAX_ENERGY);
   });
 });
 
@@ -58,14 +58,24 @@ describe('absorbHit', () => {
     expect(shield.hitAbsorbedThisFrame).toBe(true);
   });
 
-  it('absorbs a large asteroid hit and drains more energy', () => {
+  it('absorbs a large asteroid hit and drains 20% shield', () => {
     const shield = createShieldState();
     const asteroid = createAsteroidState(AsteroidSize.LARGE, { x: 0, y: 0 }, { x: 0, y: 0 });
 
     absorbHit(shield, asteroid);
 
-    const largeDamage = SHIELD_DAMAGE_BY_SIZE[AsteroidSize.LARGE];
-    expect(shield.energy).toBeCloseTo(SHIELD_MAX_ENERGY - largeDamage, 4);
+    expect(SHIELD_DAMAGE_BY_SIZE[AsteroidSize.LARGE]).toBeCloseTo(0.2, 5);
+    expect(shield.energy).toBeCloseTo(SHIELD_MAX_ENERGY - 0.2, 4);
+  });
+
+  it('absorbs a small asteroid hit and drains 10% shield', () => {
+    const shield = createShieldState();
+    const asteroid = createAsteroidState(AsteroidSize.SMALL, { x: 0, y: 0 }, { x: 0, y: 0 });
+
+    absorbHit(shield, asteroid);
+
+    expect(SHIELD_DAMAGE_BY_SIZE[AsteroidSize.SMALL]).toBeCloseTo(0.1, 5);
+    expect(shield.energy).toBeCloseTo(SHIELD_MAX_ENERGY - 0.1, 4);
   });
 
   it('does not absorb a hit when depleted', () => {

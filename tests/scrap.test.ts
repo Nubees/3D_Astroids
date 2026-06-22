@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAGNET_RADIUS,
   createScrap,
   isScrapCollected,
   isScrapExpired,
@@ -52,5 +53,9 @@ describe('Scrap', () => {
     const originalVy = scrap.velocity.y;
     magnetPull(scrap, { x: 0, y: 0 }, 0.016);
     expect(scrap.velocity.y).toBe(originalVy);
+  });
+
+  it('exports a magnet radius matching the visual range ring', () => {
+    expect(MAGNET_RADIUS).toBe(2.5);
   });
 });

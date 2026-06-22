@@ -1,0 +1,303 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   My Rules — Ship Hangar Inspector Styles
+   ═══════════════════════════════════════════════════════════════════════════
+   Purpose: Overlay UI for the Ship Hangar page where players can inspect ships,
+            tune exhaust flame placement, and pick flame colors. The layout splits
+            the screen into a left color-picker panel and a right ship-overview
+            panel, leaving the center open for the 3D ship preview.
+   Setup: Loaded by ships-inspector.html; uses CSS Grid to position the two main
+          panels on either side of the viewport without overlapping each other
+          or the rendered ship.
+   Issues: All controls were stacked in a single centered column that covered the
+           3D ship. The back button was also absolutely positioned and could clip
+           into the left panel.
+   Fix: Replaced the centered flex column with a three-column grid: left panel
+        holds the back button and color picker, the center column is intentionally
+        empty so the ship remains visible, and the right panel contains the title,
+        ship name, stats, and nozzle details.
+   Gotchas: The overlay layer uses pointer-events: none, so every clickable
+            panel re-enables pointer-events. On narrow viewports the grid stacks
+            vertically as a fallback.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #050510;
+  font-family: 'Courier New', Courier, monospace;
+  color: #ffffff;
+}
+
+#hangar-canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+.hangar-ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: grid;
+  grid-template-columns: 260px 1fr 360px;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    "left center right"
+    "legend legend legend";
+  gap: 24px;
+  padding: 24px;
+  box-sizing: border-box;
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+}
+
+.hangar-left-panel {
+  grid-area: left;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.hangar-center-gap {
+  grid-area: center;
+}
+
+.hangar-right-panel {
+  grid-area: right;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.hangar-title {
+  font-size: 20px;
+  letter-spacing: 3px;
+  color: #00eaff;
+  text-transform: uppercase;
+}
+
+.hangar-subtitle {
+  font-size: 11px;
+  color: #88aaff;
+  margin-top: 4px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.hangar-ship-name {
+  margin-top: 18px;
+  font-size: 28px;
+  font-weight: bold;
+  color: #ffffff;
+}
+
+.hangar-stats {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #aaccff;
+  text-align: right;
+  line-height: 1.6;
+}
+
+.hangar-nozzle {
+  margin-top: 12px;
+  padding: 10px 16px;
+  background: rgba(0, 10, 25, 0.75);
+  border: 1px solid rgba(0, 234, 255, 0.3);
+  font-size: 13px;
+  color: #cceeff;
+  text-align: right;
+  line-height: 1.5;
+  max-width: 100%;
+}
+
+.hangar-legend {
+  grid-area: legend;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaccff;
+  text-align: center;
+}
+
+.hangar-legend .key {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  margin: 0 2px;
+  border: 1px solid rgba(0, 234, 255, 0.5);
+  background: rgba(0, 20, 40, 0.8);
+  color: #00eaff;
+  border-radius: 3px;
+  font-weight: bold;
+}
+
+#hangar-canvas {
+  cursor: default;
+}
+
+#hangar-canvas:active {
+  cursor: grabbing;
+}
+
+.hangar-back {
+  position: relative;
+  top: auto;
+  left: auto;
+  appearance: none;
+  border: 1px solid rgba(0, 234, 255, 0.45);
+  background: rgba(0, 20, 40, 0.75);
+  color: #00eaff;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+  pointer-events: auto;
+  clip-path: polygon(
+    0 0,
+    calc(100% - 8px) 0,
+    100% 8px,
+    100% 100%,
+    8px 100%,
+    0 calc(100% - 8px)
+  );
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.hangar-back:hover {
+  transform: scale(1.05);
+  border-color: #00eaff;
+  box-shadow: 0 0 18px rgba(0, 234, 255, 0.45);
+  background: rgba(0, 40, 70, 0.85);
+}
+
+.hangar-color-picker {
+  width: 100%;
+  padding: 12px 16px;
+  background: rgba(0, 10, 25, 0.75);
+  border: 1px solid rgba(0, 234, 255, 0.3);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  pointer-events: auto;
+  box-sizing: border-box;
+}
+
+.hangar-color-title {
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: #00eaff;
+  text-transform: uppercase;
+}
+
+.hangar-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.hangar-color-swatch {
+  appearance: none;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.hangar-color-swatch:hover,
+.hangar-color-swatch.selected {
+  transform: scale(1.15);
+  border-color: #ffffff;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+}
+
+.hangar-color-all {
+  font-size: 12px;
+  color: #aaccff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.hangar-color-all input {
+  accent-color: #00eaff;
+  cursor: pointer;
+}
+
+.hangar-color-reset {
+  appearance: none;
+  border: 1px solid rgba(0, 234, 255, 0.45);
+  background: rgba(0, 20, 40, 0.6);
+  color: #00eaff;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+  pointer-events: auto;
+  clip-path: polygon(
+    0 0,
+    calc(100% - 6px) 0,
+    100% 6px,
+    100% 100%,
+    6px 100%,
+    0 calc(100% - 6px)
+  );
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hangar-color-reset:hover {
+  transform: scale(1.05);
+  border-color: #00eaff;
+  box-shadow: 0 0 12px rgba(0, 234, 255, 0.35);
+  background: rgba(0, 40, 70, 0.8);
+}
+
+@media (max-width: 900px) {
+  .hangar-ui {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "right"
+      "left"
+      "legend";
+  }
+
+  .hangar-center-gap {
+    display: none;
+  }
+
+  .hangar-right-panel {
+    align-items: center;
+    text-align: center;
+  }
+
+  .hangar-right-panel .hangar-stats,
+  .hangar-right-panel .hangar-nozzle {
+    text-align: center;
+  }
+
+  .hangar-left-panel {
+    align-items: center;
+  }
+
+  .hangar-color-picker,
+  .hangar-color-swatches {
+    align-items: center;
+    justify-content: center;
+  }
+
+  .hangar-color-all {
+    text-align: center;
+  }
+}

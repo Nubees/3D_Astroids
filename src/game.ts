@@ -2,6 +2,7 @@ import {
   AmbientLight,
   BufferGeometry,
   Color,
+  ConeGeometry,
   DirectionalLight,
   Float32BufferAttribute,
   Group,
@@ -18,9 +19,12 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { InputManager, InputState } from './input';
-import { Ship, createShipMesh, SHIP_RADIUS } from './ship';
+import { ShipSelection } from './ship-select';
+import { Ship, SHIELD_RADIUS, SHIP_RADIUS } from './ship';
 import { createProjectile, PROJECTILE_RADIUS, updateProjectile } from './projectile';
+import { attachGameplayFlames, toggleFlames } from './exhaust-gameplay';
 import {
   AsteroidSize,
   SIZE_RADIUS,
@@ -29,8 +33,9 @@ import {
   disposeAsteroidMesh,
   resolveAsteroidCollision,
   splitAsteroid,
+  splitSmallAsteroid,
 } from './asteroid';
-import { circlesCollide } from './utils/collision';
+import { circlesCollide, resolveShipAsteroidBounce } from './utils/collision';
 import {
   AsteroidState,
   BreatherZoneState,
@@ -46,9 +51,23 @@ import {
   absorbHit,
   shieldColor,
   shieldPercent,
-  SHIELD_KNOCKBACK_BY_SIZE,
   SHIELD_MAX_ENERGY,
 } from './shield';
+import {
+  DamageParticle,
+  ExplosionParticle,
+  SparkArc,
+  createDamageParticle,
+  createExplosionParticle,
+  createSparkArc,
+  disposeAllDamageParticles,
+  disposeAllExplosionParticles,
+  disposeAllSparkArcs,
+  randomHullPoint,
+  updateDamageParticles,
+  updateExplosionParticles,
+  updateSparkArcs,
+} from './ship-damage';
 import {
   WaveState,
   awardBreak,
@@ -58,6 +77,7 @@ import {
   updateWave,
 } from './waves';
 import {
+  MAGNET_RADIUS,
   createScrap,
   isScrapCollected,
   isScrapExpired,
@@ -72,6 +92,14 @@ import {
   isInsideBreatherZone,
   updateBreather,
 } from './breather';
+import { createBloomComposer } from './post-processing';
+import {
+  addShieldImpact,
+  clearShieldImpacts,
+  createShieldMesh as createShieldVisualMesh,
+  setShieldEnergy,
+  updateShieldVisuals,
+} from './shield-visuals';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -90,6 +118,11 @@ import {
 //          Asteroids now spawn from all arena edges; every 4th spawn is targeted
 //          at the player and ignores asteroid-vs-asteroid bounces, while other
 //          asteroids bounce off each other with larger asteroids acting as walls.
+//          Ship movement is now inertia-based with arena-boundary bounce. Shield
+//          knockback reflects the ship off the impact like an elastic bounce. When
+//          the shield is depleted the ship explodes into particles, the screen is
+//          cleared of threats, and the player must press a key and wait through a
+//          3-second countdown before respawning.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -117,18 +150,13 @@ interface FloatingText {
   baseY: number;
 }
 
-interface ShieldArc {
-  mesh: Mesh;
-  age: number;
-  duration: number;
-}
-
 export class Game {
   private readonly scene: Scene;
   private readonly camera: PerspectiveCamera;
   private readonly renderer: WebGLRenderer;
   private readonly input: InputManager;
   private readonly shipMesh: Group;
+  private readonly shipId: number;
   private readonly ship: Ship;
   private readonly starfield: Points;
   private readonly shieldMesh: Mesh;
@@ -141,6 +169,7 @@ export class Game {
   private asteroids: LiveAsteroid[] = [];
   private scrap: LiveScrap[] = [];
   private readonly controller: ArenaMovementController;
+  private readonly bloomComposer: EffectComposer;
   private lastTime = 0;
   private running = true;
   private readonly resizeHandler: () => void;
@@ -148,13 +177,22 @@ export class Game {
   private waveElement: HTMLDivElement | null = null;
   private breatherElement: HTMLDivElement | null = null;
   private shieldElement: HTMLDivElement | null = null;
+  private resumeElement: HTMLDivElement | null = null;
   private activeFloatingTexts: FloatingText[] = [];
-  private activeShieldArcs: ShieldArc[] = [];
+  private activeExplosions: ExplosionParticle[] = [];
+  private activeDamageParticles: DamageParticle[] = [];
+  private activeSparks: SparkArc[] = [];
   private breatherWasActive = false;
   private asteroidSpawnCount = 0;
   private shieldShakeRemaining = 0;
+  private lowShieldDebrisTimer = 0;
+  private sparkTimer = 0;
+  private shipRespawnDelay = 0;
+  private countdownTimer = 0;
+  private respawnPhase: 'none' | 'exploding' | 'pressKey' | 'countdown' = 'none';
 
-  constructor(canvas: HTMLCanvasElement) {
+  private constructor(canvas: HTMLCanvasElement, entryId: number, shipMesh: Group) {
+    this.shipId = entryId;
     this.scene = new Scene();
     this.scene.background = new Color(0x050510);
 
@@ -167,6 +205,8 @@ export class Game {
     this.renderer = new WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    this.bloomComposer = createBloomComposer(this.renderer, this.scene, this.camera).composer;
 
     this.scene.add(new AmbientLight(0x404040, 1.5));
     const sun = new DirectionalLight(0xffffff, 2);
@@ -183,11 +223,11 @@ export class Game {
     this.input = new InputManager();
 
     this.ship = new Ship(0, 0);
-    this.shipMesh = createShipMesh();
+    this.shipMesh = shipMesh;
     this.scene.add(this.shipMesh);
 
     this.shield = createShieldState();
-    this.shieldMesh = createShieldMesh();
+    this.shieldMesh = createShieldVisualMesh(SHIELD_RADIUS);
     this.shipMesh.add(this.shieldMesh);
 
     this.magnetRing = createMagnetRing();
@@ -207,10 +247,20 @@ export class Game {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
+      this.bloomComposer.setSize(w, h);
     };
     window.addEventListener('resize', this.resizeHandler);
 
     this.createHud();
+  }
+
+  static async create(canvas: HTMLCanvasElement, entryId: number, shipMesh: Group): Promise<Game> {
+    // Attach flames BEFORE constructing Game so the bounding-box measurement in
+    // attachGameplayFlames sees only the GLB hull, not the shield sphere or the
+    // magnet ring that the constructor adds as children of shipMesh.
+    attachGameplayFlames(shipMesh, entryId);
+    const game = new Game(canvas, entryId, shipMesh);
+    return game;
   }
 
   start(): void {
@@ -227,21 +277,19 @@ export class Game {
     if (this.waveElement) this.waveElement.remove();
     if (this.breatherElement) this.breatherElement.remove();
     if (this.shieldElement) this.shieldElement.remove();
+    if (this.resumeElement) this.resumeElement.remove();
     for (const text of this.activeFloatingTexts) {
       text.element.remove();
     }
     this.activeFloatingTexts = [];
-    for (const arc of this.activeShieldArcs) {
-      this.shipMesh.remove(arc.mesh);
-      arc.mesh.geometry.dispose();
-      const material = arc.mesh.material;
-      if (Array.isArray(material)) {
-        material.forEach((m: Material) => m.dispose());
-      } else {
-        material.dispose();
-      }
-    }
-    this.activeShieldArcs = [];
+    disposeAllExplosionParticles(this.activeExplosions);
+    this.activeExplosions = [];
+
+    disposeAllDamageParticles(this.activeDamageParticles);
+    this.activeDamageParticles = [];
+
+    disposeAllSparkArcs(this.activeSparks);
+    this.activeSparks = [];
   }
 
   private loop = (time: number): void => {
@@ -252,7 +300,7 @@ export class Game {
     this.lastTime = time;
 
     this.update(deltaTime);
-    this.renderer.render(this.scene, this.camera);
+    this.bloomComposer.render();
     requestAnimationFrame(this.loop);
   };
 
@@ -267,13 +315,18 @@ export class Game {
       deployBreather: rawInput.deployBreather,
     };
 
+    // Respawn flow: ship is dead/exploding; skip gameplay until it revives.
+    if (this.respawnPhase !== 'none') {
+      this.updateRespawn(deltaTime, input);
+      return;
+    }
+
     updateWave(this.wave, deltaTime);
     const inBreatherZone = isInsideBreatherZone(this.breather, this.ship.state.position);
     updateShield(this.shield, inBreatherZone, deltaTime);
     updateBreather(this.breather, this.shield, this.ship.state.position, input.deployBreather, deltaTime);
 
     this.controller.apply(this.ship.state, input, deltaTime);
-    this.ship.state.position = this.controller.clampToBounds(this.ship.state.position);
     this.ship.update(input, deltaTime);
 
     if (input.fire && this.ship.canFire()) {
@@ -281,6 +334,7 @@ export class Game {
     }
 
     this.updateShipMesh();
+    this.updateExhaustFlames(input);
     this.updateShieldMesh();
     this.updateMagnetRing();
     this.updateBreatherMesh();
@@ -291,9 +345,55 @@ export class Game {
     this.updateSpawning(deltaTime);
     this.updateHud(deltaTime);
     this.updateFloatingTexts(deltaTime);
-    this.updateShieldArcs(deltaTime);
+    updateShieldVisuals(this.shieldMesh, deltaTime);
+    this.updateExplosions(deltaTime);
+    this.updateDamageEffects(deltaTime);
+    this.updateLowShieldEffects(deltaTime);
 
     this.handleCollisions();
+  }
+
+  private updateRespawn(deltaTime: number, input: InputState): void {
+    this.updateExplosions(deltaTime);
+    this.updateDamageEffects(deltaTime);
+    updateShieldVisuals(this.shieldMesh, deltaTime);
+    this.updateFloatingTexts(deltaTime);
+
+    if (this.respawnPhase === 'exploding') {
+      this.shipRespawnDelay -= deltaTime;
+      if (this.shipRespawnDelay <= 0) {
+        this.respawnPhase = 'pressKey';
+        if (this.resumeElement) {
+          this.resumeElement.textContent = 'Press a Key to resume';
+          this.resumeElement.style.display = 'block';
+        }
+      }
+    } else if (this.respawnPhase === 'pressKey') {
+      if (this.input.consumeAnyKeyHit()) {
+        this.respawnPhase = 'countdown';
+        this.countdownTimer = 3.0;
+        if (this.resumeElement) {
+          this.resumeElement.textContent = '3';
+          this.resumeElement.style.display = 'block';
+        }
+      }
+    } else if (this.respawnPhase === 'countdown') {
+      this.countdownTimer -= deltaTime;
+      if (this.resumeElement) {
+        const value = Math.max(0, Math.ceil(this.countdownTimer));
+        this.resumeElement.textContent = value > 0 ? String(value) : '';
+        this.resumeElement.style.display = value > 0 ? 'block' : 'none';
+      }
+      if (this.countdownTimer <= 0) {
+        this.respawnPhase = 'none';
+        if (this.resumeElement) {
+          this.resumeElement.style.display = 'none';
+        }
+        this.finishRespawn();
+      }
+    }
+
+    this.updateHud(deltaTime);
   }
 
   private screenToWorld(screen: Vector2): Vector2 {
@@ -313,14 +413,45 @@ export class Game {
     this.shipMesh.rotation.z = angle;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Exhaust Flame Toggle (Gameplay Only)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Show exhaust flame cones only while the player presses forward thrust.
+  // Setup: toggleFlames() walks the ship mesh children and flips visibility on
+  //        each child named 'exhaustFlame'. input.move.y > 0 means forward thrust.
+  // Issues: Flames are additive-blended cone meshes positioned at each nozzle's
+  //         GLB bounding-box rear-edge coordinate. No pixel analysis needed —
+  //         the config data (position + color) is per-ship in exhaust-config.ts.
+  // Gotchas: input.move.y uses inverted Y for forward thrust in the arena controller.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private updateExhaustFlames(input: InputState): void {
+    toggleFlames(this.shipMesh, input.move.y > 0);
+  }
+
   private updateShieldMesh(): void {
     this.shieldMesh.visible = this.shield.energy > 0.01;
     const scale = 1.0 + (this.shield.energy / SHIELD_MAX_ENERGY) * 0.2;
     this.shieldMesh.scale.set(scale, scale, scale);
+    setShieldEnergy(this.shieldMesh, shieldPercent(this.shield));
   }
 
   private updateMagnetRing(): void {
-    this.magnetRing.visible = true;
+    const shipPosition = this.ship.state.position;
+    const pullCount = this.scrap.reduce((count, piece) => {
+      const dx = piece.state.position.x - shipPosition.x;
+      const dy = piece.state.position.y - shipPosition.y;
+      return Math.hypot(dx, dy) <= MAGNET_RADIUS ? count + 1 : count;
+    }, 0);
+
+    const material = this.magnetRing.material as MeshBasicMaterial;
+    if (pullCount > 0) {
+      // Ring brightens and pulses when scrap is being pulled in.
+      const pulse = 1.0 + Math.sin(performance.now() * 0.008) * 0.15;
+      material.opacity = 0.12 * pulse;
+    } else {
+      // Faint baseline ring so the player always knows the magnet radius.
+      material.opacity = 0.025;
+    }
   }
 
   private updateBreatherMesh(): void {
@@ -516,16 +647,21 @@ export class Game {
 
       if (hit) {
         this.destroyAsteroid(asteroid);
-      } else {
-        aliveAsteroids.push(asteroid);
-        if (circlesCollide(asteroid.state.position, asteroidRadius * 0.85, this.ship.state.position, SHIP_RADIUS)) {
-          if (absorbHit(this.shield, asteroid.state)) {
-            this.onShieldAbsorbedHit(asteroid.state);
-          } else {
-            this.respawnShip();
-            return;
-          }
+        continue;
+      }
+
+      let keepAsteroid = true;
+      if (circlesCollide(asteroid.state.position, asteroidRadius * 0.85, this.ship.state.position, SHIELD_RADIUS)) {
+        if (absorbHit(this.shield, asteroid.state)) {
+          keepAsteroid = this.onShieldAbsorbedHit(asteroid, asteroid.state);
+        } else {
+          this.respawnShip();
+          return;
         }
+      }
+
+      if (keepAsteroid) {
+        aliveAsteroids.push(asteroid);
       }
     }
 
@@ -570,75 +706,258 @@ export class Game {
     }
   }
 
-  private onShieldAbsorbedHit(asteroid: AsteroidState): void {
-    // Push the ship away from the asteroid along the collision normal.
+  private onShieldAbsorbedHit(liveAsteroid: LiveAsteroid, asteroid: AsteroidState): boolean {
+    // Normal points from the asteroid toward the ship (direction of impact).
     const dx = this.ship.state.position.x - asteroid.position.x;
     const dy = this.ship.state.position.y - asteroid.position.y;
     const distance = Math.hypot(dx, dy);
+    let nx = 0;
+    let ny = 0;
+
     if (distance > 0.001) {
-      const force = SHIELD_KNOCKBACK_BY_SIZE[asteroid.size];
-      this.ship.state.velocity = {
-        x: this.ship.state.velocity.x + (dx / distance) * force,
-        y: this.ship.state.velocity.y + (dy / distance) * force,
+      nx = dx / distance;
+      ny = dy / distance;
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // My Rules — Velocity-Scored Shield Bounce
+      // ═══════════════════════════════════════════════════════════════════════════
+      // Purpose: Make the ship recoil from an asteroid impact with the same
+      //          strength it hit the asteroid with: a gentle tap gives a soft
+      //          bounce, a hard ram gives a hard bounce.
+      // Setup: The collision normal points from the asteroid toward the ship. The
+      //        dot product of (ship.velocity - asteroid.velocity) with that normal
+      //        tells us whether the two objects are closing and how fast.
+      // Issues: The old bounce used a fixed size-scaled impulse, so a stationary
+      //         tap and a high-speed ram produced the same recoil.
+      // Fix: Reflect the ship's closing velocity back along the normal with a
+      //      fixed restitution (0.9), and give the asteroid a proportional nudge
+      //      based on its size. Only apply the impulse when the objects are
+      //      actually closing, preventing separation collisions from reversing
+      //      the ship.
+      // Gotchas: Large asteroids are treated as nearly immovable; tiny/small
+      //          asteroids pick up more of the impact and are usually destroyed
+      //          by the shield anyway, so their bounce is short-lived.
+      // ═══════════════════════════════════════════════════════════════════════════
+      // Use the shared helper so the math is unit-testable and not duplicated.
+      const asteroidBounceBySize: Record<AsteroidSize, number> = {
+        [AsteroidSize.TINY]: 0.8,
+        [AsteroidSize.SMALL]: 0.6,
+        [AsteroidSize.MEDIUM]: 0.3,
+        [AsteroidSize.LARGE]: 0.1,
+      };
+      const bounce = resolveShipAsteroidBounce(
+        this.ship.state.velocity,
+        asteroid.velocity,
+        { x: nx, y: ny },
+        asteroidBounceBySize[asteroid.size],
+      );
+      this.ship.state.velocity = bounce.shipVelocity;
+      asteroid.velocity = bounce.asteroidVelocity;
+
+      // Push the asteroid back out of the shield so it cannot drain energy again
+      // on the very next frame.
+      const separation = 0.12;
+      asteroid.position = {
+        x: asteroid.position.x - nx * separation,
+        y: asteroid.position.y - ny * separation,
       };
     }
 
-    this.spawnShieldArc(asteroid.position);
+    // Impact ripple starts from the shield surface at the contact point, not the
+    // asteroid center, so the glow sits exactly where the energy bubble was hit.
+    const contactPoint = {
+      x: this.ship.state.position.x - nx * SHIELD_RADIUS,
+      y: this.ship.state.position.y - ny * SHIELD_RADIUS,
+    };
+    addShieldImpact(this.shieldMesh, contactPoint, this.ship.state.position);
     this.shieldShakeRemaining = 0.25;
-  }
 
-  private spawnShieldArc(asteroidPosition: Vector2): void {
-    const dx = asteroidPosition.x - this.ship.state.position.x;
-    const dy = asteroidPosition.y - this.ship.state.position.y;
-    const angle = Math.atan2(dy, dx);
-
-    const geometry = new RingGeometry(SHIP_RADIUS * 1.3, SHIP_RADIUS * 1.7, 32, 1, angle - 0.5, 1.0);
-    const material = new MeshBasicMaterial({
-      color: 0x88ffff,
-      transparent: true,
-      opacity: 0.9,
-      side: 2,
-    });
-    const mesh = new Mesh(geometry, material);
-    mesh.position.z = 0.2;
-    this.shipMesh.add(mesh);
-
-    this.activeShieldArcs.push({ mesh, age: 0, duration: 0.25 });
-  }
-
-  private updateShieldArcs(deltaTime: number): void {
-    const alive: ShieldArc[] = [];
-    for (const arc of this.activeShieldArcs) {
-      arc.age += deltaTime;
-      if (arc.age >= arc.duration) {
-        this.shipMesh.remove(arc.mesh);
-        arc.mesh.geometry.dispose();
-        const material = arc.mesh.material;
-        if (Array.isArray(material)) {
-          material.forEach((m: Material) => m.dispose());
-        } else {
-          material.dispose();
-        }
-        continue;
-      }
-      const progress = arc.age / arc.duration;
-      const opacity = 0.9 * (1 - progress);
-      (arc.mesh.material as MeshBasicMaterial).opacity = opacity;
-      alive.push(arc);
+    // Critical shield: hull debris breaks off every time the ship is hit while
+    // shields are below 40%. The lower the shield, the more debris flies off.
+    const percent = shieldPercent(this.shield);
+    if (percent < 40) {
+      const severity = 1.0 - percent / 40;
+      const count = 3 + Math.floor(severity * 4) + Math.floor(Math.random() * 3);
+      this.spawnHullDebris(count);
     }
-    this.activeShieldArcs = alive;
+
+    // Tiny and small asteroids are consumed by the shield. Small ones either
+    // disintegrate or break into two tiny fragments; tiny ones always pop.
+    // Medium and large asteroids reflect off and remain in play.
+    if (asteroid.size === AsteroidSize.TINY) {
+      this.destroyAsteroidOnShieldHit(liveAsteroid);
+      return false;
+    }
+
+    if (asteroid.size === AsteroidSize.SMALL) {
+      if (Math.random() < 0.5) {
+        this.destroyAsteroidOnShieldHit(liveAsteroid);
+      } else {
+        this.splitSmallAsteroidOnShieldHit(liveAsteroid);
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  private destroyAsteroidOnShieldHit(target: LiveAsteroid): void {
+    this.scene.remove(target.mesh);
+    disposeAsteroidMesh(target.mesh);
+    this.spawnScrapFromAsteroid(target);
+  }
+
+  private splitSmallAsteroidOnShieldHit(target: LiveAsteroid): void {
+    this.scene.remove(target.mesh);
+    disposeAsteroidMesh(target.mesh);
+    const children = splitSmallAsteroid(target.state);
+    for (const child of children) {
+      this.spawnAsteroid(child.size, child.position, child.velocity);
+    }
+  }
+
+  private updateExplosions(deltaTime: number): void {
+    this.activeExplosions = updateExplosionParticles(this.activeExplosions, deltaTime);
+  }
+
+  private updateDamageEffects(deltaTime: number): void {
+    this.activeDamageParticles = updateDamageParticles(this.activeDamageParticles, deltaTime);
+    this.activeSparks = updateSparkArcs(this.activeSparks, deltaTime);
+  }
+
+  private updateLowShieldEffects(deltaTime: number): void {
+    const percent = shieldPercent(this.shield);
+
+    // Eject hull debris every second while shields are 40% or lower. The lower
+    // the shield, the bigger each ejection so the ship looks like it is falling
+    // apart as it nears destruction.
+    if (percent <= 40) {
+      this.lowShieldDebrisTimer += deltaTime;
+      if (this.lowShieldDebrisTimer >= 1.0) {
+        const severity = 1.0 - percent / 40;
+        const count = 3 + Math.floor(severity * 3);
+        this.spawnHullDebris(count);
+        this.lowShieldDebrisTimer = 0;
+      }
+    } else {
+      this.lowShieldDebrisTimer = 0;
+    }
+
+    if (percent < 40) {
+      this.sparkTimer += deltaTime;
+      // More sparks the lower the shield; at 0% spawn arcs very frequently.
+      const interval = percent === 0 ? 0.06 : 0.18;
+      if (this.sparkTimer >= interval) {
+        this.spawnSparkArc();
+        this.sparkTimer = 0;
+      }
+    } else {
+      this.sparkTimer = 0;
+    }
+  }
+
+  private spawnHullDebris(count: number): void {
+    const shipPosition = this.shipMesh.position;
+    for (let i = 0; i < count; i += 1) {
+      const local = randomHullPoint();
+      const world = {
+        x: shipPosition.x + local.x,
+        y: shipPosition.y + local.y,
+      };
+      const particle = createDamageParticle(world);
+      this.scene.add(particle.mesh);
+      this.activeDamageParticles.push(particle);
+    }
+  }
+
+  private spawnSparkArc(): void {
+    const shipPosition = this.shipMesh.position;
+    const origin = new Vector3(shipPosition.x, shipPosition.y, 0);
+    const arc = createSparkArc(origin, 0.55);
+    this.scene.add(arc.mesh);
+    this.activeSparks.push(arc);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Ship Explosion Cleanup
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Visual feedback when the shield is depleted and the ship dies.
+  // Setup: Called from respawnShip(); particles are now managed by the shared
+  //        ship-damage module so cleanup is consistent with debris and sparks.
+  // Issues: Explosion shards were previously cleaned up only inside
+  //         updateExplosions(), which could leave particles on screen if the
+  //         respawn flow changed or if the game stopped unexpectedly.
+  // Fix: Centralize creation/update/disposal in ship-damage.ts. respawnShip()
+  //      disposes any stale explosion particles before spawning fresh ones;
+  //      finishRespawn() performs a hard safety clear so the next life starts
+  //      with a clean scene.
+  // Gotchas: Particles use ConeGeometry with transparency; dispose both geometry
+  //          and material to avoid leaks. The ship and its children are hidden
+  //          during the death delay, not removed from the scene.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private spawnShipExplosion(): void {
+    // Spawn ~24 outward-flying shards at the ship's death position.
+    const position = this.ship.state.position;
+    for (let i = 0; i < 24; i += 1) {
+      const particle = createExplosionParticle(position);
+      this.scene.add(particle.mesh);
+      this.activeExplosions.push(particle);
+    }
   }
 
   private respawnShip(): void {
+    // Clear all threats so the player respawns into a clean arena.
     for (const projectile of this.projectiles) {
       this.disposeProjectile(projectile);
     }
     this.projectiles = [];
 
-    this.ship.state.position = { x: 0, y: 0 };
-    this.ship.state.velocity = { x: 0, y: 0 };
-    this.ship.state.aim = { x: 1, y: 0 };
-    this.ship.fireCooldown = 0;
+    for (const asteroid of this.asteroids) {
+      this.scene.remove(asteroid.mesh);
+      disposeAsteroidMesh(asteroid.mesh);
+    }
+    this.asteroids = [];
+
+    for (const piece of this.scrap) {
+      this.scene.remove(piece.mesh);
+      piece.mesh.geometry.dispose();
+      (piece.mesh.material as Material).dispose();
+    }
+    this.scrap = [];
+
+    // Ensure any stale explosion particles from a previous death are gone before
+    // spawning the new ones, so effects cannot stack up across multiple deaths.
+    disposeAllExplosionParticles(this.activeExplosions);
+    this.activeExplosions = [];
+
+    this.spawnShipExplosion();
+    clearShieldImpacts(this.shieldMesh);
+    disposeAllDamageParticles(this.activeDamageParticles);
+    this.activeDamageParticles = [];
+    disposeAllSparkArcs(this.activeSparks);
+    this.activeSparks = [];
+    this.lowShieldDebrisTimer = 0;
+    this.sparkTimer = 0;
+    this.shipMesh.visible = false;
+    this.shieldMesh.visible = false;
+    this.magnetRing.visible = false;
+    this.ship.markDead(1.0);
+    this.shipRespawnDelay = 1.0;
+    this.respawnPhase = 'exploding';
+  }
+
+  private finishRespawn(): void {
+    this.ship.markAlive();
+    this.shield.energy = SHIELD_MAX_ENERGY;
+    this.shipMesh.visible = true;
+    this.shieldMesh.visible = this.shield.energy > 0.01;
+    this.magnetRing.visible = true;
+
+    // Hard safety: any explosion particles still alive when the player revives
+    // are forcibly removed so the screen is clean for the next life.
+    disposeAllExplosionParticles(this.activeExplosions);
+    this.activeExplosions = [];
   }
 
   private createHud(): void {
@@ -682,6 +1001,21 @@ export class Game {
     this.shieldElement.style.textShadow = '0 0 4px #000000';
     this.shieldElement.style.transition = 'color 0.2s ease';
     document.body.appendChild(this.shieldElement);
+
+    this.resumeElement = document.createElement('div');
+    this.resumeElement.style.position = 'absolute';
+    this.resumeElement.style.top = '50%';
+    this.resumeElement.style.left = '50%';
+    this.resumeElement.style.transform = 'translate(-50%, -50%)';
+    this.resumeElement.style.color = '#ffffff';
+    this.resumeElement.style.fontFamily = 'monospace';
+    this.resumeElement.style.fontSize = '48px';
+    this.resumeElement.style.fontWeight = 'bold';
+    this.resumeElement.style.textShadow = '0 0 12px #000000';
+    this.resumeElement.style.whiteSpace = 'nowrap';
+    this.resumeElement.style.pointerEvents = 'none';
+    this.resumeElement.style.display = 'none';
+    document.body.appendChild(this.resumeElement);
   }
 
   private spawnFloatingText(text: string, delaySeconds: number): void {
@@ -800,24 +1134,43 @@ function createStarfield(): Points {
   return new Points(geometry, material);
 }
 
-function createShieldMesh(): Mesh {
-  const geometry = new SphereGeometry(SHIP_RADIUS * 1.6, 16, 16);
-  const material = new MeshBasicMaterial({
-    color: 0x00ffff,
-    transparent: true,
-    opacity: 0.25,
-    side: 2,
-  });
-  return new Mesh(geometry, material);
-}
-
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Magnet Range Ring
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Show the passive scrap-magnet collection radius around the ship.
+// Setup: Yellow ring attached to the ship mesh, always facing the camera.
+// Issues: Previous ring was thick (0.2 units) and fairly opaque, making it
+//         visually compete with the ship and shield.
+// Fix: Use a thinner band and much lower opacity so it reads as a faint HUD
+//      indicator rather than a solid object. DoubleSide keeps it visible from
+//      any angle; transparent + depthWrite:false prevents it from occluding.
+// Gotchas: The ring is part of the ship group, so it inherits ship position and
+//          rotation. Keep z slightly behind the ship so it does not clip the hull.
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Magnet Range Ring
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Show the passive scrap-magnet collection radius around the ship.
+// Setup: Yellow ring attached to the ship mesh, always facing the camera.
+// Issues: Previous ring was thick (0.2 units) and fairly opaque, making it
+//         visually compete with the ship and shield.
+// Fix: Use a very thin band and low opacity so it reads as a faint HUD
+//      indicator. Only turn it on when scrap is actually within pull range,
+//      so it does not clutter the screen when there is nothing to collect.
+// Gotchas: The ring is part of the ship group, so it inherits ship position and
+//          rotation. Keep z slightly behind the ship so it does not clip the hull.
+//          updateMagnetRing runs before updateScrap each frame, so visibility
+//          reflects the previous frame's scrap positions; one-frame lag is
+//          imperceptible for this UI hint.
+// ═══════════════════════════════════════════════════════════════════════════
 function createMagnetRing(): Mesh {
-  const geometry = new RingGeometry(2.3, 2.5, 32);
+  const geometry = new RingGeometry(MAGNET_RADIUS - 0.01, MAGNET_RADIUS, 64);
   const material = new MeshBasicMaterial({
     color: 0xffcc00,
     transparent: true,
-    opacity: 0.12,
+    opacity: 0.03,
     side: 2,
+    depthWrite: false,
   });
   const mesh = new Mesh(geometry, material);
   mesh.position.z = -0.5;

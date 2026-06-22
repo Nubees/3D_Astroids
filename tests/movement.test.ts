@@ -32,11 +32,11 @@ const zeroInput: InputState = {
 };
 
 describe('ArenaMovementController', () => {
-  it('accelerates the ship toward the input direction', () => {
+  it('applies forward thrust along the aim direction', () => {
     const ship = createShip();
     const input: InputState = {
-      move: { x: 1, y: 0 },
-      aim: { x: 0, y: 0 },
+      move: { x: 0, y: 1 },
+      aim: { x: 1, y: 0 },
       fire: false,
       deployBreather: false,
     };
@@ -46,6 +46,37 @@ describe('ArenaMovementController', () => {
 
     expect(ship.velocity.x).toBeCloseTo(7, 2);
     expect(ship.position.x).toBeCloseTo(7, 2);
+  });
+
+  it('applies reverse thrust opposite the aim direction', () => {
+    const ship = createShip();
+    ship.velocity = { x: 4, y: 0 };
+    const input: InputState = {
+      move: { x: 0, y: -1 },
+      aim: { x: 1, y: 0 },
+      fire: false,
+      deployBreather: false,
+    };
+    const controller = new ArenaMovementController();
+
+    controller.apply(ship, input, 1.0);
+
+    expect(ship.velocity.x).toBeCloseTo(-7, 2);
+  });
+
+  it('strafes perpendicular to the aim direction', () => {
+    const ship = createShip();
+    const input: InputState = {
+      move: { x: 1, y: 0 },
+      aim: { x: 1, y: 0 },
+      fire: false,
+      deployBreather: false,
+    };
+    const controller = new ArenaMovementController();
+
+    controller.apply(ship, input, 1.0);
+
+    expect(ship.velocity.y).toBeCloseTo(-7, 2);
   });
 
   it('clamps positions inside arena bounds', () => {
@@ -77,6 +108,28 @@ describe('ArenaMovementController', () => {
 
     const velocity = controller.getSpawnVelocity();
     expect(Math.hypot(velocity.x, velocity.y)).toBeGreaterThan(0);
+  });
+
+  it('coasts with no input instead of stopping', () => {
+    const ship = createShip();
+    ship.velocity = { x: 4, y: 0 };
+    const controller = new ArenaMovementController();
+
+    controller.apply(ship, zeroInput, 0.5);
+
+    expect(ship.velocity.x).toBeCloseTo(4, 5);
+    expect(ship.position.x).toBeCloseTo(2, 5);
+  });
+
+  it('reflects and dampens velocity at arena bounds', () => {
+    const ship = createShip(12.9, 0);
+    ship.velocity = { x: 5, y: 0 };
+    const controller = new ArenaMovementController();
+
+    controller.apply(ship, zeroInput, 0.1);
+
+    expect(ship.position.x).toBe(13);
+    expect(ship.velocity.x).toBeCloseTo(-2.75, 2);
   });
 });
 

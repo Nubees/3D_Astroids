@@ -10,26 +10,22 @@ import { AsteroidSize, AsteroidState } from './types';
 // Issues: The previous shield was a manual panic button that collapsed on a single
 //         hit, giving the player no feedback about remaining protection.
 // Fix: The shield is now passive. Hits drain energy based on asteroid size. The
-//      HUD shows a percentage with color-coded urgency. A light-blue arc flashes
-//      at the impact point and the HUD shakes briefly on absorption.
-// Gotchas: The shield recharges slowly out of combat and rapidly inside the
-//          Breather Zone. The C / RMB inputs are reserved for a future EMP pulse.
+//      HUD shows a percentage with color-coded urgency. Visual feedback is handled
+//      by the separate shield-visuals module (glowing energy bubble + expanding
+//      impact ripples). The HUD shakes briefly on absorption.
+// Gotchas: The shield recharges ONLY inside the Breather Zone; outside the zone
+//          energy does not regenerate. The C / RMB inputs are reserved for a
+//          future EMP pulse.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SHIELD_MAX_ENERGY = 1.0;
-export const SHIELD_RECHARGE_PER_SECOND = 0.15;
-export const SHIELD_BREATHER_RECHARGE_MULTIPLIER = 5.0;
+export const SHIELD_RECHARGE_PER_SECOND = 0.75;
 
 export const SHIELD_DAMAGE_BY_SIZE: Record<AsteroidSize, number> = {
-  [AsteroidSize.SMALL]: 0.20,
-  [AsteroidSize.MEDIUM]: 0.35,
-  [AsteroidSize.LARGE]: 0.55,
-};
-
-export const SHIELD_KNOCKBACK_BY_SIZE: Record<AsteroidSize, number> = {
-  [AsteroidSize.SMALL]: 2.5,
-  [AsteroidSize.MEDIUM]: 4.5,
-  [AsteroidSize.LARGE]: 7.0,
+  [AsteroidSize.TINY]: 0.05,
+  [AsteroidSize.SMALL]: 0.10,
+  [AsteroidSize.MEDIUM]: 0.15,
+  [AsteroidSize.LARGE]: 0.20,
 };
 
 export interface ShieldState {
@@ -50,11 +46,13 @@ export function updateShield(
   deltaTime: number,
 ): void {
   shield.hitAbsorbedThisFrame = false;
-  const multiplier = inBreatherZone ? SHIELD_BREATHER_RECHARGE_MULTIPLIER : 1.0;
-  shield.energy = Math.min(
-    SHIELD_MAX_ENERGY,
-    shield.energy + SHIELD_RECHARGE_PER_SECOND * multiplier * deltaTime,
-  );
+  // Shield energy only regenerates while inside the Breather Zone.
+  if (inBreatherZone) {
+    shield.energy = Math.min(
+      SHIELD_MAX_ENERGY,
+      shield.energy + SHIELD_RECHARGE_PER_SECOND * deltaTime,
+    );
+  }
 }
 
 /**

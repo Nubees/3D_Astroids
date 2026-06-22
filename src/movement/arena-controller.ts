@@ -4,18 +4,24 @@ import { InputState } from '../input';
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Arena Movement Controller
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Preserve Phase 1 behavior — ship flies freely inside fixed arena bounds.
+// Purpose: Arena movement with space-drift inertia: input applies thrust, the
+//          ship coasts when input stops, and it bounces softly off arena walls.
 // Setup: Used as the default movement mode.
-// Issues: None.
-// Fix: Extracted from Game.ts so drift mode can reuse the same controller slot.
+// Issues: Phase 1 movement snapped velocity toward the input each frame, killing
+//         inertia and making the ship feel like a car on rails.
+// Fix: Apply input as continuous acceleration, cap top speed, integrate velocity
+//      into position, and reflect/damp velocity at arena bounds for a reactive,
+//      weightless feel.
 // Gotchas: Camera stays at origin; asteroids spawn from any arena edge and drift
-//          inward to create unpredictable approach angles.
+//          inward to create unpredictable approach angles. Bound bounce uses
+//          damping so the ship does not ping-pong forever.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const ARENA_WIDTH = 26;
 const ARENA_HEIGHT = 18;
-const SHIP_SPEED = 7;
+const SHIP_MAX_SPEED = 7;
 const SHIP_ACCEL = 12;
+const BOUNCE_DAMPING = 0.55;
 const SPAWN_MIN_INTERVAL = 3.0;
 const SPAWN_MAX_INTERVAL = 5.0;
 
@@ -30,19 +36,56 @@ export class ArenaMovementController implements MovementController {
   private lastSpawnPosition: Vector2 = { x: 0, y: 10 };
 
   apply(ship: ShipState, input: InputState, deltaTime: number): void {
-    const targetVx = input.move.x * SHIP_SPEED;
-    const targetVy = input.move.y * SHIP_SPEED;
+    // Apply thrust relative to the ship's facing direction. Up/W is forward
+    // thrust along aim, Down/S is reverse thrust, Left/Right strafe sideways.
+    // No input means coast on momentum.
+    const aim = ship.aim;
+    const forward = input.move.y; // +1 forward, -1 reverse
+    const strafe = input.move.x;  // +1 right, -1 left from the ship's view
+    const accelX = (forward * aim.x + strafe * aim.y) * SHIP_ACCEL;
+    const accelY = (forward * aim.y - strafe * aim.x) * SHIP_ACCEL;
 
-    const t = Math.min(1, SHIP_ACCEL * deltaTime);
     ship.velocity = {
-      x: ship.velocity.x + (targetVx - ship.velocity.x) * t,
-      y: ship.velocity.y + (targetVy - ship.velocity.y) * t,
+      x: ship.velocity.x + accelX * deltaTime,
+      y: ship.velocity.y + accelY * deltaTime,
     };
+
+    // Cap top speed so the ship remains controllable.
+    const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+    if (speed > SHIP_MAX_SPEED) {
+      const scale = SHIP_MAX_SPEED / speed;
+      ship.velocity = {
+        x: ship.velocity.x * scale,
+        y: ship.velocity.y * scale,
+      };
+    }
 
     ship.position = {
       x: ship.position.x + ship.velocity.x * deltaTime,
       y: ship.position.y + ship.velocity.y * deltaTime,
     };
+
+    // Soft bounce at arena bounds.
+    const halfW = ARENA_WIDTH / 2;
+    const halfH = ARENA_HEIGHT / 2;
+    let { x: vx, y: vy } = ship.velocity;
+    let { x: px, y: py } = ship.position;
+    if (px > halfW) {
+      px = halfW;
+      vx *= -BOUNCE_DAMPING;
+    } else if (px < -halfW) {
+      px = -halfW;
+      vx *= -BOUNCE_DAMPING;
+    }
+    if (py > halfH) {
+      py = halfH;
+      vy *= -BOUNCE_DAMPING;
+    } else if (py < -halfH) {
+      py = -halfH;
+      vy *= -BOUNCE_DAMPING;
+    }
+    ship.position = { x: px, y: py };
+    ship.velocity = { x: vx, y: vy };
   }
 
   clampToBounds(position: Vector2): Vector2 {

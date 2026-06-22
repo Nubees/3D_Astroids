@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ship Hangar — Exhaust Inspector</title>
+  <link rel="stylesheet" href="./src/ships/inspector.css">
+</head>
+<body>
+  <canvas id="hangar-canvas"></canvas>
+  <div id="hangar-ui" class="hangar-ui">
+    <div class="hangar-left-panel">
+      <button id="hangar-back" class="hangar-back" type="button" aria-label="Back to Ship Select">← Back</button>
+      <div class="hangar-color-picker">
+        <div class="hangar-color-title">FLAME COLOR</div>
+        <div id="hangar-color-swatches" class="hangar-color-swatches"></div>
+        <label class="hangar-color-all">
+          <input id="hangar-color-all" type="checkbox"> Apply to all nozzles
+        </label>
+        <button id="hangar-color-reset" class="hangar-color-reset" type="button">Reset colors</button>
+      </div>
+    </div>
+    <div class="hangar-center-gap"></div>
+    <div class="hangar-right-panel">
+      <div class="hangar-title">SHIP HANGAR — EXHAUST INSPECTOR</div>
+      <div class="hangar-subtitle">tune flames &amp; colors</div>
+      <div id="hangar-ship-name" class="hangar-ship-name">Loading…</div>
+      <div id="hangar-stats" class="hangar-stats"></div>
+      <div id="hangar-nozzle" class="hangar-nozzle"></div>
+    </div>
+    <div class="hangar-legend">
+      <div>Drag the <span class="key" style="color:#ff4444">RED</span> nozzle dots to move the exhaust start point · <span class="key">F</span> duplicate · <span class="key">D</span> remove</div>
+      <div><span class="key">←</span><span class="key">→</span> switch ship · <span class="key">W</span> wireframe · <span class="key">B</span> bbox/axes · <span class="key">R</span> rotate · <span class="key">Z</span>/<span class="key">X</span> zoom · <span class="key">0</span> reset cam</div>
+      <div><span class="key">N</span> next nozzle · <span class="key">↑</span><span class="key">↓</span> Y nudge · <span class="key">+</span><span class="key">-</span> radius · <span class="key">[</span><span class="key">]</span> length · <span class="key">&lt;</span><span class="key">&gt;</span> base offset</div>
+      <div><span class="key">T</span> reset tuning · <span class="key">C</span> copy config · <span class="key">S</span> screenshot</div>
+    </div>
+  </div>
+  <script type="module" src="./src/ships/inspector.ts"></script>
+</body>
+</html>

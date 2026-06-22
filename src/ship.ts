@@ -5,17 +5,19 @@ import { InputState } from './input';
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Ship Logic
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Procedural ship mesh + aim logic. Movement is applied by the
-//          active MovementController; Ship only handles aiming and fire cooldown.
-// Setup: Game creates the mesh and owns the Ship instance. The controller mutates
-//        ship.state via apply().
+// Purpose: Runtime ship state and a procedural fallback mesh. External ship
+//          models are loaded by the ship catalog module and injected into Game.
+// Setup: Game owns the mesh and a Ship instance. The active MovementController
+//        mutates ship.state via apply().
 // Issues: Phase 1 Ship.update combined movement and aim.
-// Fix: Split movement out to controllers; Ship keeps only aim and fire timing.
+// Fix: Split movement out to controllers; Ship keeps only aim, fire timing,
+//      and a dead/respawn flag for the explosion/respawn flow.
 // Gotchas: Geometry points up (+Y) by default; rotate -90° around Z so nose is +X.
 //          Collision radius is smaller than visual radius for fair near-misses.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SHIP_RADIUS = 0.35;
+export const SHIELD_RADIUS = SHIP_RADIUS * 2.4 * 1.1;
 export const SHIP_FIRE_COOLDOWN = 0.154;
 
 export function createShipMesh(): Group {
@@ -40,6 +42,8 @@ export function createShipMesh(): Group {
 export class Ship {
   state: ShipState;
   fireCooldown = 0;
+  isDead = false;
+  respawnTimer = 0;
 
   constructor(x = 0, y = -5) {
     this.state = {
@@ -50,6 +54,8 @@ export class Ship {
   }
 
   update(input: InputState, deltaTime: number): void {
+    if (this.isDead) return;
+
     const aimDx = input.aim.x - this.state.position.x;
     const aimDy = input.aim.y - this.state.position.y;
     const aimLength = Math.hypot(aimDx, aimDy);
@@ -61,10 +67,24 @@ export class Ship {
   }
 
   canFire(): boolean {
-    return this.fireCooldown <= 0;
+    return !this.isDead && this.fireCooldown <= 0;
   }
 
   resetCooldown(): void {
     this.fireCooldown = SHIP_FIRE_COOLDOWN;
+  }
+
+  markDead(respawnDelay: number): void {
+    this.isDead = true;
+    this.respawnTimer = respawnDelay;
+  }
+
+  markAlive(): void {
+    this.isDead = false;
+    this.respawnTimer = 0;
+    this.state.position = { x: 0, y: 0 };
+    this.state.velocity = { x: 0, y: 0 };
+    this.state.aim = { x: 1, y: 0 };
+    this.fireCooldown = 0;
   }
 }

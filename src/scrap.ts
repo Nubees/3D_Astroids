@@ -16,7 +16,7 @@ import { AsteroidSize, ScrapState, Vector2 } from './types';
 
 const SCRAP_LIFETIME = 8.0;
 const SCRAP_DRIFT_SPEED = 0.8;
-const MAGNET_RADIUS = 2.5;
+export const MAGNET_RADIUS = 2.5;
 const COLLECTION_RADIUS = 0.4;
 
 export function createScrap(position: Vector2): ScrapState {
@@ -41,6 +41,8 @@ export function isScrapExpired(scrap: ScrapState): boolean {
 
 export function scrapDropChance(size: AsteroidSize): number {
   switch (size) {
+    case AsteroidSize.TINY:
+      return 0.1;
     case AsteroidSize.SMALL:
       return 0.2;
     case AsteroidSize.MEDIUM:

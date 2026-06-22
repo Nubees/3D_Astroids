@@ -30,6 +30,7 @@ export class InputManager {
   private mouseX = 0;
   private mouseY = 0;
   private leftMouseDown = false;
+  private anyKeyHit = false;
   private readonly onKeyDown: (event: KeyboardEvent) => void;
   private readonly onKeyUp: (event: KeyboardEvent) => void;
   private readonly onMouseMove: (event: MouseEvent) => void;
@@ -45,6 +46,7 @@ export class InputManager {
         event.preventDefault();
       }
       this.keys.add(key);
+      this.anyKeyHit = true;
     };
 
     this.onKeyUp = (event: KeyboardEvent): void => {
@@ -74,6 +76,7 @@ export class InputManager {
     this.onBlur = (): void => {
       this.keys.clear();
       this.leftMouseDown = false;
+      this.anyKeyHit = false;
     };
 
     this.onContextMenu = (event: MouseEvent): void => {
@@ -92,8 +95,9 @@ export class InputManager {
   currentState(): InputState {
     let x = 0;
     let y = 0;
-    if (this.keys.has('w') || this.keys.has('arrowup')) y -= 1;
-    if (this.keys.has('s') || this.keys.has('arrowdown')) y += 1;
+    // Arena world-space movement: +Y is up, -Y is down.
+    if (this.keys.has('w') || this.keys.has('arrowup')) y += 1;
+    if (this.keys.has('s') || this.keys.has('arrowdown')) y -= 1;
     if (this.keys.has('a') || this.keys.has('arrowleft')) x -= 1;
     if (this.keys.has('d') || this.keys.has('arrowright')) x += 1;
 
@@ -108,6 +112,16 @@ export class InputManager {
       fire: this.keys.has(' ') || this.leftMouseDown,
       deployBreather: this.keys.has('x'),
     };
+  }
+
+  /**
+   * Returns true once per keydown event, then clears the flag. Useful for
+   * "press any key to continue" prompts.
+   */
+  consumeAnyKeyHit(): boolean {
+    const hit = this.anyKeyHit;
+    this.anyKeyHit = false;
+    return hit;
   }
 
   destroy(): void {

@@ -5,14 +5,17 @@ import { defineConfig } from 'vite';
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Configure the Vite dev server and build for the 3D Astroids project.
 // Setup: Reads source from src/ and outputs to dist/.
-// Issues: None.
-// Fix: Created minimal config with no public dir and a fixed dev port.
+// Issues: The Ship Hangar page (ships-inspector.html) was only reachable in dev
+//         because Vite bundles index.html by default, leaving it out of dist/.
+// Fix: Added ships-inspector.html as a second Rollup input so the hangar is
+//      served in both dev and production builds.
 // Gotchas: publicDir is disabled because the project uses procedural assets.
+//          The two entry points produce dist/index.html and dist/ships-inspector.html.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default defineConfig({
   root: '.',
-  publicDir: false,
+  publicDir: 'public',
   server: {
     port: 5173,
     host: '127.0.0.1',
@@ -20,5 +23,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      input: {
+        main: 'index.html',
+        hangar: 'ships-inspector.html',
+      },
+    },
   },
+  assetsInclude: ['**/*.glb'],
 });
