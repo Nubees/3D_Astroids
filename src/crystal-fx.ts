@@ -371,19 +371,23 @@ const STRIKE_LIFETIME_MIN_S = 0.05;
 const STRIKE_LIFETIME_MAX_S = 0.15;
 
 /**
- * Strike radius range. Phase 6d follow-up (round 4): the round-1
- * dial-down (0.025/0.012) was the right call when the bolt was
- * competing with the crystal's emissive body pulse, but with that
- * glow disabled in round 3, the bolt now reads as too thin. Restored
- * to the original 0.05/0.02 with a small bump (0.06/0.025) so the
- * strikes are clearly visible against the dark starfield. With
- * AdditiveBlending + 2 strikes at peak 0.50, per-channel contribution
- * is ~1.0 — same as round 2, no white-out risk. The thickness
- * increase affects ONLY pixel coverage, not pixel brightness, so
- * the saturation math doesn't change.
+ * Strike radius range. Phase 6d follow-up (round 4 → round 5):
+ * round 4 set thickness to 0.06/0.025 with the bloom-competition FX
+ * disabled; the bolt was then clearly visible but the user reported
+ * "make the lightling thicker still". Round 5 bumps to 0.085/0.04
+ * (1.7× the round-4 trunk, 2× the original Phase 6d tuning) now
+ * that scale breathe / position shake / yellow sparks are also
+ * re-enabled (round 5) and the bolt needs to be the visually
+ * dominant FX. Per-pixel brightness is unchanged (still peak 0.50,
+ * then bumped to 0.65 in round 5), so the saturation math is:
+ *   2 strikes × 0.65 opacity × cyan color ≈ 1.3 per channel peak
+ *   — slightly over 1.0 (mild saturation, not white-out). The trunk
+ *   tapers 0.085 → 0.04 so the strike still attenuates with
+ *   distance, matching how a real arc thins as it leaves the
+ *   surface.
  */
-const STRIKE_RADIUS0_FRAC = 0.06;
-const STRIKE_RADIUS1_FRAC = 0.025;
+const STRIKE_RADIUS0_FRAC = 0.085;
+const STRIKE_RADIUS1_FRAC = 0.04;
 
 /**
  * ── My Rules ──
@@ -578,24 +582,22 @@ export class CrystalLightning {
       s.geometry.update(this.currentTime);
     }
     // Drive opacity on the shared material so every strike fades together.
-    // Phase 6d follow-up (round 2): the round-1 dial-down (peak 0.35,
-    // 2 strikes) made the bolts so faint that the crystal's bloom-flash
-    // completely washed them out — the user reported "no lightling effect,
-    // just the blooming light flashes". Round 1 overshot; the bolts
-    // needed to be brighter to compete with the crystal's emissive.
+    // Phase 6d follow-up (round 5): peak 0.50 → 0.65, floor 0.18 → 0.22.
+    // The user said "make the lightling ... brighter" with scale
+    // breathe / position shake / yellow sparks re-enabled. With those
+    // competing FX back in the visual budget, the bolt needs more
+    // brightness to remain the dominant element.
     //
-    // New peak 0.50 (round 1 was 0.35, white-out fix was 0.55). 2 strikes
-    // × 0.50 = 1.0 per channel peak — right at the saturation boundary
-    // but not over it (no white-out). The fractional channel
-    // overshoot doesn't matter because cyan (0x8cd0ff) is far from
-    // pure white — channel peaks at 1.0 give a bright cyan, not white.
+    // 2 strikes × 0.65 opacity = 1.3 per channel at peak — slightly
+    // above saturation but on the cyan color (not near-white), so the
+    // result is a bright cyan-white crackle, not a pure-white screen.
+    // The over-saturation is acceptable because it makes the bolt
+    // pop against the now-animated crystal body.
     //
-    // Floor 0.18 (round 1 was 0.10): round 1's 0.10 floor made the bolts
-    // almost invisible at the start of the burst window; the user sees
-    // "lightning" only in the last 30% of the cycle. 0.18 keeps a
-    // visible crackle throughout the window so the discharge reads
-    // continuously, not as a final-frame pop.
-    this.material.opacity = 0.18 + 0.32 * charge;
+    // Floor 0.22 (was 0.18) keeps a visible crackle throughout the
+    // burst window; round-3's 0.18 was already a low floor and the
+    // bolt reads as more "alive" with a stronger base presence.
+    this.material.opacity = 0.22 + 0.43 * charge;
   }
 
   /**
@@ -744,16 +746,19 @@ export class CrystalBoltSparks {
 
   /**
    * Emit sparks for one crystal this frame. `charge` is the crystalCharge
-   * curve (0..1); emission rate is `max(8, charge^2 * 140)` particles/sec,
-   * capped at 8 per frame per crystal.
+   * curve (0..1); emission rate is `max(8, charge^2 * 140)` particles/sec
+   * multiplied by `rateScale` (default 1.0), capped at 8 per frame per
+   * crystal.
    *
    * Phase 6c3 change: was scene-wide 120-pool; now per-crystal 40-pool.
-   * The emission RATE formula is unchanged from Phase 6c2 — what changed
-   * is the pool scoping and the sprite size.
+   * Phase 6d round 5: added `rateScale` parameter so game.ts can dial
+   * the spark rate down (e.g. to 0.65) when re-enabling sparks alongside
+   * other competing FX. This avoids duplicating the rate math in
+   * game.ts and keeps the spark rate formula in one place.
    */
-  emit(charge: number, worldPos: Vector2, radius: number, deltaTime: number): void {
+  emit(charge: number, worldPos: Vector2, radius: number, deltaTime: number, rateScale = 1.0): void {
     if (charge <= 0) return;
-    const rate = Math.max(8, charge * charge * 140);
+    const rate = Math.max(8, charge * charge * 140) * rateScale;
     const count = Math.min(8, Math.floor(rate * deltaTime + Math.random()));
     if (count === 0) return;
     for (let n = 0; n < count; n += 1) {

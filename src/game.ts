@@ -1027,38 +1027,45 @@ export class Game {
       if (!target) continue;
       const fracturedMaterial = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
       if (!fracturedMaterial) continue;
-      // Phase 6d follow-up (round 3): disabled the crystal body pulse,
-      // scale breathe, and position shake. The user said 'disable all
-      // these effects, and return the lightling' — those FX were
-      // overpowering the lightning with a 'blooming light flash' look.
-      // The crystal is now visually static between bursts; only the
-      // lightning animates around it.
-      // Position is left at the crystal's authoritative position with no
-      // shake. Scale stays at 1.0 — no breathe. The mesh only moves when
-      // the Game moves it (e.g. when the asteroid drifts).
-      target.mesh.position.set(target.state.position.x, target.state.position.y, 0);
-      target.mesh.scale.set(1, 1, 1);
-      // Emissive intensity stays at 0 (set by createFracturedMaterial);
-      // the per-frame ramp and the per-burst flash are both no-ops now.
+      // Phase 6d follow-up (round 5): scale breathe, position shake,
+      // and yellow spark emission re-enabled. The user said 're-enble
+      // Scale breathe / Position shake / Yellow spark particles' —
+      // the bolt is now bright + thick enough (round 5) to be the
+      // dominant FX, so these supporting FX no longer drown it out.
+      // Emissive body pulse and telegraph lines stay disabled; those
+      // were the actual "blooming light flash" offenders.
+      const timeToNext = scheduler.getTimeToNextBurst(gameTime);
+      const charge = crystalCharge(timeToNext);
+      // Scale breathe: 1.0 baseline → 1.05 peak pre-burst. Uses charge² so
+      // the breathe "stretches" only in the final third of the interval —
+      // matches the visual intuition of a charging capacitor.
+      const breathe = 1.0 + 0.05 * charge * charge;
+      // Continuous shake of the mesh position (kept from Phase 6b).
+      const shakeSeed = (target.mesh.userData as CrystalMeshUserData).shakeSeed ?? id;
+      const shakeX = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 1.7);
+      const shakeY = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed + 0.3) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 2.0);
+      target.mesh.position.set(
+        target.state.position.x + shakeX,
+        target.state.position.y + shakeY,
+        0,
+      );
+      target.mesh.scale.set(breathe, breathe, 1);
       // Drive the crystal lightning — strike geometry regenerated each frame
       // inside CrystalLightning.update via LightningStrike.update(currentTime),
       // opacity tracks crystalCharge so the bolts only really light up just
       // before a burst.
-      const timeToNext = scheduler.getTimeToNextBurst(gameTime);
-      const charge = crystalCharge(timeToNext);
       const crystalRadius = SIZE_RADIUS[target.state.size];
       const bolt = this.crystalBolts.get(id);
       if (bolt) {
         bolt.update(deltaTime, charge, target.state.position, crystalRadius, id);
       }
-      // Yellow sparks emission disabled (Phase 6d round 3). The spark
-      // pool is still constructed at fracture time so dispose chains
-      // stay simple, but we don't call emit() so no new sparks spawn
-      // and existing ones age out within SPARK_LIFETIME_SECONDS (0.6s).
-      // Tick the pool anyway so any in-flight particles still update
-      // their fade and age — without this they'd freeze on screen.
+      // Emit yellow sparks from the crystal surface and advance the
+      // per-crystal pool. `rateScale` 0.65 (Phase 6d round 5) dials
+      // down the spark rate so the sparks read as supporting FX
+      // around the now-dominant bolt instead of competing with it.
       const sparks = this.crystalSparks.get(id);
       if (sparks) {
+        sparks.emit(charge, target.state.position, crystalRadius, deltaTime, 0.65);
         sparks.update(deltaTime);
       }
     }

@@ -14,24 +14,24 @@ describe('CrystalLightning', () => {
   it('update(dt, charge=0) keeps bolts visible (low opacity floor)', () => {
     const bolt = new CrystalLightning(42);
     bolt.update(0.016, 0, { x: 0, y: 0 }, 1.0, 42);
-    // Phase 6d follow-up (round 2): floor raised 0.10 → 0.18 after
-    // round 1 (peak 0.35, floor 0.10) made the bolts too dim to see
-    // against the crystal's bloom-flash. 0.18 keeps a visible crackle
-    // throughout the burst window instead of only in the final 30%.
-    expect((bolt.mesh.material as THREE.MeshBasicMaterial).opacity).toBeCloseTo(0.18, 2);
+    // Phase 6d follow-up (round 5): floor raised 0.18 → 0.22 alongside
+    // the round-5 brightness bump. With scale breathe / position shake
+    // / yellow sparks re-enabled, the bolt needs a stronger base
+    // presence to stay dominant in the visual budget.
+    expect((bolt.mesh.material as THREE.MeshBasicMaterial).opacity).toBeCloseTo(0.22, 2);
     bolt.dispose();
   });
 
   it('update(dt, charge=1) caps peak opacity (anti white-out)', () => {
     const bolt = new CrystalLightning(42);
     bolt.update(0.016, 1, { x: 0, y: 0 }, 1.0, 42);
-    // Phase 6d follow-up (round 2): peak raised 0.35 → 0.50 after
-    // round 1 (peak 0.35) made the bolts invisible against the
-    // crystal's bloom-flash. New peak 0.50 with 2 strikes gives a
-    // per-channel additive sum of ~1.0 — right at saturation but
-    // still on a cyan color, not white. Bright cyan-white crackle
-    // without white-out.
-    expect((bolt.mesh.material as THREE.MeshBasicMaterial).opacity).toBeCloseTo(0.5, 2);
+    // Phase 6d follow-up (round 5): peak raised 0.50 → 0.65 with the
+    // bolt thickness bump (round 5) and the re-enabled competing FX.
+    // 2 strikes × 0.65 = 1.3 per channel — slightly over saturation
+    // but on a cyan color, so the result is a bright cyan-white
+    // crackle, not a white-out. The over-saturation is what makes
+    // the bolt pop against the animated crystal body.
+    expect((bolt.mesh.material as THREE.MeshBasicMaterial).opacity).toBeCloseTo(0.65, 2);
     bolt.dispose();
   });
 
