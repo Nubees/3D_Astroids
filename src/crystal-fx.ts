@@ -2,6 +2,7 @@ import {
   AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
+  InterleavedBufferAttribute,
   LineBasicMaterial,
   LineSegments,
   MeshStandardMaterial,
@@ -470,6 +471,13 @@ export class ExtrudingBolt {
     for (let i = 0; i < this.colors.length; i += 1) {
       this.colors[i] *= intensity;
     }
+    // LineGeometry.setColors() registers colors as TWO InterleavedBufferAttribute
+    // siblings (`instanceColorStart` + `instanceColorEnd`) that share a single
+    // InstancedInterleavedBuffer. The intensity multiplier above mutates that
+    // shared array in place, but Three.js only re-uploads interleaved buffers
+    // when `needsUpdate = true`. Marking it dirty is what makes the
+    // charge-driven brightness actually reach the GPU.
+    (this.geometry.attributes.instanceColorStart as InterleavedBufferAttribute).needsUpdate = true;
     void radius;
   }
 
