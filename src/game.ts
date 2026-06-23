@@ -75,6 +75,7 @@ import {
   isClutchApplicable,
   isPerfectApplicable,
   TELEGRAPH_DURATION_SECONDS,
+  updateFracturedMaterialTelegraph,
 } from './crystal-fx';
 import { Shockwave, updateShockwaves } from './shockwave';
 import { ArenaMovementController } from './movement/arena-controller';
@@ -1059,6 +1060,16 @@ export class Game {
       if (bolt) {
         bolt.update(deltaTime, charge, target.state.position, crystalRadius, id);
       }
+      // Phase 6e — body-emissive telegraph. The fractured material's
+      // onBeforeCompile injection reads uTime (for the pulse rhythm) and
+      // uCharge (drives the fresnel rim + 3-stage color shift). The
+      // timeAccum lives on the material's userData; it is wiped to
+      // undefined by disposeAsteroidMesh when the crystal is destroyed.
+      const telegraphUserData = fracturedMaterial.userData as { timeAccum?: number };
+      const prevTime = telegraphUserData.timeAccum ?? 0;
+      const nextTime = prevTime + deltaTime;
+      telegraphUserData.timeAccum = nextTime;
+      updateFracturedMaterialTelegraph(fracturedMaterial, nextTime, charge);
       // Yellow sparks disabled (Phase 6d round 6). The user said
       // '-disbale Yellow spark particles' — they're reading as
       // visual noise against the now-dominant bolt and the

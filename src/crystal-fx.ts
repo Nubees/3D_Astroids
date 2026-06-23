@@ -2,6 +2,7 @@ import {
   AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
+  Color,
   LineBasicMaterial,
   LineSegments,
   Mesh,
@@ -24,15 +25,16 @@ import {
 } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Crystal FX (Phase 6d — Vendored LightningStrike)
+// My Rules — Crystal FX (Phase 6e — Body Telegraph via onBeforeCompile)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Pure helpers + scene classes for the crystal-fracture effect.
 //          The visual story is "the crystal is overloaded and discharging"
 //          (charge-driven pulse, scale breathe, vendored fractal-branched
-//          lightning strikes, per-crystal spark particles). The cracked-vein
-//          texture (Phase 6c1), the halo-style ElectricityArc (Phase 6c2),
-//          and the Phase 6c3 ExtrudingBolt zigzag have all been removed/
-//          replaced — see git history if you need to resurrect any of them.
+//          lightning strikes, body-emissive fresnel + color-shift telegraph,
+//          per-crystal spark particles). The cracked-vein texture (Phase 6c1),
+//          the halo-style ElectricityArc (Phase 6c2), and the Phase 6c3
+//          ExtrudingBolt zigzag have all been removed/replaced — see git
+//          history if you need to resurrect any of them.
 // Setup:   Imported by src/game.ts and tests/shard-burst.test.ts.
 // Issues:  Phase 6c3's ExtrudingBolt used a hand-rolled zigzag polyline
 //          rebuilt every frame from `computeBoltEndpoints`. With 5 bolts ×
@@ -83,10 +85,19 @@ import {
 //    material, one draw call per crystal. The pool size is 40; when full,
 //    oldest particles recycle.
 //  - createFracturedMaterial returns a bright cyan MeshStandardMaterial with
-//    no emissiveMap (the texture is gone) and an emissiveIntensity that the
-//    Game drives from crystalCharge each frame. emissive color is the same
-//    cyan as the base color so the pulse reads as "the crystal is glowing
-//    brighter" rather than "an emissive map is being revealed."
+//    an onBeforeCompile injection that adds a fresnel rim + 3-stage color
+//    shift (cyan → white → red) to `totalEmissiveRadiance`. The Game drives
+//    the uniforms via updateFracturedMaterialTelegraph (uTime, uCharge, and
+//    uRimColor lerp from white → red as charge ramps). The shader bypass
+//    is safe because it flows through the standard PBR tone-mapper; no new
+//    AdditiveBlending is introduced, so the additive-blending white-out
+//    path stays closed (yellow spark particles were the actual culprit, not
+//    the body emissive — see `feedback_additive_blending_whiteout`).
+//  - customProgramCacheKey returns 'crystal-fractured-telegraph-v1' so all
+//    fractured crystals share one compiled shader program.
+//  - The crystal body emissive at rest (charge=0) is identical to the
+//    pre-Phase-6e look — the uCharge multiplier keeps the tint and rim at
+//    zero contribution when not actively charging.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -294,19 +305,43 @@ export function getHeartbeatPhase(t: number): number {
 
 /**
  * Build the crystal material used when a crystal is fractured.
- * Phase 6d follow-up (round 3): the user said 'disable all these effects,
- * and return the lightling' — the crystal's own emissive body glow
- * (cyan, driven by emissiveIntensity 0.5 + 0.6 * charge² + 0.4 burst flash)
- * was overpowering the lightning and reading as a 'blooming light flash'.
- * Emissive is now zero, so the crystal body is its base diffuse color
- * (0x88e6ff cyan) with no self-illumination. The lightning is the only
- * luminous effect on the crystal now.
+ *
+ * Phase 6e — re-introduce the body emissive as a TELEGRAPH channel via
+ * `onBeforeCompile` injection. The 6d follow-up (round 3) wrongly disabled
+ * the body emissive thinking it was the bloom-mess offender; the user found
+ * by elimination that the yellow spark PARTICLES were the actual culprit
+ * (see `feedback_additive_blending_whiteout` and `project_phase_6d_vendored_lightning`).
+ * The body emissive was innocent. Phase 6e re-enables it, but as a
+ * shader-driven fresnel rim + 3-stage color shift (cyan → white → red)
+ * rather than a raw emissiveIntensity ramp — same visual goal, but the
+ * shader injection routes the glow through `totalEmissiveRadiance` so it
+ * benefits from the standard PBR tone-mapper and never bypasses scene
+ * exposure. NO new AdditiveBlending is introduced; the additive-blending
+ * white-out path stays closed.
+ *
+ * The Game ticks the uniforms per-frame via `updateFracturedMaterialTelegraph`
+ * using the same `crystalCharge(t)` curve that drives the bolt + breathe +
+ * shake, so all four telegraph channels peak together at the pre-burst moment.
  *
  * `transparent: true` is kept at creation so the death tween's opacity
  * fade works without forcing a shader recompile at runtime.
+ *
+ * Gotchas:
+ *  - `material.userData.uniforms` is the JS-side handle the Game mutates.
+ *    The actual GPU uniforms are wired inside `onBeforeCompile` via
+ *    `Object.assign(shader.uniforms, ...)` so Three.js picks them up.
+ *  - `customProgramCacheKey` returns a stable string so all fractured
+ *    crystals share one compiled shader program (no per-crystal recompile).
+ *  - `timeAccum` lives on the same `userData`; the Game reads/writes it
+ *    each frame to drive the pulse rhythm. It is wiped to `undefined`
+ *    by `disposeAsteroidMesh` because the whole `userData` is dropped
+ *    on material disposal.
+ *  - `envMapIntensity: 0` is intentional — the scene has no envmap
+ *    (`pmremGenerator` is not run), so the fresnel term would otherwise
+ *    pick up a black envmap reflection and wash out the rim.
  */
 export function createFracturedMaterial(): MeshStandardMaterial {
-  return new MeshStandardMaterial({
+  const material = new MeshStandardMaterial({
     color: 0x88e6ff,
     emissive: 0x000000,
     emissiveIntensity: 0,
@@ -317,6 +352,136 @@ export function createFracturedMaterial(): MeshStandardMaterial {
     transparent: true,
     opacity: 1.0,
   });
+
+  // Uniforms live in userData so the Game can mutate `.value` each frame
+  // without reaching into the private Three.js shader object.
+  const uniforms = {
+    uTime: { value: 0 },
+    uCharge: { value: 0 },
+    uRimColor: { value: new Color(1.0, 1.0, 1.0) },
+    uRimPower: { value: 2.5 },
+    uRimStrength: { value: 0.9 },
+  };
+  // We also stash the time accumulator here so the Game can advance it
+  // without a per-crystal closure (the Game already iterates fractured
+  // crystals and reads timeToNextBurst, so adding a uniform write here
+  // keeps the per-frame work co-located).
+  (material.userData as { uniforms: typeof uniforms; timeAccum?: number }).uniforms = uniforms;
+
+  // Stable cache key → all fractured crystals share one compiled program.
+  material.customProgramCacheKey = (): string => 'crystal-fractured-telegraph-v1';
+
+  material.onBeforeCompile = (shader: {
+    uniforms: Record<string, { value: unknown }>;
+    vertexShader: string;
+    fragmentShader: string;
+  }): void => {
+    // Inject the uniform refs so the GPU sees them (Three.js will set
+    // the GPU uniform from each ref's .value every frame).
+    Object.assign(shader.uniforms, uniforms);
+
+    // ── Vertex: pass view-space normal + position to fragment ──
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+         varying vec3 vViewNormalCS;
+         varying vec3 vViewPosCS;`,
+      )
+      .replace(
+        '#include <fog_vertex>',
+        `#include <fog_vertex>
+         vViewNormalCS = normalize(transformedNormal);
+         vViewPosCS = -mvPosition.xyz;`,
+      );
+
+    // ── Fragment: add fresnel rim + 3-stage color shift to emissive ──
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+         uniform float uTime;
+         uniform float uCharge;
+         uniform vec3 uRimColor;
+         uniform float uRimPower;
+         uniform float uRimStrength;
+         varying vec3 vViewNormalCS;
+         varying vec3 vViewPosCS;`,
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+         {
+           // Three-stage base color shift: cyan → white → red.
+           // 0x88e6ff = (0.533, 0.902, 1.0); warning red = (1.0, 0.18, 0.10).
+           vec3 cCalm    = vec3(0.533, 0.902, 1.000);
+           vec3 cNeutral = vec3(1.0, 1.0, 1.0);
+           vec3 cDanger  = vec3(1.0, 0.18, 0.10);
+           vec3 baseTint;
+           if (uCharge < 0.5) {
+             baseTint = mix(cCalm, cNeutral, uCharge * 2.0);
+           } else {
+             baseTint = mix(cNeutral, cDanger, (uCharge - 0.5) * 2.0);
+           }
+           // Subtle breathing of the base tint itself (4 Hz, 15% depth).
+           // Independent of the rim heartbeat so the two layers don't lockstep.
+           float baseBreath = 0.85 + 0.15 * sin(uTime * 4.0);
+           // uCharge multiplier: resting state (charge=0) is identical to
+           // the pre-Phase-6e look; the tint only kicks in while charging.
+           totalEmissiveRadiance += baseTint * baseBreath * uCharge * 0.6;
+
+           // Fresnel rim. Bright at grazing angles, dark facing camera.
+           // Pulse rate accelerates 1.5 → 9 Hz as charge ramps.
+           vec3 V = normalize(vViewPosCS);
+           float ndv = clamp(dot(normalize(vViewNormalCS), V), 0.0, 1.0);
+           float fres = pow(1.0 - ndv, uRimPower);
+           float pulseRate = mix(1.5, 9.0, uCharge);
+           float pulse = 0.5 + 0.5 * sin(uTime * pulseRate * 6.2831);
+           // uCharge² ease-in: rim barely visible at charge=0, dominant
+           // in the back half of the burst window.
+           float rimAmp = uCharge * uCharge;
+           totalEmissiveRadiance += uRimColor * fres * pulse * uRimStrength * rimAmp;
+         }`,
+      );
+  };
+
+  return material;
+}
+
+/**
+ * Per-frame tick for the crystal body telegraph uniforms. Mutates the
+ * `uTime`, `uCharge`, and `uRimColor` uniform refs that
+ * `createFracturedMaterial` stashed in `material.userData.uniforms`.
+ * No-op on a material that does not have the telegraph scaffolding
+ * (safety: don't crash if someone passes a plain MeshStandardMaterial).
+ *
+ * The Game is responsible for advancing `timeAccum` on userData and
+ * passing the new total as `uTime` here; we keep the time accounting
+ * out of this helper so the function stays pure (same input → same
+ * uniform writes, no state mutation beyond the supplied refs).
+ */
+export function updateFracturedMaterialTelegraph(
+  fracturedMaterial: MeshStandardMaterial,
+  uTime: number,
+  uCharge: number,
+): void {
+  const userData = fracturedMaterial.userData as {
+    uniforms?: {
+      uTime: { value: number };
+      uCharge: { value: number };
+      uRimColor: { value: Color };
+    };
+  };
+  const u = userData.uniforms;
+  if (!u) return;
+  u.uTime.value = uTime;
+  u.uCharge.value = uCharge;
+  // Rim color lerps from white (calm) → red (imminent). The G and B
+  // channels drop as charge increases; R stays at 1.0 throughout so
+  // the rim never goes black. G drops 0 → 0.82×charge (so at full
+  // charge the G channel is 0.18, matching the base-tint danger red).
+  const rim = u.uRimColor.value;
+  rim.setRGB(1.0, 1.0 - uCharge * 0.82, 1.0 - uCharge * 0.9);
 }
 
 /**
