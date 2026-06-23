@@ -1062,11 +1062,10 @@ export class Game {
       // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
       if (!this.isCrystalBurstFrame) {
         // Phase 6c3 revert: emissive base restored to 0.5, charge² coefficient
-        // restored to 0.6. Crystal is the brighter Phase 6c value (see
-        // createFracturedMaterial); base pulse peaks at ~1.1 which lets the
-        // brighter bloom (threshold 0.15) catch the cyan body too — the
-        // white-hot bolts bloom against the cyan naturally without needing
-        // dim suppression.
+        // restored to 0.6. Matches the original Phase 6c values; the dim
+        // Phase 6c2 numbers (0.25 / 0.4) were paired with dim bloom. Bloom
+        // is now disabled entirely (per user feedback) so the cyan body
+        // shows its full saturation without any glow halo.
         fracturedMaterial.emissiveIntensity = 0.5 + 0.6 * charge * charge;
       }
       // Drive the extruding bolt — geometry rebuilt every BOLT_REBUILD_INTERVAL

@@ -386,6 +386,7 @@ export class ExtrudingBolt {
   private readonly colors: Float32Array;
   private elapsed = 0;
   private attached = false;
+  private currentRadius = 1.0;
 
   constructor(seed: number) {
     const rngSeeds: number[] = [];
@@ -460,7 +461,12 @@ export class ExtrudingBolt {
   ): void {
     this.elapsed += deltaTime;
     this.mesh.position.set(worldPos.x, worldPos.y, 0.1);
-    if (this.elapsed >= BOLT_REBUILD_INTERVAL_SECONDS) {
+    // Track radius for regenerate(). If it changed (rare, but possible if the
+    // crystal resizes), regenerate immediately at the new size so the bolt
+    // geometry matches the asteroid body.
+    const radiusChanged = Math.abs(this.currentRadius - radius) > 0.001;
+    this.currentRadius = radius;
+    if (radiusChanged || this.elapsed >= BOLT_REBUILD_INTERVAL_SECONDS) {
       this.elapsed = 0;
       // Re-sample the per-bolt seeds + segment counts so the geometry
       // visibly shifts each rebuild.
@@ -500,7 +506,7 @@ export class ExtrudingBolt {
     for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
       const { positions, colors } = computeBoltEndpoints(
         rngSeeds[b],
-        1.0, // baked at radius 1.0; the Game scales via worldPos
+        this.currentRadius,
         segmentsPerBolt[b],
       );
       for (let i = 0; i < positions.length; i += 1) {
