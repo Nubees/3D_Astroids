@@ -577,13 +577,24 @@ export class CrystalLightning {
       s.geometry.update(this.currentTime);
     }
     // Drive opacity on the shared material so every strike fades together.
-    // Phase 6d follow-up: peak dropped 0.55 → 0.35 and floor 0.15 → 0.10.
-    // Combined with STRIKES_PER_CRYSTAL=2 and halved strike radius, the
-    // additive contribution per frame is ~1/4 of the Phase 6d initial
-    // tuning — fine electric arcs around the crystal, not a wash of glow.
-    // 2 strikes at peak × 0.35-color = 0.7 per channel, so channels still
-    // resolve (no white-out) and the bolts stay readable without dominating.
-    this.material.opacity = 0.1 + 0.25 * charge;
+    // Phase 6d follow-up (round 2): the round-1 dial-down (peak 0.35,
+    // 2 strikes) made the bolts so faint that the crystal's bloom-flash
+    // completely washed them out — the user reported "no lightling effect,
+    // just the blooming light flashes". Round 1 overshot; the bolts
+    // needed to be brighter to compete with the crystal's emissive.
+    //
+    // New peak 0.50 (round 1 was 0.35, white-out fix was 0.55). 2 strikes
+    // × 0.50 = 1.0 per channel peak — right at the saturation boundary
+    // but not over it (no white-out). The fractional channel
+    // overshoot doesn't matter because cyan (0x8cd0ff) is far from
+    // pure white — channel peaks at 1.0 give a bright cyan, not white.
+    //
+    // Floor 0.18 (round 1 was 0.10): round 1's 0.10 floor made the bolts
+    // almost invisible at the start of the burst window; the user sees
+    // "lightning" only in the last 30% of the cycle. 0.18 keeps a
+    // visible crackle throughout the window so the discharge reads
+    // continuously, not as a final-frame pop.
+    this.material.opacity = 0.18 + 0.32 * charge;
   }
 
   /**
