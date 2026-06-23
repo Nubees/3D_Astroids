@@ -136,7 +136,7 @@ class SimplexNoise {
 		const jj = j & 255;
 		const gi0 = this.perm[ ii + this.perm[ jj ] ] % 12;
 		const gi1 = this.perm[ ii + i1 + this.perm[ jj + j1 ] ] % 12;
-		const gi2 = this.perm[ ii + 1 + this.perm[ jj + 1 ] ] ] % 12;
+		const gi2 = this.perm[ ii + 1 + this.perm[ jj + 1 ] ] % 12;
 		// Calculate the contribution from the three corners
 		let t0 = 0.5 - x0 * x0 - y0 * y0;
 		if ( t0 < 0 ) n0 = 0.0;

@@ -19,7 +19,7 @@ only added content.
 
 ## What is edited
 
-The algorithm is byte-identical to the r149 sources. The only edits are:
+The algorithm is byte-identical to the r149 source, modulo a one-character copy fix on `SimplexNoise.js:139` (a stray `]` was removed; upstream is balanced). See `task-1-fix-report.md` for the diff. The only edits are:
 
 1. The `Vendor Provenance` block prepended to the top of each file.
 2. The single `import { SimplexNoise } from '../math/SimplexNoise.js'`
