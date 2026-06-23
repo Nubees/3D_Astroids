@@ -238,6 +238,18 @@ export function getBurstFlash(t: number): number {
 }
 
 /**
+ * Heartbeat curve in [0, 1] that pulses every 0.15s (matching the burst-flash
+ * window). Used to flash the crystal mesh white just before each upcoming
+ * burst. Same shape as getBurstFlash but on a free-running clock — the burst
+ * telegraph handles the "burst just fired" flash; this handles the "burst
+ * about to fire" reminder.
+ */
+export function getHeartbeatPhase(t: number): number {
+  const phase = ((t % 0.15) + 0.15) % 0.15;
+  return Math.sin((Math.PI * phase) / TELEGRAPH_DURATION_SECONDS);
+}
+
+/**
  * Build the bright cyan MeshStandardMaterial used for fractured crystals.
  * Replaces the previous cracked-vein material. The Game drives the
  * emissiveIntensity from crystalCharge + getBurstFlash each frame.
