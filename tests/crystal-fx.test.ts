@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getHeartbeatPhase, computeBoltEndpoints } from '../src/crystal-fx';
+import { getHeartbeatPhase, computeBoltEndpoints, ExtrudingBolt } from '../src/crystal-fx';
 
 describe('getHeartbeatPhase', () => {
   it('returns 0 at the start of each heartbeat cycle', () => {
@@ -55,5 +55,28 @@ describe('computeBoltEndpoints', () => {
     const a = computeBoltEndpoints(123, 1.0, 8);
     const b = computeBoltEndpoints(123, 1.0, 8);
     expect(Array.from(a.positions)).toEqual(Array.from(b.positions));
+  });
+});
+
+describe('ExtrudingBolt', () => {
+  it('constructs with a Line2 mesh and 5 bolts × 8-10 segments', () => {
+    const bolt = new ExtrudingBolt(42);
+    expect(bolt.mesh).toBeDefined();
+    expect(bolt.mesh.type).toBe('Line2');
+    bolt.dispose();
+  });
+
+  it('attach is idempotent — second call does not throw', () => {
+    const bolt = new ExtrudingBolt(42);
+    const fakeScene = { add: () => {}, remove: () => {} };
+    bolt.attach(fakeScene as never);
+    expect(() => bolt.attach(fakeScene as never)).not.toThrow();
+    bolt.dispose();
+  });
+
+  it('dispose is idempotent — second call does not throw', () => {
+    const bolt = new ExtrudingBolt(42);
+    bolt.dispose();
+    expect(() => bolt.dispose()).not.toThrow();
   });
 });

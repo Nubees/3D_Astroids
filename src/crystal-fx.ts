@@ -23,37 +23,40 @@ import {
 } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Crystal FX (Phase 6c — Electricity Discharge)
+// My Rules — Crystal FX (Phase 6c3 — Extruding Lightning)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Pure helpers + scene classes for the crystal-fracture effect.
-//          The new visual story is "the crystal is overloaded and discharging"
-//          (charge-driven pulse, scale breathe, electric arcs, spark particles)
-//          rather than the previous "cracked-vein texture" look. The cracked
-//          texture generator + 4-style A/B infrastructure have been removed;
-//          if you want them back, the git history has them.
+//          The visual story is "the crystal is overloaded and discharging"
+//          (charge-driven pulse, scale breathe, extruding lightning bolts,
+//          per-crystal spark particles). The cracked-vein texture, the
+//          halo-style ElectricityArc (Phase 6c2), and the scene-wide
+//          SparkParticles pool have all been removed/replaced — see git
+//          history if you need to resurrect any of them.
 // Setup:   Imported by src/game.ts and tests/shard-burst.test.ts.
-// Issues:  The cracked-vein texture (Branches/Lightning/HexGrid/Radial) read
-//          as geological damage rather than electrical overload — the player
-//          was never sold on "this crystal is about to explode."
-// Fix:     All four new effects (color pulse, scale breathe, electric arc,
-//          spark particles) are driven by a single `crystalCharge` curve in
-//          [0, 1] that rises to 1.0 just before each burst. The same curve
-//          drives the materials, the scale, the arc opacity, and the spark
-//          emission rate so the player reads "about to burst" as a single
-//          coherent signal instead of four independent animations.
+// Issues:  Phase 6c2's ElectricityArc drew bolts BETWEEN two random surface
+//          points, which read as "halo decoration" rather than "lightning
+//          coming out" — the player didn't connect the visual to "about to
+//          burst" (the cue is energy leaving the crystal, not circling it).
+// Fix:     Phase 6c3's ExtrudingBolt starts each bolt at a point on the
+//          crystal surface (radius * 0.95) and extrudes it OUTWARD 1.5–2.5
+//          crystal-radii along a perturbed radial direction. The reading is
+//          "Tesla coil" / "plasma globe" — energy leaving the surface, not
+//          circling it. 5 bolts × 8–10 segments each, regenerated every
+//          60ms. Per-vertex color = white-hot tint × (0.6 + 0.8·charge²).
 // Gotchas:
 //  - crystalCharge uses timeToNextBurst (NOT a free-running sine) so the
 //    pulse visibly intensifies as the next burst approaches — same shape as
 //    the old getCrackPulse (0.3 → 1.0) but with a steeper t³ so the visual
 //    is more dramatic at the end.
-//  - ElectricityArc re-uses one LineSegments geometry per crystal; the vertex
-//    buffer is rewritten in place every `rebuildInterval` seconds (70ms by
-//    default) rather than re-allocating. Opacity is a uniform-style color
-//    intensity since LineBasicMaterial has no opacity curve that respects
-//    additive blending well — we use vertex color brightness instead.
+//  - ExtrudingBolt pre-allocates the largest-possible position/color
+//    buffers (BOLTS_PER_CRYSTAL × (BOLT_SEGMENT_MAX + 1) vertices) and
+//    rewrites them in place on every regenerate(). This avoids per-frame
+//    Float32Array allocation and keeps the per-crystal alloc count at 1.
 //  - SparkParticles is a scene-wide Points pool: one geometry, one material,
 //    one draw call for the whole game regardless of how many crystals are
 //    fractured. The pool size is 120; when full, oldest particles recycle.
+//    (Phase 6c3 plan will scope sparks per-crystal in a later task; this
+//    file still ships the scene-wide pool until then.)
 //  - createFracturedMaterial returns a bright cyan MeshStandardMaterial with
 //    no emissiveMap (the texture is gone) and an emissiveIntensity that the
 //    Game drives from crystalCharge each frame. emissive color is the same
@@ -308,63 +311,89 @@ export const SPARK_COLOR_G = 0.88;
 export const SPARK_COLOR_B = 0.4;
 
 /**
- * Electricity-arc visual for one fractured crystal. Owns a Line2 mesh with
- * `ARCS_PER_CRYSTAL` jagged bolts that all radiate from a point on the
- * crystal's surface to a random other surface point. The geometry is
- * rebuilt in place every `ARC_REBUILD_INTERVAL_SECONDS` so the arcs flicker
- * naturally; intensity is driven by `crystalCharge` from the Game.
- *
- * Phase 6c follow-up: switched from LineSegments + LineBasicMaterial (which
- * renders at 1 device pixel regardless of `linewidth` — WebGL spec gap) to
- * Line2 + LineMaterial (uses a custom shader to produce true pixel-thick
- * lines). Arc thickness is 3px so they punch through the bloom halo even
- * at low charge values.
- *
- * Setup:    Call `arc.attach(positionProvider)` once to get the mesh into
- *           the scene. Each frame, call `arc.update(charge, meshPosition,
- *           radius, seed)`. Call `arc.detach()` to remove from the scene
- *           and free the geometry.
- * Issues:   The previous cracked-vein look read as geological damage rather
- *           than electrical overload. The "lightning around the crystal"
- *           story is what sells the "this thing is about to burst" cue.
- * Fix:      Three independent bolts per crystal, each with 4 jagged
- *           waypoints, regenerated every 70ms. Opacity = charge^2 so the
- *           arcs only become visible in the back half of the burst window.
- * Gotchas:  The mesh's `position` is updated each frame to follow the
- *           crystal — do NOT parent the arc to the crystal Group, otherwise
- *           the position would be relative and double-transform. The Game
- *           also calls a position shake on the crystal, so the arc needs to
- *           follow the live world position, not the state position.
- *
- * Line2 + LineMaterial requires `resolution` to be set so it knows the
- * viewport size in pixels (it computes screen-space line thickness from
- * this). The Game passes the renderer size via `setResolution(w, h)` when
- * it constructs / resizes the canvas.
+ * Number of independent bolts to draw per fractured crystal. 5 strikes
+ * a balance — enough to feel like a multi-streamer Tesla coil, few enough
+ * that the geometry rebuild (5 × 10 vertices = 50 vertices, every 60ms)
+ * doesn't thrash the CPU.
  */
-export class ElectricityArc {
+const BOLTS_PER_CRYSTAL = 5;
+
+/**
+ * Per-bolt segment count range. We sample 8-10 per bolt via a 0..2 floor
+ * inside ExtrudingBolt constructor. 8-10 reads as jagged lightning without
+ * looking noisy.
+ */
+const BOLT_SEGMENT_MIN = 8;
+const BOLT_SEGMENT_MAX = 10;
+
+/**
+ * How often (in seconds) the bolt geometry regenerates. 60 ms = ~17
+ * redraws per second — fast enough to read as flickering electricity,
+ * aggressive enough that the bolts visibly shift frame-to-frame.
+ */
+const BOLT_REBUILD_INTERVAL_SECONDS = 0.06;
+
+/**
+ * Lightning color (white-hot, slightly warm). Kept as RGB constants so
+ * the bolt vertex colors and the per-frame intensity multiplier both
+ * reference the same source of truth.
+ */
+export const BOLT_COLOR_R = 1.0;
+export const BOLT_COLOR_G = 0.98;
+export const BOLT_COLOR_B = 0.92;
+
+/**
+ * Lightning-bolt visual for one fractured crystal. Owns a Line2 mesh with
+ * `BOLTS_PER_CRYSTAL` jagged bolts that all radiate FROM a point on the
+ * crystal's surface OUTWARD 1.5-2.5 crystal-radii into the surrounding
+ * space. The geometry is rebuilt in place every `BOLT_REBUILD_INTERVAL_SECONDS`
+ * so the bolts visibly flicker and shift; intensity is driven by `crystalCharge`
+ * from the Game.
+ *
+ * Phase 6c3 — replaces Phase 6c2's ElectricityArc, which drew bolts
+ * BETWEEN two random surface points (read as "halo decoration" not
+ * "lightning coming out"). Phase 6c3 bolts start at the surface and
+ * extrude outward — Tesla coil / plasma globe reading.
+ *
+ * Setup:    Call `bolt.attach(scene)` once to get the mesh into the
+ *           scene. Each frame, call `bolt.update(deltaTime, charge,
+ *           worldPos, radius, seed)`. Call `bolt.detach(scene)` to
+ *           remove from the scene. Call `bolt.dispose()` to free GPU.
+ * Gotchas:  The mesh's `position` is updated each frame to follow the
+ *           crystal — do NOT parent the bolt to the crystal Group, or
+ *           the position would be relative and double-transform.
+ *
+ * Line2 + LineMaterial requires `resolution` to be set so it knows
+ * the viewport size in pixels (it computes screen-space line thickness
+ * from this). The Game calls setResolution(w, h) on construction AND
+ * on canvas resize.
+ */
+export class ExtrudingBolt {
   readonly mesh: Line2;
-  private readonly positions: Float32Array;
-  private readonly colors: Float32Array;
-  // Per-vertex brightness baked in regenerate() (in [0.6, 1.0]). update()
-  // multiplies this by the current charge² intensity to produce the final
-  // vertex color, giving each bolt a slightly varied "core + halo" look
-  // without re-randomizing per frame.
-  private readonly bakedBrightness: Float32Array;
   private readonly geometry: LineGeometry;
   private readonly material: LineMaterial;
+  private readonly positions: Float32Array;
+  private readonly colors: Float32Array;
   private elapsed = 0;
   private attached = false;
 
   constructor(seed: number) {
-    // Each bolt = ARC_SEGMENTS_PER_BOLT segments + 1 endpoint. LineGeometry
-    // uses start/end per segment, so positions.length = bolts * (segs + 1) * 3.
-    const pointsPerBolt = ARC_SEGMENTS_PER_BOLT + 1;
-    const vertexCount = ARCS_PER_CRYSTAL * pointsPerBolt;
-    this.positions = new Float32Array(vertexCount * 3);
-    this.colors = new Float32Array(vertexCount * 3);
-    this.bakedBrightness = new Float32Array(vertexCount * 3);
+    const rngSeeds: number[] = [];
+    for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
+      rngSeeds.push(seed * (b + 1) * 31 + 1);
+    }
+    // Per-bolt segment count, sampled once at construction (8-10).
+    const segmentsPerBolt: number[] = [];
+    for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
+      segmentsPerBolt.push(
+        BOLT_SEGMENT_MIN + Math.floor((rngSeeds[b] % (BOLT_SEGMENT_MAX - BOLT_SEGMENT_MIN + 1))),
+      );
+    }
+    // Allocate the largest-possible buffer (max segments × max bolts).
+    const maxVerts = BOLTS_PER_CRYSTAL * (BOLT_SEGMENT_MAX + 1);
+    this.positions = new Float32Array(maxVerts * 3);
+    this.colors = new Float32Array(maxVerts * 3);
     this.geometry = new LineGeometry();
-    // Initialize with zeros — real positions set by regenerate().
     this.geometry.setPositions(this.positions);
     this.geometry.setColors(this.colors);
     this.material = new LineMaterial({
@@ -372,25 +401,24 @@ export class ElectricityArc {
       transparent: true,
       blending: AdditiveBlending,
       depthWrite: false,
-      linewidth: 3, // pixels (LineMaterial uses shader for true thick lines)
+      linewidth: 5, // pixels (LineMaterial uses shader for true thick lines)
       worldUnits: false,
     });
     this.mesh = new Line2(this.geometry, this.material);
     this.mesh.frustumCulled = false;
-    this.regenerate(seed);
+    this.regenerate(rngSeeds, segmentsPerBolt);
   }
 
   /**
    * Set the viewport resolution in pixels. Line2 + LineMaterial needs this
-   * to compute screen-space line thickness. The Game calls this whenever
-   * the canvas resizes.
+   * to compute screen-space line thickness.
    */
   setResolution(width: number, height: number): void {
     this.material.resolution.set(width, height);
   }
 
   /**
-   * Add the arc to a scene. Idempotent — second call is a no-op.
+   * Add the bolt to a scene. Idempotent.
    */
   attach(scene: { add: (obj: Line2) => void }): void {
     if (this.attached) return;
@@ -399,7 +427,7 @@ export class ElectricityArc {
   }
 
   /**
-   * Remove the arc from its scene. Idempotent.
+   * Remove the bolt from its scene. Idempotent.
    */
   detach(scene: { remove: (obj: Line2) => void }): void {
     if (!this.attached) return;
@@ -408,92 +436,68 @@ export class ElectricityArc {
   }
 
   /**
-   * Per-frame tick. `charge` is the crystalCharge curve (0..1); `worldPos`
-   * is the crystal's current world position (already includes shake);
-   * `radius` is the crystal's visual radius; `seed` is a per-crystal seed
-   * so adjacent crystals don't share arc patterns.
+   * Per-frame tick. `charge` is crystalCharge (0..1); `worldPos` is the
+   * crystal's current world position (already includes shake); `radius`
+   * is the crystal's visual radius; `seed` is a per-crystal seed so
+   * adjacent crystals don't share bolt patterns.
    */
-  update(deltaTime: number, charge: number, worldPos: Vector2, radius: number, seed: number): void {
+  update(
+    deltaTime: number,
+    charge: number,
+    worldPos: Vector2,
+    radius: number,
+    seed: number,
+  ): void {
     this.elapsed += deltaTime;
     this.mesh.position.set(worldPos.x, worldPos.y, 0.1);
-    if (this.elapsed >= ARC_REBUILD_INTERVAL_SECONDS) {
+    if (this.elapsed >= BOLT_REBUILD_INTERVAL_SECONDS) {
       this.elapsed = 0;
-      this.regenerate(seed);
+      // Re-sample the per-bolt seeds + segment counts so the geometry
+      // visibly shifts each rebuild.
+      const rngSeeds: number[] = [];
+      for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
+        rngSeeds.push(seed * (b + 1) * 31 + Math.floor(this.elapsed * 1000) + 1);
+      }
+      const segmentsPerBolt = rngSeeds.map((s) =>
+        BOLT_SEGMENT_MIN + (Math.abs(s) % (BOLT_SEGMENT_MAX - BOLT_SEGMENT_MIN + 1)),
+      );
+      this.regenerate(rngSeeds, segmentsPerBolt);
     }
-    // Opacity = 0.6 + 0.8 * charge². Floor of 0.6 (up from 0.4) keeps the
-    // arcs clearly visible even at the start of the burst window; ceiling
-    // of 1.4 pushes past the bloom threshold at peak so the yellow really
-    // pops against the cyan crystal. Per-vertex brightness baked in
-    // regenerate() is stored in this.bakedBrightness; we copy it into
-    // the actual color buffer and multiply by intensity AND the yellow
-    // tint (ARC_COLOR_*) so the final color = brightness × intensity × yellow.
+    // Opacity = 0.6 + 0.8 * charge². Floor of 0.6 keeps bolts visible even
+    // at the start of the burst window; ceiling of 1.4 pushes past the
+    // bloom threshold at peak so white-hot really pops.
     const intensity = 0.6 + 0.8 * charge * charge;
     for (let i = 0; i < this.colors.length; i += 1) {
-      const channel = i % 3;
-      const tint = channel === 0 ? ARC_COLOR_R : channel === 1 ? ARC_COLOR_G : ARC_COLOR_B;
-      this.colors[i] = this.bakedBrightness[i] * intensity * tint;
+      this.colors[i] *= intensity;
     }
-    // Re-upload colors to LineGeometry (Line2 doesn't read from the
-    // per-vertex attribute the way LineSegments did — setColors copies
-    // into an instanced buffer).
-    this.geometry.setColors(this.colors);
     void radius;
   }
 
   /**
-   * Rebuild the arc geometry in place. Picks 3 random surface points and
-   * draws a jagged polyline between pairs of them. Per-vertex brightness
-   * (0.6..1.0) is baked into `bakedBrightness`; update() multiplies this by
-   * the current intensity to produce the final vertex color.
+   * Rebuild the bolt geometry in place. Calls computeBoltEndpoints for
+   * each of BOLTS_PER_CRYSTAL bolts, then uploads positions + colors to
+   * the LineGeometry.
    */
-  private regenerate(seed: number): void {
-    const rng = mulberry32(seed * 7 + Math.floor(this.elapsed * 1000));
-    const radius = 1.0; // baked at 1.0; the Game scales the parent mesh
-    for (let bolt = 0; bolt < ARCS_PER_CRYSTAL; bolt += 1) {
-      // Pick two random surface points by sampling a unit sphere and scaling.
-      const a = sampleUnitVector(rng);
-      const b = sampleUnitVector(rng);
-      const start = scaleVec(a, radius);
-      const end = scaleVec(b, radius);
-      // Each bolt is a polyline with (ARC_SEGMENTS_PER_BOLT + 1) vertices.
-      const pointsPerBolt = ARC_SEGMENTS_PER_BOLT + 1;
-      for (let seg = 0; seg < pointsPerBolt; seg += 1) {
-        const t = seg / ARC_SEGMENTS_PER_BOLT;
-        // Midpoints are jittered perpendicular to the lerp line; the
-        // endpoint is the exact target.
-        let p: { x: number; y: number; z: number };
-        if (seg === ARC_SEGMENTS_PER_BOLT) {
-          p = end;
-        } else {
-          const lerped = lerpVec(start, end, t);
-          const jitter = scaleVec(sampleUnitVector(rng), 0.25);
-          p = addVec(lerped, jitter);
-        }
-        const bright = 0.6 + 0.4 * rng();
-        const base = (bolt * pointsPerBolt + seg) * 3;
-        this.positions[base] = p.x;
-        this.positions[base + 1] = p.y;
-        this.positions[base + 2] = p.z;
-        this.bakedBrightness[base] = bright;
-        this.bakedBrightness[base + 1] = bright;
-        this.bakedBrightness[base + 2] = bright;
-        // Initialize colors to baked brightness × yellow tint. update()
-        // later multiplies by intensity, so the final color is:
-        //   final = bakedBrightness × (0.6 + 0.8·charge²) × yellow
-        // Yellow on cyan = complementary contrast = arcs punch through bloom.
-        this.colors[base] = bright * ARC_COLOR_R;
-        this.colors[base + 1] = bright * ARC_COLOR_G;
-        this.colors[base + 2] = bright * ARC_COLOR_B;
+  private regenerate(rngSeeds: number[], segmentsPerBolt: number[]): void {
+    let writeIdx = 0;
+    for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
+      const { positions, colors } = computeBoltEndpoints(
+        rngSeeds[b],
+        1.0, // baked at radius 1.0; the Game scales via worldPos
+        segmentsPerBolt[b],
+      );
+      for (let i = 0; i < positions.length; i += 1) {
+        this.positions[writeIdx + i] = positions[i];
+        this.colors[writeIdx + i] = colors[i];
       }
+      writeIdx += positions.length;
     }
-    // Re-upload positions + colors to LineGeometry.
     this.geometry.setPositions(this.positions);
     this.geometry.setColors(this.colors);
   }
 
   /**
-   * Release GPU resources. The Game calls this when the crystal is destroyed
-   * or the arc is removed from the scene.
+   * Release GPU resources.
    */
   dispose(): void {
     this.geometry.dispose();
