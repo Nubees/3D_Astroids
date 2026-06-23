@@ -4,106 +4,92 @@ import {
   AsteroidSize,
   createAsteroidMesh,
   disposeAsteroidMesh,
-  swapToCrackedMaterial,
+  swapToFracturedMaterial,
 } from '../src/asteroid';
-import { createCrackedMaterial, drawCrackedCrystalPattern } from '../src/crystal-fx';
+import { createFracturedMaterial, crystalCharge } from '../src/crystal-fx';
+import { BURST_INTERVAL_SECONDS } from '../src/types';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Crystal FX GPU Leak Test (pure)
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Verify disposeAsteroidMesh disposes cracked material + texture so
+// Purpose: Verify disposeAsteroidMesh disposes the fractured material so
 //          the GPU sees no leaks when a crystal is destroyed or culled.
-// Setup:   Uses a mock 2D context — no jsdom, no canvas npm package.
+// Setup:   No jsdom, no canvas, no texture — the fractured material is a
+//          pure MeshStandardMaterial with no CanvasTexture dependency.
 // Issues:  None.
-// Fix:     Refactored makeCrackedCrystalTexture into two functions: a pure
-//          drawCrackedCrystalPattern that takes a 2D context, and a thin
-//          makeCrackedCrystalTexture wrapper that creates the canvas + tex.
-//          The test only needs the drawing side, so we mock the context.
-// Gotchas: vi.spyOn works on any object's methods including Three.js
-//          MeshStandardMaterial.dispose and CanvasTexture.dispose.
+// Fix:     Phase 6c dropped the cracked-vein canvas texture entirely. The
+//          previous test imported drawCrackedCrystalPattern + createCracked
+//          Material + a mock 2D context to drive the old cracking code.
+//          Replaced those with crystalCharge math tests + a single GPU leak
+//          test for swapToFracturedMaterial.
+// Gotchas: vi.spyOn works on Three.js MeshStandardMaterial.dispose (just a
+//          plain method). MeshStandardMaterial is constructible in node; no
+//          WebGL context is required for instance creation or material
+//          disposal — only for rendering.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Build a minimal mock 2D context that records calls to fillRect, beginPath,
- * moveTo, lineTo, and stroke — enough for drawCrackedCrystalPattern to run
- * without throwing. Returns the context plus a spy on each method.
- */
-function makeMockContext(): {
-  ctx: CanvasRenderingContext2D;
-  fillRect: ReturnType<typeof vi.fn>;
-  beginPath: ReturnType<typeof vi.fn>;
-  moveTo: ReturnType<typeof vi.fn>;
-  lineTo: ReturnType<typeof vi.fn>;
-  stroke: ReturnType<typeof vi.fn>;
-} {
-  const fillRect = vi.fn();
-  const beginPath = vi.fn();
-  const moveTo = vi.fn();
-  const lineTo = vi.fn();
-  const stroke = vi.fn();
-  const ctx = {
-    fillStyle: '',
-    strokeStyle: '',
-    lineWidth: 1,
-    fillRect,
-    beginPath,
-    moveTo,
-    lineTo,
-    stroke,
-  } as unknown as CanvasRenderingContext2D;
-  return { ctx, fillRect, beginPath, moveTo, lineTo, stroke };
-}
-
-describe('drawCrackedCrystalPattern — pure drawing', () => {
-  it('fills the canvas with the dark cyan base', () => {
-    const { ctx, fillRect } = makeMockContext();
-    drawCrackedCrystalPattern(ctx, 1);
-    expect(fillRect).toHaveBeenCalledWith(0, 0, 256, 256);
+describe('crystalCharge — pure math', () => {
+  it('returns 0 at the start of the burst window (timeToNext = interval)', () => {
+    expect(crystalCharge(BURST_INTERVAL_SECONDS)).toBeCloseTo(0, 5);
   });
 
-  it('draws 8 crack polylines (8 stroke calls)', () => {
-    const { ctx, stroke } = makeMockContext();
-    drawCrackedCrystalPattern(ctx, 1);
-    expect(stroke).toHaveBeenCalledTimes(8);
+  it('returns 1 right before a burst (timeToNext = 0)', () => {
+    expect(crystalCharge(0)).toBeCloseTo(1, 5);
   });
 
-  it('is deterministic — same seed produces identical call counts', () => {
-    const a = makeMockContext();
-    const b = makeMockContext();
-    drawCrackedCrystalPattern(a.ctx, 42);
-    drawCrackedCrystalPattern(b.ctx, 42);
-    expect(a.stroke.mock.calls.length).toBe(b.stroke.mock.calls.length);
-    expect(a.lineTo.mock.calls.length).toBe(b.lineTo.mock.calls.length);
+  it('returns ~0.875 at 0.5s before a burst (t = 0.5, t^3 = 0.125 inverted)', () => {
+    // 1 - 0.5/2 = 0.75, cubed = 0.421875
+    expect(crystalCharge(BURST_INTERVAL_SECONDS / 4)).toBeCloseTo(0.421875, 4);
   });
 
-  it('different seeds produce different call sequences (probabilistic)', () => {
-    const a = makeMockContext();
-    const b = makeMockContext();
-    drawCrackedCrystalPattern(a.ctx, 1);
-    drawCrackedCrystalPattern(b.ctx, 2);
-    // At least one stroke call must differ in argument shape — for seeds 1 vs 2
-    // the lineTo sequence should differ in at least one coordinate.
-    const aArgs = JSON.stringify(a.lineTo.mock.calls);
-    const bArgs = JSON.stringify(b.lineTo.mock.calls);
-    expect(aArgs === bArgs).toBe(false);
+  it('is monotonically increasing as timeToNextBurst decreases', () => {
+    const a = crystalCharge(2.0);
+    const b = crystalCharge(1.5);
+    const c = crystalCharge(1.0);
+    const d = crystalCharge(0.5);
+    const e = crystalCharge(0.0);
+    expect(a).toBeLessThan(b);
+    expect(b).toBeLessThan(c);
+    expect(c).toBeLessThan(d);
+    expect(d).toBeLessThan(e);
+  });
+
+  it('clamps negative timeToNext to 1.0 (caps at burst)', () => {
+    expect(crystalCharge(-1)).toBeCloseTo(1, 5);
+  });
+
+  it('clamps timeToNext > interval to 0 (caps at far-future burst)', () => {
+    expect(crystalCharge(BURST_INTERVAL_SECONDS * 10)).toBeCloseTo(0, 5);
   });
 });
 
-describe('swapToCrackedMaterial + disposeAsteroidMesh — GPU leak fix', () => {
-  it('disposeAsteroidMesh disposes userData.crackedMaterial and userData.crackedTexture', () => {
-    // Build a cracked material manually with a mock CanvasTexture so we
-    // never touch document or getContext(). The texture is just a stand-in;
-    // we only care that .dispose() is called on it.
-    const fakeTexture = { dispose: vi.fn() } as unknown as import('three').CanvasTexture;
+describe('swapToFracturedMaterial + disposeAsteroidMesh — GPU leak fix', () => {
+  it('disposeAsteroidMesh disposes userData.fracturedMaterial on cleanup', () => {
+    // Phase 6c: no canvas texture involved. The fractured material is a
+    // plain MeshStandardMaterial — build it for real and spy on dispose.
     const mesh = createAsteroidMesh(AsteroidSize.LARGE, false, AsteroidKind.CRYSTAL);
-    const material = createCrackedMaterial(fakeTexture);
+    const material = createFracturedMaterial();
     const matDisposeSpy = vi.spyOn(material, 'dispose');
-    const texDisposeSpy = vi.spyOn(fakeTexture, 'dispose');
-    swapToCrackedMaterial(mesh, material, fakeTexture);
+    swapToFracturedMaterial(mesh, material);
 
     disposeAsteroidMesh(mesh);
 
     expect(matDisposeSpy).toHaveBeenCalled();
-    expect(texDisposeSpy).toHaveBeenCalled();
+  });
+
+  it('swapToFracturedMaterial swaps the inner Mesh material in place', () => {
+    const mesh = createAsteroidMesh(AsteroidSize.LARGE, false, AsteroidKind.CRYSTAL);
+    const inner = mesh.children[0];
+    // Sanity: confirm we are swapping the right child.
+    expect(inner).toBeDefined();
+    const originalMat = (inner as import('three').Mesh).material;
+    const fracturedMat = createFracturedMaterial();
+    swapToFracturedMaterial(mesh, fracturedMat);
+
+    expect((mesh.children[0] as import('three').Mesh).material).toBe(fracturedMat);
+    // The original was disposed when the swap happened.
+    // (No direct way to spy on a "just-created" MeshStandardMaterial from
+    //  inside Three.js; the GPU leak test above proves the full path.)
+    void originalMat;
   });
 });

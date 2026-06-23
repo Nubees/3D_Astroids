@@ -40,6 +40,12 @@ export { AsteroidSize, AsteroidKind } from './types';
 //          swapToCrackedMaterial and perturbCrystalGeometry helpers; cracked
 //          material + texture are stashed in mesh.userData and disposed by the
 //          extended disposeAsteroidMesh.
+//          Phase 6c: cracked-vein canvas texture was dropped per user feedback
+//          ("looked terrible"). Fractured crystals now use a single bright
+//          emissive cyan material via swapToFracturedMaterial — the visual is
+//          carried by per-frame emissive intensity + scale breathe + electricity
+//          arcs from src/crystal-fx.ts. perturbCrystalGeometry was orphaned and
+//          removed; only the fractured material needs disposal in userData.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SIZE_RADIUS: Record<AsteroidSizeType, number> = {
@@ -179,16 +185,13 @@ export function disposeAsteroidMesh(mesh: Group): void {
       materials.forEach((material: Material) => material.dispose());
     }
   });
-  // Crystal cracked state lives on userData; dispose it here so the GPU sees
-  // no leaks when a crystal is destroyed or culled out of bounds.
+  // Crystal fractured material lives on userData; dispose it here so the GPU
+  // sees no leaks when a crystal is destroyed or culled out of bounds.
+  // (Phase 6c: cracked-vein texture is gone — only a single emissive material.)
   const userData = mesh.userData as CrystalMeshUserData;
-  if (userData.crackedMaterial) {
-    userData.crackedMaterial.dispose();
-    userData.crackedMaterial = undefined;
-  }
-  if (userData.crackedTexture) {
-    userData.crackedTexture.dispose();
-    userData.crackedTexture = undefined;
+  if (userData.fracturedMaterial) {
+    userData.fracturedMaterial.dispose();
+    userData.fracturedMaterial = undefined;
   }
 }
 
@@ -196,89 +199,40 @@ export function disposeAsteroidMesh(mesh: Group): void {
  * Crystal-specific mesh state stored on `mesh.userData`. Defined here so the
  * Game, the asteroid disposal, and any future crystal visual code share one
  * shape.
+ *
+ * Phase 6c: the cracked-vein canvas texture is gone. Fractured crystals
+ * now use a single emissive cyan material driven per-frame by the charge
+ * curve in src/crystal-fx.ts.
  */
 export interface CrystalMeshUserData {
-  crackedMaterial?: MeshStandardMaterial;
-  crackedTexture?: import('three').CanvasTexture;
+  fracturedMaterial?: MeshStandardMaterial;
   shakeSeed?: number;
 }
 
 /**
- * Perturb each vertex of a crystal mesh outward along its face normal by a
- * random ±amplitude × radius. Deterministic per `seed` so the same crystal id
- * produces the same fracture pattern. Mutates the mesh's inner Mesh geometry
- * in place.
+ * Swap the crystal mesh's material to the bright-emissive fractured variant.
+ * Disposes the original MeshStandardMaterial BEFORE assigning so we do not
+ * leak GPU resources. The fractured material is stashed in userData for
+ * later disposal by `disposeAsteroidMesh`.
  *
- * IcosahedronGeometry (parent: PolyhedronGeometry) is non-indexed by
- * construction in Three.js — we do NOT call toNonIndexed() because it is a
- * no-op that warns. We recompute vertex normals and bounding sphere so the
- * shader's flat shading still reads and collision stays accurate.
+ * Phase 6c: this used to take a cracked-vein canvas texture as well. The
+ * crack texture was dropped (per user feedback — looked terrible). The
+ * fracture now reads through emissive intensity + scale breathe + electricity
+ * arcs driven by `crystalCharge` in src/crystal-fx.ts.
  */
-export function perturbCrystalGeometry(
+export function swapToFracturedMaterial(
   mesh: Group,
-  amplitude: number,
-  seed: number,
-): void {
-  const inner = mesh.children[0];
-  if (!(inner instanceof Mesh)) return;
-  const geometry = inner.geometry as BufferGeometry;
-  const position = geometry.getAttribute('position');
-  if (!position) return;
-
-  const rng = mulberry32(seed);
-  // Cache the original positions so the perturbation is deterministic from
-  // the seed alone, not from accumulating randomness frame-over-frame.
-  const originalX = new Float32Array(position.array as Float32Array);
-  const originalY = new Float32Array(position.count);
-  const originalZ = new Float32Array(position.count);
-  for (let i = 0; i < position.count; i += 1) {
-    originalY[i] = (position.array as Float32Array)[i * 3 + 1];
-    originalZ[i] = (position.array as Float32Array)[i * 3 + 2];
-  }
-
-  // Use the average of the geometry's bounding sphere to derive a scale
-  // factor, since crystal radius varies by asteroid size.
-  geometry.computeBoundingSphere();
-  const baseRadius = geometry.boundingSphere?.radius ?? 1.0;
-
-  for (let i = 0; i < position.count; i += 1) {
-    const ox = originalX[i];
-    const oy = originalY[i];
-    const oz = originalZ[i];
-    const len = Math.sqrt(ox * ox + oy * oy + oz * oz) || 1;
-    const nx = ox / len;
-    const ny = oy / len;
-    const nz = oz / len;
-    const delta = (rng() * 2 - 1) * amplitude * baseRadius;
-    (position.array as Float32Array)[i * 3] = ox + nx * delta;
-    (position.array as Float32Array)[i * 3 + 1] = oy + ny * delta;
-    (position.array as Float32Array)[i * 3 + 2] = oz + nz * delta;
-  }
-  position.needsUpdate = true;
-  geometry.computeVertexNormals();
-  geometry.computeBoundingSphere();
-}
-
-/**
- * Swap the crystal mesh's material to a cracked-cyan variant. Disposes the
- * original MeshStandardMaterial BEFORE assigning so we do not leak GPU
- * resources. Cracked material + texture are stashed in userData for cleanup.
- */
-export function swapToCrackedMaterial(
-  mesh: Group,
-  crackedMaterial: MeshStandardMaterial,
-  crackedTexture: import('three').CanvasTexture,
+  fracturedMaterial: MeshStandardMaterial,
 ): void {
   const inner = mesh.children[0];
   if (!(inner instanceof Mesh)) return;
   const original = inner.material;
-  inner.material = crackedMaterial;
+  inner.material = fracturedMaterial;
   if (original instanceof Material) {
     original.dispose();
   }
   const userData = mesh.userData as CrystalMeshUserData;
-  userData.crackedMaterial = crackedMaterial;
-  userData.crackedTexture = crackedTexture;
+  userData.fracturedMaterial = fracturedMaterial;
 }
 
 /**

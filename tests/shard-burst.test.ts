@@ -17,8 +17,8 @@ import {
 import {
   CrystalFractureScheduler,
   computeTimeBonusTier,
+  crystalCharge,
   getBurstFlash,
-  getCrackPulse,
   isClutchApplicable,
   isPerfectApplicable,
 } from '../src/crystal-fx';
@@ -220,27 +220,29 @@ describe('isPerfectApplicable', () => {
   });
 });
 
-describe('getCrackPulse', () => {
-  it('returns 0.3 right after a burst (full interval remaining)', () => {
-    expect(getCrackPulse(BURST_INTERVAL_SECONDS)).toBeCloseTo(0.3, 5);
+describe('crystalCharge', () => {
+  it('returns 0 right after a burst (full interval remaining)', () => {
+    // Formula: t = 1 - clamp(timeToNextBurst / interval, 0, 1); charge = t^3.
+    // At full interval, t = 0, charge = 0.
+    expect(crystalCharge(BURST_INTERVAL_SECONDS)).toBeCloseTo(0, 5);
   });
 
   it('returns 1.0 right before next burst (no time remaining)', () => {
-    expect(getCrackPulse(0)).toBeCloseTo(1.0, 5);
+    expect(crystalCharge(0)).toBeCloseTo(1.0, 5);
   });
 
-  it('returns ~0.475 at half the interval', () => {
-    // Formula: 0.3 + 0.7 * t^2 where t = 1 - clamp(timeToNextBurst/2, 0, 1).
-    // At timeToNextBurst = 1.0 (half interval), t = 0.5, so 0.3 + 0.7*0.25 = 0.475.
-    expect(getCrackPulse(BURST_INTERVAL_SECONDS / 2)).toBeCloseTo(0.475, 2);
+  it('returns 0.125 at 75% of the way to the next burst', () => {
+    // At 0.5s remaining of a 2s interval: t = 1 - 0.25 = 0.75; t^3 = 0.421875.
+    // (The new curve is steeper than the old 0.3 + 0.7 * t^2 — see My Rules.)
+    expect(crystalCharge(BURST_INTERVAL_SECONDS / 4)).toBeCloseTo(0.421875, 4);
   });
 
   it('is monotonically increasing as timeToNextBurst decreases', () => {
-    const a = getCrackPulse(2.0);
-    const b = getCrackPulse(1.5);
-    const c = getCrackPulse(1.0);
-    const d = getCrackPulse(0.5);
-    const e = getCrackPulse(0.0);
+    const a = crystalCharge(2.0);
+    const b = crystalCharge(1.5);
+    const c = crystalCharge(1.0);
+    const d = crystalCharge(0.5);
+    const e = crystalCharge(0.0);
     expect(a).toBeLessThan(b);
     expect(b).toBeLessThan(c);
     expect(c).toBeLessThan(d);

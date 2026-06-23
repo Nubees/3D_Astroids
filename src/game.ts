@@ -33,12 +33,11 @@ import {
   createAsteroidMesh,
   createAsteroidState,
   disposeAsteroidMesh,
-  perturbCrystalGeometry,
   resolveAsteroidCollision,
   shouldCrystalFracture,
   splitAsteroid,
   splitSmallAsteroid,
-  swapToCrackedMaterial,
+  swapToFracturedMaterial,
 } from './asteroid';
 import {
   MAX_SHARDS,
@@ -65,14 +64,15 @@ import {
 } from './types';
 import {
   CrystalFractureScheduler,
+  ElectricityArc,
+  SparkParticles,
   computeTimeBonusTier,
   createBurstTelegraph,
-  createCrackedMaterial,
+  createFracturedMaterial,
+  crystalCharge,
   getBurstFlash,
-  getCrackPulse,
   isClutchApplicable,
   isPerfectApplicable,
-  makeCrackedCrystalTexture,
   TELEGRAPH_DURATION_SECONDS,
 } from './crystal-fx';
 import { Shockwave, updateShockwaves } from './shockwave';
@@ -201,7 +201,7 @@ interface FloatingText {
 
 interface CrystalDeathTween {
   mesh: Group;
-  crackedMaterial: MeshStandardMaterial;
+  fracturedMaterial: MeshStandardMaterial;
   age: number;
   duration: number;
   position: Vector2;
@@ -241,15 +241,29 @@ export class Game {
   private lastTime = 0;
   private running = true;
   private gameTimeSeconds = 0;
+  private clockPaused = false;
   private fractureSchedulers = new Map<number, CrystalFractureScheduler>();
   private crystalDeathTimes = new Map<number, number>();
   private crystalShardsAbsorbed = new Map<number, number>();
   private crystalDeathTweens: CrystalDeathTween[] = [];
+  // Phase 6c: per-fractured-crystal electricity arcs (Lightning visuals).
+  // One arc per crystal id, drawn as a single LineSegments mesh; rebuilt
+  // per frame so the bolts flicker.
+  private crystalArcs = new Map<number, ElectricityArc>();
+  // Scene-wide spark particle pool. One Points draw call for every
+  // fractured crystal on screen at once — cheap and deterministic because
+  // the pool is capped.
+  private sparks: SparkParticles | null = null;
   private activeShockwaves: Shockwave[] = [];
   private pendingTelegraphs: PendingTelegraph[] = [];
   private cameraShakeAmplitude = 0;
   private cameraShakeRemaining = 0;
   private isCrystalBurstFrame = false;
+  // Rotating 0/1/2/3 counter used to give each crystal-kill floating text a
+  // distinct vertical starting offset so simultaneous kills don't all stack
+  // at the same y-pixel. Wraps at 4 (i.e. +0/+30/+60/+90px) which is enough
+  // for the realistic max simultaneous kills.
+  private crystalKillIndex = 0;
   private nextAsteroidId = 1;
   private lastWaveNumber = 1;
   private readonly resizeHandler: () => void;
@@ -332,6 +346,13 @@ export class Game {
     window.addEventListener('resize', this.resizeHandler);
 
     this.createHud();
+
+    // Phase 6c: one scene-wide spark pool shared by every fractured crystal.
+    // Built in the constructor so the same Points geometry lives for the
+    // entire game; particles are emitted by updateCrystalVisuals when any
+    // crystal crosses an emission threshold.
+    this.sparks = new SparkParticles();
+    this.scene.add(this.sparks.points);
   }
 
   static async create(canvas: HTMLCanvasElement, entryId: number, shipMesh: Group): Promise<Game> {
@@ -382,6 +403,7 @@ export class Game {
     this.fractureSchedulers.clear();
     this.crystalDeathTimes.clear();
     this.crystalShardsAbsorbed.clear();
+    this.crystalKillIndex = 0;
     for (const wave of this.activeShockwaves) {
       this.scene.remove(wave.mesh);
       wave.dispose();
@@ -411,7 +433,13 @@ export class Game {
     // entire burst cascade and overwhelm MAX_SHARDS (4th-pass Risk 1).
     const deltaTime = Math.min(rawDelta, MAX_DELTA_TIME, 1 / 30);
     this.lastTime = time;
-    this.gameTimeSeconds += deltaTime;
+    // debugPauseClock freezes the in-game clock so screenshot harnesses can
+    // inspect static fracture state. Physics + animation still tick (so the
+    // scene doesn't freeze solid), but the cascade scheduler sees no time
+    // pass and no auto-bursts fire.
+    if (!this.clockPaused) {
+      this.gameTimeSeconds += deltaTime;
+    }
     this.isCrystalBurstFrame = false;
 
     this.update(deltaTime);
@@ -467,7 +495,7 @@ export class Game {
     this.updatePendingTelegraphs(this.gameTimeSeconds);
     this.updateCrystalDeathTweens(deltaTime);
     this.updateShockwaveList(deltaTime);
-    this.updateCrystalVisuals(this.gameTimeSeconds);
+    this.updateCrystalVisuals(deltaTime, this.gameTimeSeconds);
     this.applyCameraShake(deltaTime);
     this.updateHud(deltaTime);
     this.updateFloatingTexts(deltaTime);
@@ -785,21 +813,31 @@ export class Game {
   }
 
   /**
-   * Trigger the fracture state on a crystal: swap to cracked material,
-   * perturb geometry, register the burst scheduler, and announce it. Called
-   * from handleCollisions when shouldCrystalFracture returns true.
+   * Trigger the fracture state on a crystal: swap to the bright emissive
+   * fractured material, spawn an electricity-arc LineSegments mesh, register
+   * the burst scheduler, and announce it. Called from handleCollisions when
+   * shouldCrystalFracture returns true.
+   *
+   * Phase 6c: cracked-vein canvas texture + perturbCrystalGeometry are gone.
+   * The visual is now carried per-frame by:
+   *   - emissiveIntensity pulse via crystalCharge
+   *   - scale breathe ±5% via crystalCharge
+   *   - ElectricityArc opacity + flicker
+   *   - SparkParticles emission bursts from the surface
    */
   private fractureCrystal(asteroid: LiveAsteroid): void {
     const crystalId = asteroid.id;
     asteroid.state.fractured = true;
 
-    // 1. Generate a deterministic cracked texture and swap the material.
-    const crackedTexture = makeCrackedCrystalTexture(crystalId);
-    const crackedMaterial = createCrackedMaterial(crackedTexture);
-    swapToCrackedMaterial(asteroid.mesh, crackedMaterial, crackedTexture);
+    // 1. Swap to bright emissive fractured material (single MeshStandardMaterial).
+    const fracturedMaterial = createFracturedMaterial();
+    swapToFracturedMaterial(asteroid.mesh, fracturedMaterial);
 
-    // 2. Perturb geometry so the crystal looks damaged.
-    perturbCrystalGeometry(asteroid.mesh, 0.06, crystalId);
+    // 2. Build an electricity-arc LineSegments mesh and attach to scene.
+    // ElectricityArc takes only a seed; position is set per-frame in update().
+    const arc = new ElectricityArc(crystalId);
+    this.scene.add(arc.mesh);
+    this.crystalArcs.set(crystalId, arc);
 
     // 3. Register the burst scheduler with game-time as the clock.
     this.fractureSchedulers.set(crystalId, new CrystalFractureScheduler(crystalId, this.gameTimeSeconds));
@@ -890,14 +928,17 @@ export class Game {
         this.scene.add(mesh);
       }
 
-      // White flash on the crystal mesh. Use getBurstFlash(t) over 0.15s.
+      // White flash on the crystal mesh. Use crystalCharge at the pre-burst
+      // peak (time-to-next ≈ 0) so the flash visibly pulses with the cascade.
+      // (Phase 6c: pulse replaced by crystalCharge so the flash math stays
+      // consistent with the per-frame update in updateCrystalVisuals.)
       const inner = target.mesh.children[0];
       if (inner instanceof Mesh) {
-        const cracked = (target.mesh.userData as CrystalMeshUserData).crackedMaterial;
-        if (cracked) {
-          const pulse = getCrackPulse(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
+        const fractured = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
+        if (fractured) {
+          const charge = crystalCharge(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
           const flash = getBurstFlash(0.075); // peak flash
-          cracked.emissiveIntensity = pulse + 1.5 * flash;
+          fractured.emissiveIntensity = 1.0 + 2.5 * charge * charge + 1.5 * flash;
         }
       }
 
@@ -947,19 +988,32 @@ export class Game {
   }
 
   /**
-   * Drive the cracked crystal's emissiveIntensity every frame. The pulse
-   * formula intensifies as the next burst approaches, giving the player a
-   * visual cue for the cascade.
+   * Drive every visual channel of every fractured crystal each frame:
+   *   - emissiveIntensity pulse (via crystalCharge)
+   *   - scale breathe ±5% (via crystalCharge)
+   *   - electricity-arc opacity + flicker (via crystalCharge^2 for a
+   *     sharper pre-burst ramp)
+   *   - spark emission bursts from the surface
+   * Single source of truth so all four channels peak together at the
+   * pre-burst moment, reading as one coherent "about to burst" signal.
+   *
+   * Phase 6c rewrite: replaced the old cracked-texture pulse + position
+   * shake with the new effects suite. Position shake was kept (cheap and
+   * adds character).
    */
-  private updateCrystalVisuals(gameTime: number): void {
+  private updateCrystalVisuals(deltaTime: number, gameTime: number): void {
     for (const [id, scheduler] of this.fractureSchedulers) {
       const target = this.findCrystalById(id);
       if (!target) continue;
-      const cracked = (target.mesh.userData as CrystalMeshUserData).crackedMaterial;
-      if (!cracked) continue;
+      const fracturedMaterial = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
+      if (!fracturedMaterial) continue;
       const timeToNext = scheduler.getTimeToNextBurst(gameTime);
-      const pulse = getCrackPulse(timeToNext);
-      // Continuous shake of the mesh position.
+      const charge = crystalCharge(timeToNext);
+      // Scale breathe: 1.0 baseline → 1.05 peak pre-burst. Uses charge^2 so
+      // the breathe "stretches" only in the final third of the interval —
+      // matches the visual intuition of a charging capacitor.
+      const breathe = 1.0 + 0.05 * charge * charge;
+      // Continuous shake of the mesh position (kept from Phase 6b).
       const shakeSeed = (target.mesh.userData as CrystalMeshUserData).shakeSeed ?? id;
       const shakeX = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 1.7);
       const shakeY = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed + 0.3) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 2.0);
@@ -968,10 +1022,33 @@ export class Game {
         target.state.position.y + shakeY,
         0,
       );
+      target.mesh.scale.set(breathe, breathe, 1);
       // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
       if (!this.isCrystalBurstFrame) {
-        cracked.emissiveIntensity = pulse;
+        // Base emissive 1.0, modulated by charge^2 so the pulse visually
+        // matches the scale breathe curve. Pre-burst: ~3.5× baseline.
+        fracturedMaterial.emissiveIntensity = 1.0 + 2.5 * charge * charge;
       }
+      // Drive the electricity arc — rebuilt every ARC_REBUILD_INTERVAL inside
+      // ElectricityArc.update, but its opacity tracks crystalCharge so the
+      // bolts only really light up just before a burst.
+      const crystalRadius = SIZE_RADIUS[target.state.size];
+      const arc = this.crystalArcs.get(id);
+      if (arc) {
+        arc.update(deltaTime, charge, target.state.position, crystalRadius, id);
+      }
+      // Emit sparks from the crystal surface when charge is high. Threshold
+      // tuned so most frames emit 0–1 spark and the pre-burst second emits
+      // a tight cluster. Re-using a single scene-wide pool keeps draw cost
+      // constant regardless of how many crystals fractured at once.
+      if (this.sparks && charge > 0.15) {
+        this.sparks.emit(charge, target.state.position, crystalRadius, id, deltaTime);
+      }
+    }
+    // Advance the spark pool every frame regardless of fracture state so any
+    // particles that were emitted last frame can finish their fade.
+    if (this.sparks) {
+      this.sparks.update(deltaTime);
     }
   }
 
@@ -985,10 +1062,10 @@ export class Game {
       }
     }
     const userData = target.mesh.userData as CrystalMeshUserData;
-    const crackedMaterial = userData.crackedMaterial ?? (target.mesh.children[0] as Mesh).material as MeshStandardMaterial;
+    const fracturedMaterial = userData.fracturedMaterial ?? (target.mesh.children[0] as Mesh).material as MeshStandardMaterial;
     this.crystalDeathTweens.push({
       mesh: target.mesh,
-      crackedMaterial,
+      fracturedMaterial,
       age: 0,
       duration: CRYSTAL_DEATH_TWEEN_DURATION,
       position: { x: target.state.position.x, y: target.state.position.y },
@@ -1007,8 +1084,8 @@ export class Game {
       const easeOut = 1 - (1 - t) * (1 - t) * (1 - t);
       const scale = 1.0 + 0.6 * easeOut;
       tween.mesh.scale.set(scale, scale, scale);
-      tween.crackedMaterial.opacity = 1.0 - t;
-      tween.crackedMaterial.transparent = true;
+      tween.fracturedMaterial.opacity = 1.0 - t;
+      tween.fracturedMaterial.transparent = true;
       if (t >= 1) {
         this.scene.remove(tween.mesh);
         disposeAsteroidMesh(tween.mesh);
@@ -1238,19 +1315,47 @@ export class Game {
 
     // Floating text: tier label (if any) + hook labels, staggered so they
     // read as a clear vertical cascade rather than a tangled pile. Each text
-    // gets 60px of vertical room and 0.35s of temporal headroom so the player
+    // gets 95px of vertical room and 0.6s of temporal headroom so the player
     // can actually read each line before the next appears. Horizontal fan-out
-    // (±40px per text) keeps the lines from stacking directly on top of one
-    // another when several share the same spawn instant.
+    // (±55px per text) keeps the lines from stacking directly on top of one
+    // another when several share the same spawn instant. A per-kill y-offset
+    // (rotating 0/30/60/90px via crystalKillIndex) breaks ties between
+    // simultaneous crystal kills that happen to project to the same y-pixel
+    // — otherwise 3 simultaneous kills spawn 9 texts all sharing the same
+    // vertical band.
+    //
+    // Setup:  crystalKillIndex is a Game-level counter incremented once per
+    //         crystal kill (and reset to 0 in both round-reset and
+    //         respawn-clear sites). 4 positions are enough for the realistic
+    //         max simultaneous kills (most kills land 1-at-a-time when the
+    //         burst-blasts land; 4 is the biggest possible pile).
+    // Issues: 2nd-pass polish — user reported that rapid multi-kill cascades
+    //         "bunched up" the floating text: 3 simultaneous kills spawned
+    //         3 copies of "+100 CLEAN KILL" all at the exact same y-pixel.
+    // Fix:    1) Vertical offset per text 60 → 95px so a 2-text cascade
+    //            (CLEAN + PERFECT) reads as a clear two-line stack.
+    //         2) Temporal stagger 0.35s → 0.6s so each line has time to be
+    //            read before the next appears.
+    //         3) Duration 3.5s → 5.0s and drift 70 → 50 px/s so the fade is
+    //            visibly slower (50 × 5.0 = 250px total, slightly more than
+    //            before but spread across 40% more time).
+    //         4) Per-kill y-offset rotation (0/30/60/90) so simultaneous
+    //            kills get different starting rows.
+    // Gotchas: Don't refactor this to a per-tick Random offset — that would
+    //         cause the same kill to read inconsistently across replays
+    //         and would make A/B screenshots unreliable. Deterministic
+    //         rotation is the right primitive here.
+    const yKillOffset = (this.crystalKillIndex % 4) * 30;
+    this.crystalKillIndex += 1;
     let textIndex = 0;
     if (tier.text) {
       this.spawnFloatingTextAt(
         tier.text,
         target.state.position,
-        textIndex * 0.35,
+        textIndex * 0.6,
         tier.color,
-        textIndex * 60,
-        textIndex * 40 - 40,
+        textIndex * 95 + yKillOffset,
+        textIndex * 55 - 55,
         26,
       );
       textIndex++;
@@ -1259,10 +1364,10 @@ export class Game {
       this.spawnFloatingTextAt(
         hook.text,
         target.state.position,
-        textIndex * 0.35,
+        textIndex * 0.6,
         hook.color,
-        textIndex * 60,
-        textIndex * 40 - 40,
+        textIndex * 95 + yKillOffset,
+        textIndex * 55 - 55,
         22,
       );
       textIndex++;
@@ -1280,6 +1385,15 @@ export class Game {
     this.fractureSchedulers.delete(crystalId);
     this.crystalDeathTimes.delete(crystalId);
     this.crystalShardsAbsorbed.delete(crystalId);
+    // Phase 6c: remove the electricity-arc LineSegments from the scene and
+    // dispose its GPU resources. Done before the death tween starts so the
+    // arc does not flicker on a fading mesh.
+    const arc = this.crystalArcs.get(crystalId);
+    if (arc) {
+      this.scene.remove(arc.mesh);
+      arc.dispose();
+      this.crystalArcs.delete(crystalId);
+    }
   }
 
   /**
@@ -1548,6 +1662,7 @@ export class Game {
     this.fractureSchedulers.clear();
     this.crystalDeathTimes.clear();
     this.crystalShardsAbsorbed.clear();
+    this.crystalKillIndex = 0;
     for (const wave of this.activeShockwaves) {
       this.scene.remove(wave.mesh);
       wave.dispose();
@@ -1672,6 +1787,7 @@ export class Game {
     verticalOffset = 0,
     horizontalOffset = 0,
     fontSize = 16,
+    duration = 5.0,
   ): void {
     const world = new Vector3(worldPosition.x, worldPosition.y, 0);
     world.project(this.camera);
@@ -1700,7 +1816,7 @@ export class Game {
     this.activeFloatingTexts.push({
       element,
       age: -delaySeconds,
-      duration: 3.5,
+      duration,
       baseX,
       baseY,
     });
@@ -1773,11 +1889,14 @@ export class Game {
   //           the visible region.
   //           2) spawnFloatingTextAt now accepts a `verticalOffset`,
   //           `horizontalOffset`, and `fontSize` param. The crystal kill
-  //           site staggers each text by 60 px vertically, 0.35 s
-  //           temporally, and ±40 px horizontally, using 22-26 px font
-  //           and a unique vibrant color per tier. Duration bumped 2.0 →
-  //           3.5 s and drift 50 → 70 px/s so the cascade is clearly
-  //           readable as a sequence rather than a fast pop.
+  //           site staggers each text by 95 px vertically, 0.6 s
+  //           temporally, and ±55 px horizontally, using 22-26 px font
+  //           and a unique vibrant color per tier. Duration bumped 3.5 →
+  //           5.0 s and drift 70 → 50 px/s (slower per second but
+  //           ~250 px total travel) so the cascade is clearly readable as
+  //           a sequence rather than a fast pop. A rotating per-kill
+  //           y-offset (0/30/60/90 px) prevents simultaneous kills from
+  //           piling all their texts in the same vertical band.
   // Gotchas:  `text.element.remove()` mutates the DOM. Do not reparent the
   //           element after remove() — create a fresh div in
   //           spawnFloatingTextAt if you need to reuse it.
@@ -1792,11 +1911,13 @@ export class Game {
       }
       if (text.age >= 0) {
         const progress = text.age / text.duration;
-        // 70 px/s upward drift — over a 3.5s lifetime each text travels ~245px,
+        // 50 px/s upward drift — over a 5.0s lifetime each text travels ~250px,
         // which is enough to read each line individually. The horizontal sway
         // is a small sin-wave jitter (±4 px) so the text doesn't rise in a
-        // perfectly straight line.
-        const driftPixels = 70 * text.age;
+        // perfectly straight line. Drift is intentionally slower than the
+        // first 2.0s-lifetime pass so the player has time to read each line
+        // of a multi-tier cascade (tier + 1-3 hook bonuses).
+        const driftPixels = 50 * text.age;
         const swayPixels = 4 * Math.sin(text.age * 4);
         text.element.style.display = 'block';
         text.element.style.top = `${text.baseY - driftPixels}px`;
@@ -1888,6 +2009,16 @@ export class Game {
     if (!crystal) return null;
     this.destroyCrystal(crystal);
     return { score: this.wave.score };
+  }
+
+  /**
+   * Freeze the in-game clock so screenshot harnesses can inspect a static
+   * fracture state without the auto-firing cascade destroying the crystal.
+   * Returns the new paused state. Pass `false` to resume.
+   */
+  debugPauseClock(paused: boolean): boolean {
+    this.clockPaused = paused;
+    return this.clockPaused;
   }
 }
 

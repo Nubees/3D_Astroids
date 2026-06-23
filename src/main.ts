@@ -38,6 +38,7 @@ async function main(): Promise<void> {
     killCrystal: (id: number) => game.debugKillCrystal(id),
     setGameTime: (s: number) => game.debugSetGameTime(s),
     getCrystal: (id: number) => game.debugGetCrystal(id),
+    pauseClock: (paused: boolean) => game.debugPauseClock(paused),
   };
 
   window.addEventListener('beforeunload', () => {
