@@ -8,6 +8,9 @@ import {
   Points,
   ShaderMaterial,
 } from 'three';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import {
   BURST_INTERVAL_SECONDS,
   BURST_SCHEDULE,
@@ -239,23 +242,34 @@ export function getBurstFlash(t: number): number {
  * Replaces the previous cracked-vein material. The Game drives the
  * emissiveIntensity from crystalCharge + getBurstFlash each frame.
  *
- * Uses a hot cyan emissive color (#22f0ff) at intensity 0.5 baseline (Phase
- * 6c tuning: dropped from 1.0 to tame the bloom). When the pulse is at 0.5
- * the crystal is still visibly glowing, and when it spikes to ~1.0 the bloom
- * pass carries the "charged up" look without saturating the center of the
- * frame. The electricity arcs are now yellow (#ffe066) for color contrast
- * against the cyan crystal — they read as "shorting out" rather than as
- * another shade of the same glow.
+ * Phase 6c follow-up: emissiveIntensity dropped 0.5 → 0.25 AND emissive
+ * color shifted from saturated cyan (#22f0ff = 0.13, 0.94, 1.0) to a
+ * darker cyan (#0e8fa0 = 0.055, 0.56, 0.63). The two brightest channels
+ * were both > 0.9, which crossed UnrealBloomPass's threshold (0.15) by a
+ * wide margin and produced a white-out halo that swallowed the yellow
+ * arcs. Halving intensity + darkening the color keeps the crystal visibly
+ * glowing but drops both peak channels below 0.45 so the bloom kernel
+ * only catches the brightest moments (pre-burst spikes + arc flash frames).
+ *
+ * `transparent: true` is set at creation so the death tween's opacity
+ * fade actually works — setting it at runtime forces a shader recompile
+ * that produced ghost marks on the inner mesh (Phase 6c follow-up bug:
+ * user reported "marks that don't disappear" after destruction).
+ *
+ * The electricity arcs and sparks carry the actual color now — the crystal
+ * is the "power source" silhouette, not the "glow centerpiece."
  */
 export function createFracturedMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color: 0x88e6ff,
-    emissive: 0x22f0ff,
-    emissiveIntensity: 0.5,
+    emissive: 0x0e8fa0,
+    emissiveIntensity: 0.25,
     flatShading: true,
     metalness: 0,
     roughness: 0.35,
     envMapIntensity: 0,
+    transparent: true,
+    opacity: 1.0,
   });
 }
 
@@ -271,11 +285,28 @@ export const ARC_COLOR_G = 0.88;
 export const ARC_COLOR_B = 0.4;
 
 /**
- * Electricity-arc visual for one fractured crystal. Owns a LineSegments mesh
- * with `ARCS_PER_CRYSTAL` jagged bolts that all radiate from a point on the
+ * Spark particle color. Phase 6c follow-up: was cyan (0.6, 0.97, 1.0) by
+ * accident — the arcs were changed to yellow but the SparkParticles shader
+ * uniform was never updated, so the user saw bloom-bleed off cyan core
+ * rather than actual yellow particles. Matches ARC_COLOR_R/G/B so arcs and
+ * sparks read as the same "electrical discharge" event.
+ */
+export const SPARK_COLOR_R = 1.0;
+export const SPARK_COLOR_G = 0.88;
+export const SPARK_COLOR_B = 0.4;
+
+/**
+ * Electricity-arc visual for one fractured crystal. Owns a Line2 mesh with
+ * `ARCS_PER_CRYSTAL` jagged bolts that all radiate from a point on the
  * crystal's surface to a random other surface point. The geometry is
  * rebuilt in place every `ARC_REBUILD_INTERVAL_SECONDS` so the arcs flicker
  * naturally; intensity is driven by `crystalCharge` from the Game.
+ *
+ * Phase 6c follow-up: switched from LineSegments + LineBasicMaterial (which
+ * renders at 1 device pixel regardless of `linewidth` — WebGL spec gap) to
+ * Line2 + LineMaterial (uses a custom shader to produce true pixel-thick
+ * lines). Arc thickness is 3px so they punch through the bloom halo even
+ * at low charge values.
  *
  * Setup:    Call `arc.attach(positionProvider)` once to get the mesh into
  *           the scene. Each frame, call `arc.update(charge, meshPosition,
@@ -292,9 +323,14 @@ export const ARC_COLOR_B = 0.4;
  *           the position would be relative and double-transform. The Game
  *           also calls a position shake on the crystal, so the arc needs to
  *           follow the live world position, not the state position.
+ *
+ * Line2 + LineMaterial requires `resolution` to be set so it knows the
+ * viewport size in pixels (it computes screen-space line thickness from
+ * this). The Game passes the renderer size via `setResolution(w, h)` when
+ * it constructs / resizes the canvas.
  */
 export class ElectricityArc {
-  readonly mesh: LineSegments;
+  readonly mesh: Line2;
   private readonly positions: Float32Array;
   private readonly colors: Float32Array;
   // Per-vertex brightness baked in regenerate() (in [0.6, 1.0]). update()
@@ -302,34 +338,49 @@ export class ElectricityArc {
   // vertex color, giving each bolt a slightly varied "core + halo" look
   // without re-randomizing per frame.
   private readonly bakedBrightness: Float32Array;
+  private readonly geometry: LineGeometry;
+  private readonly material: LineMaterial;
   private elapsed = 0;
   private attached = false;
 
   constructor(seed: number) {
-    // Each bolt = ARC_SEGMENTS_PER_BOLT segments = 2 vertices per segment.
-    // LineSegments uses pairs of vertices, so positions.length = bolts * segs * 2 * 3.
-    const vertexCount = ARCS_PER_CRYSTAL * ARC_SEGMENTS_PER_BOLT * 2;
+    // Each bolt = ARC_SEGMENTS_PER_BOLT segments + 1 endpoint. LineGeometry
+    // uses start/end per segment, so positions.length = bolts * (segs + 1) * 3.
+    const pointsPerBolt = ARC_SEGMENTS_PER_BOLT + 1;
+    const vertexCount = ARCS_PER_CRYSTAL * pointsPerBolt;
     this.positions = new Float32Array(vertexCount * 3);
     this.colors = new Float32Array(vertexCount * 3);
     this.bakedBrightness = new Float32Array(vertexCount * 3);
-    const geometry = new BufferGeometry();
-    geometry.setAttribute('position', new BufferAttribute(this.positions, 3));
-    geometry.setAttribute('color', new BufferAttribute(this.colors, 3));
-    const material = new LineBasicMaterial({
+    this.geometry = new LineGeometry();
+    // Initialize with zeros — real positions set by regenerate().
+    this.geometry.setPositions(this.positions);
+    this.geometry.setColors(this.colors);
+    this.material = new LineMaterial({
       vertexColors: true,
       transparent: true,
       blending: AdditiveBlending,
       depthWrite: false,
+      linewidth: 3, // pixels (LineMaterial uses shader for true thick lines)
+      worldUnits: false,
     });
-    this.mesh = new LineSegments(geometry, material);
+    this.mesh = new Line2(this.geometry, this.material);
     this.mesh.frustumCulled = false;
     this.regenerate(seed);
   }
 
   /**
+   * Set the viewport resolution in pixels. Line2 + LineMaterial needs this
+   * to compute screen-space line thickness. The Game calls this whenever
+   * the canvas resizes.
+   */
+  setResolution(width: number, height: number): void {
+    this.material.resolution.set(width, height);
+  }
+
+  /**
    * Add the arc to a scene. Idempotent — second call is a no-op.
    */
-  attach(scene: { add: (obj: LineSegments) => void }): void {
+  attach(scene: { add: (obj: Line2) => void }): void {
     if (this.attached) return;
     scene.add(this.mesh);
     this.attached = true;
@@ -338,7 +389,7 @@ export class ElectricityArc {
   /**
    * Remove the arc from its scene. Idempotent.
    */
-  detach(scene: { remove: (obj: LineSegments) => void }): void {
+  detach(scene: { remove: (obj: Line2) => void }): void {
     if (!this.attached) return;
     scene.remove(this.mesh);
     this.attached = false;
@@ -370,10 +421,10 @@ export class ElectricityArc {
       const tint = channel === 0 ? ARC_COLOR_R : channel === 1 ? ARC_COLOR_G : ARC_COLOR_B;
       this.colors[i] = this.bakedBrightness[i] * intensity * tint;
     }
-    (this.mesh.geometry.getAttribute('color') as BufferAttribute).needsUpdate = true;
-    // (radius is kept as a param for future per-frame resizing hooks; the
-    // arc currently bakes its geometry at unit radius and the Game scales
-    // the parent crystal mesh.)
+    // Re-upload colors to LineGeometry (Line2 doesn't read from the
+    // per-vertex attribute the way LineSegments did — setColors copies
+    // into an instanced buffer).
+    this.geometry.setColors(this.colors);
     void radius;
   }
 
@@ -392,45 +443,40 @@ export class ElectricityArc {
       const b = sampleUnitVector(rng);
       const start = scaleVec(a, radius);
       const end = scaleVec(b, radius);
-      // Each segment: 2 vertices, 3 floats per vertex.
-      // We render ARC_SEGMENTS_PER_BOLT segments per bolt.
-      for (let seg = 0; seg < ARC_SEGMENTS_PER_BOLT; seg += 1) {
-        const t0 = seg / ARC_SEGMENTS_PER_BOLT;
-        const t1 = (seg + 1) / ARC_SEGMENTS_PER_BOLT;
-        const p0 = lerpVec(start, end, t0);
-        const p1 = seg === ARC_SEGMENTS_PER_BOLT - 1
-          ? end
-          : addVec(lerpVec(start, end, t1), scaleVec(sampleUnitVector(rng), 0.25));
-        // Per-vertex brightness for the core/halo effect (0.6..1.0).
-        const bright0 = 0.6 + 0.4 * rng();
-        const bright1 = 0.6 + 0.4 * rng();
-        const base = (bolt * ARC_SEGMENTS_PER_BOLT + seg) * 6;
-        this.positions[base] = p0.x;
-        this.positions[base + 1] = p0.y;
-        this.positions[base + 2] = p0.z;
-        this.positions[base + 3] = p1.x;
-        this.positions[base + 4] = p1.y;
-        this.positions[base + 5] = p1.z;
-        this.bakedBrightness[base] = bright0;
-        this.bakedBrightness[base + 1] = bright0;
-        this.bakedBrightness[base + 2] = bright0;
-        this.bakedBrightness[base + 3] = bright1;
-        this.bakedBrightness[base + 4] = bright1;
-        this.bakedBrightness[base + 5] = bright1;
+      // Each bolt is a polyline with (ARC_SEGMENTS_PER_BOLT + 1) vertices.
+      const pointsPerBolt = ARC_SEGMENTS_PER_BOLT + 1;
+      for (let seg = 0; seg < pointsPerBolt; seg += 1) {
+        const t = seg / ARC_SEGMENTS_PER_BOLT;
+        // Midpoints are jittered perpendicular to the lerp line; the
+        // endpoint is the exact target.
+        let p: { x: number; y: number; z: number };
+        if (seg === ARC_SEGMENTS_PER_BOLT) {
+          p = end;
+        } else {
+          const lerped = lerpVec(start, end, t);
+          const jitter = scaleVec(sampleUnitVector(rng), 0.25);
+          p = addVec(lerped, jitter);
+        }
+        const bright = 0.6 + 0.4 * rng();
+        const base = (bolt * pointsPerBolt + seg) * 3;
+        this.positions[base] = p.x;
+        this.positions[base + 1] = p.y;
+        this.positions[base + 2] = p.z;
+        this.bakedBrightness[base] = bright;
+        this.bakedBrightness[base + 1] = bright;
+        this.bakedBrightness[base + 2] = bright;
         // Initialize colors to baked brightness × yellow tint. update()
         // later multiplies by intensity, so the final color is:
-        //   final = bakedBrightness × (0.4 + 0.6·charge²) × yellow
+        //   final = bakedBrightness × (0.6 + 0.8·charge²) × yellow
         // Yellow on cyan = complementary contrast = arcs punch through bloom.
-        this.colors[base] = bright0 * ARC_COLOR_R;
-        this.colors[base + 1] = bright0 * ARC_COLOR_G;
-        this.colors[base + 2] = bright0 * ARC_COLOR_B;
-        this.colors[base + 3] = bright1 * ARC_COLOR_R;
-        this.colors[base + 4] = bright1 * ARC_COLOR_G;
-        this.colors[base + 5] = bright1 * ARC_COLOR_B;
+        this.colors[base] = bright * ARC_COLOR_R;
+        this.colors[base + 1] = bright * ARC_COLOR_G;
+        this.colors[base + 2] = bright * ARC_COLOR_B;
       }
     }
-    (this.mesh.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
-    (this.mesh.geometry.getAttribute('color') as BufferAttribute).needsUpdate = true;
+    // Re-upload positions + colors to LineGeometry.
+    this.geometry.setPositions(this.positions);
+    this.geometry.setColors(this.colors);
   }
 
   /**
@@ -438,8 +484,8 @@ export class ElectricityArc {
    * or the arc is removed from the scene.
    */
   dispose(): void {
-    this.mesh.geometry.dispose();
-    (this.mesh.material as LineBasicMaterial).dispose();
+    this.geometry.dispose();
+    this.material.dispose();
   }
 }
 
@@ -492,8 +538,16 @@ export class SparkParticles {
     geometry.setAttribute('aAlpha', new BufferAttribute(this.alphas, 1));
     const material = new ShaderMaterial({
       uniforms: {
-        uColor: { value: { x: 0.6, y: 0.97, z: 1.0 } },
-        uSize: { value: 9.0 * (typeof window !== 'undefined' ? Math.min(window.devicePixelRatio, 2) : 1) },
+        // Phase 6c follow-up: uColor was cyan (0.6, 0.97, 1.0) which read as
+        // "more of the same glow" rather than yellow discharge particles.
+        // Now matches ARC_COLOR_R/G/B so arcs + sparks read as one cohesive
+        // electric event.
+        uColor: { value: { x: SPARK_COLOR_R, y: SPARK_COLOR_G, z: SPARK_COLOR_B } },
+        // Phase 6c follow-up: bumped 9.0 → 14.0 so the sparks are clearly
+        // visible as discrete dots rather than single-pixel stars lost in the
+        // cyan bloom. Combined with the yellow color fix this is what makes
+        // the "electricity flashing outward" cue actually land.
+        uSize: { value: 14.0 * (typeof window !== 'undefined' ? Math.min(window.devicePixelRatio, 2) : 1) },
       },
       vertexShader: `
         attribute float aAlpha;
@@ -535,20 +589,30 @@ export class SparkParticles {
 
   /**
    * Emit sparks for one crystal this frame. `charge` is the crystalCharge
-   * curve (0..1); emission rate is `charge^2 * 80` particles/sec, capped
-   * at 8 per frame per crystal to prevent single-frame spikes.
+   * curve (0..1); emission rate is `max(8, charge^2 * 140)` particles/sec
+   * (Phase 6c follow-up: was `charge^2 * 80` — too sparse to see), capped
+   * at 12 per frame per crystal to prevent single-frame spikes.
+   *
+   * The `max(8, ...)` floor guarantees at least ~8 sparks/sec (≈ 1 every
+   * other frame at 60fps) even at very low charge, so the player sees a
+   * continuous "fizz" off the crystal instead of nothing-then-burst.
    */
   emit(charge: number, worldPos: Vector2, radius: number, seed: number, deltaTime: number): void {
     if (charge <= 0) return;
-    const rate = charge * charge * 80;
-    const count = Math.min(8, Math.floor(rate * deltaTime + Math.random()));
+    const rate = Math.max(8, charge * charge * 140);
+    const count = Math.min(12, Math.floor(rate * deltaTime + Math.random()));
     if (count === 0) return;
     const rng = mulberry32(seed * 31 + Math.floor(performance.now() * 1000));
     for (let n = 0; n < count; n += 1) {
       const i = this.nextIndex;
       this.nextIndex = (this.nextIndex + 1) % SPARK_POOL_SIZE;
       const dir = sampleUnitVector(rng);
-      const speed = 1.5 + rng() * 1.5;
+      // Phase 6c follow-up: was 1.5–3.0 units/s — sparks barely moved before
+      // their 0.6s lifetime ended. Bumped to 3.0–6.0 so they actually travel
+      // 1.8–3.6 units of distance (= roughly 1–2 crystal radii) before
+      // fading, reading as "sparks shooting outward" rather than "sparks
+      // winking in place".
+      const speed = 3.0 + rng() * 3.0;
       this.positions[i * 3] = worldPos.x + dir.x * radius * 0.8;
       this.positions[i * 3 + 1] = worldPos.y + dir.y * radius * 0.8;
       this.positions[i * 3 + 2] = 0.1;

@@ -36,13 +36,21 @@ export function createBloomComposer(
   // Resolution, strength, radius, threshold.
   // Strength is kept moderate so the bloom feels like energy bleed rather than
   // an over-exposed halo. Threshold is low so even the dim shield pulses bloom.
+  // Phase 6c follow-up: threshold 0.15 → 0.35, strength 0.55 → 0.4. The
+  // previous threshold caught the crystal's saturated cyan emissive (G and
+  // B channels both ~0.94) and produced a wide white-out halo that swallowed
+  // the yellow electricity arcs and sparks. New threshold is high enough
+  // that only the dim cyan crystal sits below it; the yellow arcs (which
+  // are emissive at ~1.4× intensity at peak charge) still cross it and
+  // bloom, but as a focused glow around the bolt endpoints rather than a
+  // scene-wide haze.
   const width = renderer.domElement.clientWidth;
   const height = renderer.domElement.clientHeight;
   const bloomPass = new UnrealBloomPass(
     new ThreeVector2(width, height),
-    0.55,
+    0.4,
     0.35,
-    0.15,
+    0.35,
   );
   composer.addPass(bloomPass);
 

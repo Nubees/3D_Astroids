@@ -342,6 +342,13 @@ export class Game {
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
       this.bloomComposer.setSize(w, h);
+      // Phase 6c follow-up: Line2 + LineMaterial needs the viewport
+      // resolution in pixels to compute screen-space line thickness. Push
+      // it to every active arc so the arcs stay thick after a window
+      // resize (otherwise they'd render at 0px on the new resolution).
+      for (const arc of this.crystalArcs.values()) {
+        arc.setResolution(w, h);
+      }
     };
     window.addEventListener('resize', this.resizeHandler);
 
@@ -835,7 +842,14 @@ export class Game {
 
     // 2. Build an electricity-arc LineSegments mesh and attach to scene.
     // ElectricityArc takes only a seed; position is set per-frame in update().
+    // Phase 6c follow-up: Line2 needs the viewport resolution so its
+    // custom shader can compute screen-space thickness. Pulled from the
+    // renderer's drawing buffer size (CSS pixels × DPR).
     const arc = new ElectricityArc(crystalId);
+    arc.setResolution(
+      this.renderer.domElement.clientWidth,
+      this.renderer.domElement.clientHeight,
+    );
     this.scene.add(arc.mesh);
     this.crystalArcs.set(crystalId, arc);
 
@@ -932,17 +946,19 @@ export class Game {
       // peak (time-to-next ≈ 0) so the flash visibly pulses with the cascade.
       // (Phase 6c: pulse replaced by crystalCharge so the flash math stays
       // consistent with the per-frame update in updateCrystalVisuals.)
-      // Phase 6c tuning: bloom on the emissive material was so bright it
-      // drowned out the electricity arcs. Coefficients dropped again so peak
-      // burst flash is ~1.5× baseline (not ~2.0×) — arcs (now yellow) punch
-      // through the cyan glow instead of being absorbed.
+      // Phase 6c follow-up: emissive coefficients dropped further. Crystal
+      // baseline is now 0.25 (was 0.5) so the previous formula peaked at ~1.5
+      // and re-triggered the bloom white-out. New formula peaks at ~0.65 —
+      // crystal visibly breathes pre-burst but stays below the bloom
+      // threshold (raised to 0.35 in post-processing) so the yellow arcs
+      // and sparks are the only bright elements on screen.
       const inner = target.mesh.children[0];
       if (inner instanceof Mesh) {
         const fractured = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
         if (fractured) {
           const charge = crystalCharge(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
           const flash = getBurstFlash(0.075); // peak flash
-          fractured.emissiveIntensity = 0.5 + 0.6 * charge * charge + 0.4 * flash;
+          fractured.emissiveIntensity = 0.25 + 0.4 * charge * charge + 0.3 * flash;
         }
       }
 
@@ -1029,11 +1045,12 @@ export class Game {
       target.mesh.scale.set(breathe, breathe, 1);
       // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
       if (!this.isCrystalBurstFrame) {
-        // Base emissive 0.5, modulated by 0.6×charge² so the pulse visually
-        // matches the scale breathe curve. Pre-burst: ~1.1× baseline (not
-        // 2.0×). Phase 6c tuning: dropped further so bloom doesn't swallow
-        // the yellow electricity arcs (user feedback: still too bright).
-        fracturedMaterial.emissiveIntensity = 0.5 + 0.6 * charge * charge;
+        // Phase 6c follow-up: dropped further (0.5→0.25, 0.6→0.4). Crystal
+        // emissive baseline + color are now both dimmer (see
+        // createFracturedMaterial); base pulse peaks at ~0.65 which stays
+        // below the raised bloom threshold (0.35) so only the arcs/sparks
+        // bloom, not the crystal silhouette itself.
+        fracturedMaterial.emissiveIntensity = 0.25 + 0.4 * charge * charge;
       }
       // Drive the electricity arc — rebuilt every ARC_REBUILD_INTERVAL inside
       // ElectricityArc.update, but its opacity tracks crystalCharge so the
@@ -1090,10 +1107,22 @@ export class Game {
       const easeOut = 1 - (1 - t) * (1 - t) * (1 - t);
       const scale = 1.0 + 0.6 * easeOut;
       tween.mesh.scale.set(scale, scale, scale);
+      // Fade opacity 1.0 → 0 over the tween duration. Phase 6c follow-up:
+      // `transparent: true` is now set at material creation (see
+      // createFracturedMaterial) so this fade actually works without a
+      // mid-render shader recompile. Previously the runtime
+      // `transparent = true` here caused the inner mesh to render with a
+      // disposed/garbage material state for one frame after t=1, which
+      // read as "marks that don't disappear" on the screen.
       tween.fracturedMaterial.opacity = 1.0 - t;
-      tween.fracturedMaterial.transparent = true;
       if (t >= 1) {
         this.scene.remove(tween.mesh);
+        // disposeAsteroidMesh traverses children and disposes BOTH the
+        // geometry AND the fracturedMaterial (set on userData). The inner
+        // Mesh inside the Group also shares this material instance via
+        // swapToFracturedMaterial — disposeAsteroidMesh handles that by
+        // skipping the material.dispose() if it's already disposed
+        // (Three.js's dispose() is idempotent).
         disposeAsteroidMesh(tween.mesh);
       } else {
         alive.push(tween);
