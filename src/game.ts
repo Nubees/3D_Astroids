@@ -63,14 +63,15 @@ import {
   Vector2,
 } from './types';
 import {
+  CrystalBoltSparks,
   CrystalFractureScheduler,
-  ElectricityArc,
-  SparkParticles,
+  ExtrudingBolt,
   computeTimeBonusTier,
   createBurstTelegraph,
   createFracturedMaterial,
   crystalCharge,
   getBurstFlash,
+  getHeartbeatPhase,
   isClutchApplicable,
   isPerfectApplicable,
   TELEGRAPH_DURATION_SECONDS,
@@ -246,14 +247,10 @@ export class Game {
   private crystalDeathTimes = new Map<number, number>();
   private crystalShardsAbsorbed = new Map<number, number>();
   private crystalDeathTweens: CrystalDeathTween[] = [];
-  // Phase 6c: per-fractured-crystal electricity arcs (Lightning visuals).
-  // One arc per crystal id, drawn as a single LineSegments mesh; rebuilt
-  // per frame so the bolts flicker.
-  private crystalArcs = new Map<number, ElectricityArc>();
-  // Scene-wide spark particle pool. One Points draw call for every
-  // fractured crystal on screen at once — cheap and deterministic because
-  // the pool is capped.
-  private sparks: SparkParticles | null = null;
+  private crystalBolts = new Map<number, ExtrudingBolt>();
+  // Per-crystal spark particle pools. One Points draw call per fractured
+  // crystal on screen — disposed with the crystal in destroyCrystal.
+  private crystalSparks = new Map<number, CrystalBoltSparks>();
   private activeShockwaves: Shockwave[] = [];
   private pendingTelegraphs: PendingTelegraph[] = [];
   private cameraShakeAmplitude = 0;
@@ -344,22 +341,15 @@ export class Game {
       this.bloomComposer.setSize(w, h);
       // Phase 6c follow-up: Line2 + LineMaterial needs the viewport
       // resolution in pixels to compute screen-space line thickness. Push
-      // it to every active arc so the arcs stay thick after a window
-      // resize (otherwise they'd render at 0px on the new resolution).
-      for (const arc of this.crystalArcs.values()) {
-        arc.setResolution(w, h);
+      // it to every active bolt so they stay thick after a window resize
+      // (otherwise they'd render at 0px on the new resolution).
+      for (const bolt of this.crystalBolts.values()) {
+        bolt.setResolution(w, h);
       }
     };
     window.addEventListener('resize', this.resizeHandler);
 
     this.createHud();
-
-    // Phase 6c: one scene-wide spark pool shared by every fractured crystal.
-    // Built in the constructor so the same Points geometry lives for the
-    // entire game; particles are emitted by updateCrystalVisuals when any
-    // crystal crosses an emission threshold.
-    this.sparks = new SparkParticles();
-    this.scene.add(this.sparks.points);
   }
 
   static async create(canvas: HTMLCanvasElement, entryId: number, shipMesh: Group): Promise<Game> {
@@ -416,6 +406,19 @@ export class Game {
       wave.dispose();
     }
     this.activeShockwaves = [];
+    // Phase 6c3: dispose all per-crystal bolts and sparks so their GPU
+    // resources are released when the game stops. (Per-crystal disposal
+    // happens normally in destroyCrystal; this is the safety net.)
+    for (const bolt of this.crystalBolts.values()) {
+      bolt.detach(this.scene);
+      bolt.dispose();
+    }
+    this.crystalBolts.clear();
+    for (const sparks of this.crystalSparks.values()) {
+      this.scene.remove(sparks.points);
+      sparks.dispose();
+    }
+    this.crystalSparks.clear();
     for (const pending of this.pendingTelegraphs) {
       this.scene.remove(pending.mesh);
       pending.mesh.geometry.dispose();
@@ -829,8 +832,8 @@ export class Game {
    * The visual is now carried per-frame by:
    *   - emissiveIntensity pulse via crystalCharge
    *   - scale breathe ±5% via crystalCharge
-   *   - ElectricityArc opacity + flicker
-   *   - SparkParticles emission bursts from the surface
+   *   - ExtrudingBolt rebuilds + opacity flicker
+   *   - Per-crystal CrystalBoltSparks emission bursts from the surface
    */
   private fractureCrystal(asteroid: LiveAsteroid): void {
     const crystalId = asteroid.id;
@@ -840,18 +843,25 @@ export class Game {
     const fracturedMaterial = createFracturedMaterial();
     swapToFracturedMaterial(asteroid.mesh, fracturedMaterial);
 
-    // 2. Build an electricity-arc LineSegments mesh and attach to scene.
-    // ElectricityArc takes only a seed; position is set per-frame in update().
-    // Phase 6c follow-up: Line2 needs the viewport resolution so its
-    // custom shader can compute screen-space thickness. Pulled from the
-    // renderer's drawing buffer size (CSS pixels × DPR).
-    const arc = new ElectricityArc(crystalId);
-    arc.setResolution(
+    // 2. Build the extruding-bolt Line2 mesh and attach to scene.
+    //    ExtrudingBolt takes only a seed; position is set per-frame in update().
+    //    Line2 needs the viewport resolution so its custom shader can compute
+    //    screen-space thickness. Pulled from the renderer's drawing buffer size
+    //    (CSS pixels × DPR).
+    const bolt = new ExtrudingBolt(crystalId);
+    bolt.setResolution(
       this.renderer.domElement.clientWidth,
       this.renderer.domElement.clientHeight,
     );
-    this.scene.add(arc.mesh);
-    this.crystalArcs.set(crystalId, arc);
+    bolt.attach(this.scene);
+    this.crystalBolts.set(crystalId, bolt);
+
+    // 2b. Per-crystal spark pool: one Points geometry per crystal, disposed
+    //     with it. Sparks are emitted each frame from `updateCrystalVisuals`
+    //     while charge > 0.
+    const sparks = new CrystalBoltSparks(crystalId);
+    this.scene.add(sparks.points);
+    this.crystalSparks.set(crystalId, sparks);
 
     // 3. Register the burst scheduler with game-time as the clock.
     this.fractureSchedulers.set(crystalId, new CrystalFractureScheduler(crystalId, this.gameTimeSeconds));
@@ -946,19 +956,19 @@ export class Game {
       // peak (time-to-next ≈ 0) so the flash visibly pulses with the cascade.
       // (Phase 6c: pulse replaced by crystalCharge so the flash math stays
       // consistent with the per-frame update in updateCrystalVisuals.)
-      // Phase 6c follow-up: emissive coefficients dropped further. Crystal
-      // baseline is now 0.25 (was 0.5) so the previous formula peaked at ~1.5
-      // and re-triggered the bloom white-out. New formula peaks at ~0.65 —
-      // crystal visibly breathes pre-burst but stays below the bloom
-      // threshold (raised to 0.35 in post-processing) so the yellow arcs
-      // and sparks are the only bright elements on screen.
+      // Phase 6c3 revert: emissive base restored to 0.5, charge² coefficient
+      // restored to 0.6, flash coefficient restored to 0.4. These match the
+      // original Phase 6c values; the dim Phase 6c2 numbers (0.25 / 0.4 / 0.3)
+      // were paired with the dim bloom (threshold 0.35) so the yellow arcs
+      // could read. The new white-hot bolts against brighter cyan need the
+      // brighter pulse to feel like a real charge-up.
       const inner = target.mesh.children[0];
       if (inner instanceof Mesh) {
         const fractured = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
         if (fractured) {
           const charge = crystalCharge(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
           const flash = getBurstFlash(0.075); // peak flash
-          fractured.emissiveIntensity = 0.25 + 0.4 * charge * charge + 0.3 * flash;
+          fractured.emissiveIntensity = 0.5 + 0.6 * charge * charge + 0.4 * flash;
         }
       }
 
@@ -1045,33 +1055,31 @@ export class Game {
       target.mesh.scale.set(breathe, breathe, 1);
       // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
       if (!this.isCrystalBurstFrame) {
-        // Phase 6c follow-up: dropped further (0.5→0.25, 0.6→0.4). Crystal
-        // emissive baseline + color are now both dimmer (see
-        // createFracturedMaterial); base pulse peaks at ~0.65 which stays
-        // below the raised bloom threshold (0.35) so only the arcs/sparks
-        // bloom, not the crystal silhouette itself.
-        fracturedMaterial.emissiveIntensity = 0.25 + 0.4 * charge * charge;
+        // Phase 6c3 revert: emissive base restored to 0.5, charge² coefficient
+        // restored to 0.6. Crystal is the brighter Phase 6c value (see
+        // createFracturedMaterial); base pulse peaks at ~1.1 which lets the
+        // brighter bloom (threshold 0.15) catch the cyan body too — the
+        // white-hot bolts bloom against the cyan naturally without needing
+        // dim suppression.
+        fracturedMaterial.emissiveIntensity = 0.5 + 0.6 * charge * charge;
       }
-      // Drive the electricity arc — rebuilt every ARC_REBUILD_INTERVAL inside
-      // ElectricityArc.update, but its opacity tracks crystalCharge so the
+      // Drive the extruding bolt — geometry rebuilt every BOLT_REBUILD_INTERVAL
+      // inside ExtrudingBolt.update, intensity tracks crystalCharge so the
       // bolts only really light up just before a burst.
       const crystalRadius = SIZE_RADIUS[target.state.size];
-      const arc = this.crystalArcs.get(id);
-      if (arc) {
-        arc.update(deltaTime, charge, target.state.position, crystalRadius, id);
+      const bolt = this.crystalBolts.get(id);
+      if (bolt) {
+        bolt.update(deltaTime, charge, target.state.position, crystalRadius, id);
       }
-      // Emit sparks from the crystal surface when charge is high. Threshold
-      // tuned so most frames emit 0–1 spark and the pre-burst second emits
-      // a tight cluster. Re-using a single scene-wide pool keeps draw cost
-      // constant regardless of how many crystals fractured at once.
-      if (this.sparks && charge > 0.15) {
-        this.sparks.emit(charge, target.state.position, crystalRadius, id, deltaTime);
+      // Emit sparks from the crystal surface and advance the per-crystal pool.
+      // Each crystal has its own CrystalBoltSparks (built in fractureCrystal),
+      // so draw cost scales linearly with the number of fractured crystals on
+      // screen — acceptable for the typical 1-3 active crystals.
+      const sparks = this.crystalSparks.get(id);
+      if (sparks) {
+        sparks.emit(charge, target.state.position, crystalRadius, deltaTime);
+        sparks.update(deltaTime);
       }
-    }
-    // Advance the spark pool every frame regardless of fracture state so any
-    // particles that were emitted last frame can finish their fade.
-    if (this.sparks) {
-      this.sparks.update(deltaTime);
     }
   }
 
@@ -1420,14 +1428,20 @@ export class Game {
     this.fractureSchedulers.delete(crystalId);
     this.crystalDeathTimes.delete(crystalId);
     this.crystalShardsAbsorbed.delete(crystalId);
-    // Phase 6c: remove the electricity-arc LineSegments from the scene and
-    // dispose its GPU resources. Done before the death tween starts so the
-    // arc does not flicker on a fading mesh.
-    const arc = this.crystalArcs.get(crystalId);
-    if (arc) {
-      this.scene.remove(arc.mesh);
-      arc.dispose();
-      this.crystalArcs.delete(crystalId);
+    // Phase 6c3: remove the extruding-bolt Line2 + per-crystal spark pool
+    // from the scene and dispose their GPU resources. Done before the death
+    // tween starts so the bolt does not flicker on a fading mesh.
+    const bolt = this.crystalBolts.get(crystalId);
+    if (bolt) {
+      bolt.detach(this.scene);
+      bolt.dispose();
+      this.crystalBolts.delete(crystalId);
+    }
+    const sparks = this.crystalSparks.get(crystalId);
+    if (sparks) {
+      this.scene.remove(sparks.points);
+      sparks.dispose();
+      this.crystalSparks.delete(crystalId);
     }
   }
 
