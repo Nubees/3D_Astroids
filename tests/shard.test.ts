@@ -172,7 +172,7 @@ describe('shouldCrystalFracture', () => {
     expect(shouldCrystalFracture(iron)).toBe(false);
   });
 
-  it('returns false for a crystal above the 30% threshold', () => {
+  it('returns false for a crystal above the 50% threshold', () => {
     const crystal = createAsteroidState(
       AsteroidSize.LARGE,
       { x: 0, y: 0 },
@@ -180,12 +180,25 @@ describe('shouldCrystalFracture', () => {
       false,
       AsteroidKind.CRYSTAL,
     );
-    // 3 / 6 = 50%, well above threshold.
+    // 4 / 6 = 66%, well above threshold.
+    crystal.health = 4;
+    expect(shouldCrystalFracture(crystal)).toBe(false);
+  });
+
+  it('returns false for a crystal exactly at the 50% threshold (boundary)', () => {
+    // < is strict, not <=; at exactly 50% the crystal does NOT fracture.
+    const crystal = createAsteroidState(
+      AsteroidSize.LARGE,
+      { x: 0, y: 0 },
+      { x: 0, y: 0 },
+      false,
+      AsteroidKind.CRYSTAL,
+    );
     crystal.health = 3;
     expect(shouldCrystalFracture(crystal)).toBe(false);
   });
 
-  it('returns true the first time a crystal drops below 30% health', () => {
+  it('returns true the first time a crystal drops below 50% health', () => {
     const crystal = createAsteroidState(
       AsteroidSize.LARGE,
       { x: 0, y: 0 },
@@ -193,8 +206,10 @@ describe('shouldCrystalFracture', () => {
       false,
       AsteroidKind.CRYSTAL,
     );
-    // 1 / 6 = 16.67%, below threshold.
-    crystal.health = 1;
+    // 2 / 6 = 33%, below 50% threshold — must trigger fracture so the player
+    // can enjoy the electricity discharge + cascade instead of the crystal
+    // dying the same instant it visually enters the fracture state.
+    crystal.health = 2;
     expect(shouldCrystalFracture(crystal)).toBe(true);
   });
 

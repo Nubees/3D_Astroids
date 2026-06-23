@@ -64,7 +64,12 @@ const SIZE_HEALTH: Record<AsteroidSizeType, number> = {
 
 const CRYSTAL_HEALTH = 6;
 
-export const CRYSTAL_THRESHOLD = 0.3;
+// Fracture trigger threshold. Bumped from 0.3 → 0.5 in Phase 6c so the player
+// has time to see the electricity discharge / sparks / scale-breathe visuals
+// and the shard cascade gets a real chance to play out before the crystal
+// is finally destroyed. At 0.3 with 6 HP, the crystal fractured on its 5th
+// hit and often died 1–2 hits later — not enough time for the 12s cascade.
+export const CRYSTAL_THRESHOLD = 0.5;
 
 export function createAsteroidState(
   size: AsteroidSizeType,
