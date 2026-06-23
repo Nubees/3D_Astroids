@@ -2,7 +2,6 @@ import {
   AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
-  InterleavedBufferAttribute,
   LineBasicMaterial,
   LineSegments,
   MeshStandardMaterial,
@@ -385,6 +384,7 @@ export class ExtrudingBolt {
   private readonly positions: Float32Array;
   private readonly colors: Float32Array;
   private elapsed = 0;
+  private frameCounter = 0;
   private attached = false;
   private currentRadius = 1.0;
 
@@ -460,39 +460,41 @@ export class ExtrudingBolt {
     seed: number,
   ): void {
     this.elapsed += deltaTime;
+    this.frameCounter += 1;
     this.mesh.position.set(worldPos.x, worldPos.y, 0.1);
     // Track radius for regenerate(). If it changed (rare, but possible if the
     // crystal resizes), regenerate immediately at the new size so the bolt
     // geometry matches the asteroid body.
     const radiusChanged = Math.abs(this.currentRadius - radius) > 0.001;
     this.currentRadius = radius;
-    if (radiusChanged || this.elapsed >= BOLT_REBUILD_INTERVAL_SECONDS) {
-      this.elapsed = 0;
-      // Re-sample the per-bolt seeds + segment counts so the geometry
-      // visibly shifts each rebuild.
+    // Phase 6c3 follow-up: rebuild geometry EVERY frame so the bolts visibly
+    // flicker. The old BOLT_REBUILD_INTERVAL_SECONDS=0.06 (~4 frames) was too
+    // slow — adjacent frames had nearly identical geometry, reading as stiff
+    // lines instead of lightning. Per-frame rebuild at ~150 vertices total
+    // is sub-millisecond on modern CPUs.
+    if (radiusChanged || true) {
+      // Re-sample the per-bolt seeds each frame. The frameCounter is the
+      // time-varying component so adjacent frames produce visibly different
+      // geometry (this is what makes the flicker read as lightning).
       const rngSeeds: number[] = [];
       for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
-        rngSeeds.push(seed * (b + 1) * 31 + Math.floor(this.elapsed * 1000) + 1);
+        rngSeeds.push(seed * (b + 1) * 31 + this.frameCounter * 7 + 1);
       }
       const segmentsPerBolt = rngSeeds.map((s) =>
         BOLT_SEGMENT_MIN + (Math.abs(s) % (BOLT_SEGMENT_MAX - BOLT_SEGMENT_MIN + 1)),
       );
       this.regenerate(rngSeeds, segmentsPerBolt);
     }
-    // Opacity = 0.6 + 0.8 * charge². Floor of 0.6 keeps bolts visible even
-    // at the start of the burst window; ceiling of 1.4 pushes past the
-    // bloom threshold at peak so white-hot really pops.
-    const intensity = 0.6 + 0.8 * charge * charge;
-    for (let i = 0; i < this.colors.length; i += 1) {
-      this.colors[i] *= intensity;
-    }
-    // LineGeometry.setColors() registers colors as TWO InterleavedBufferAttribute
-    // siblings (`instanceColorStart` + `instanceColorEnd`) that share a single
-    // InstancedInterleavedBuffer. The intensity multiplier above mutates that
-    // shared array in place, but Three.js only re-uploads interleaved buffers
-    // when `needsUpdate = true`. Marking it dirty is what makes the
-    // charge-driven brightness actually reach the GPU.
-    (this.geometry.attributes.instanceColorStart as InterleavedBufferAttribute).needsUpdate = true;
+    // Phase 6c3 follow-up: drive opacity on the material instead of multiplying
+    // per-vertex colors. The old code multiplied `this.colors[i] *= intensity`
+    // every frame, which compounded across frames until the next regenerate
+    // reset the colors — producing a slow glow rather than a flicker, and
+    // washing out the white-hot tint once intensity pushed past ~1.0.
+    // material.opacity is a uniform Three.js reads each frame, so the bolt
+    // visibly fades with charge without the compounding bug.
+    // Floor 0.4 keeps bolts visible from the start of the burst window;
+    // ceiling 1.0 (max alpha) makes them pop at peak charge.
+    this.material.opacity = 0.4 + 0.6 * charge;
     void radius;
   }
 
@@ -850,7 +852,12 @@ export function computeBoltEndpoints(
       p = end;
     } else {
       const lerped = lerpVec(start, end, t);
-      const jitter = scaleVec(sampleUnitVector(rng), 0.3);
+      // Phase 6c3 follow-up: crank jitter amplitude proportional to t so
+      // midpoints near the tip wiggle more than midpoints near the root,
+      // giving the bolt a "whip crack" shape rather than a uniform wobble.
+      // The base amplitude of 0.6 is roughly twice the previous 0.3, so the
+      // per-segment displacement is now visually obvious at any zoom.
+      const jitter = scaleVec(sampleUnitVector(rng), 0.3 + 0.3 * t);
       p = addVec(lerped, jitter);
     }
     const bright = 0.6 + 0.4 * rng();
