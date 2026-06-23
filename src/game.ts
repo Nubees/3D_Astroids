@@ -932,13 +932,17 @@ export class Game {
       // peak (time-to-next ≈ 0) so the flash visibly pulses with the cascade.
       // (Phase 6c: pulse replaced by crystalCharge so the flash math stays
       // consistent with the per-frame update in updateCrystalVisuals.)
+      // Phase 6c tuning: bloom on the emissive material was so bright it
+      // drowned out the electricity arcs. Coefficients dropped again so peak
+      // burst flash is ~1.5× baseline (not ~2.0×) — arcs (now yellow) punch
+      // through the cyan glow instead of being absorbed.
       const inner = target.mesh.children[0];
       if (inner instanceof Mesh) {
         const fractured = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
         if (fractured) {
           const charge = crystalCharge(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
           const flash = getBurstFlash(0.075); // peak flash
-          fractured.emissiveIntensity = 1.0 + 2.5 * charge * charge + 1.5 * flash;
+          fractured.emissiveIntensity = 0.5 + 0.6 * charge * charge + 0.4 * flash;
         }
       }
 
@@ -1025,9 +1029,11 @@ export class Game {
       target.mesh.scale.set(breathe, breathe, 1);
       // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
       if (!this.isCrystalBurstFrame) {
-        // Base emissive 1.0, modulated by charge^2 so the pulse visually
-        // matches the scale breathe curve. Pre-burst: ~3.5× baseline.
-        fracturedMaterial.emissiveIntensity = 1.0 + 2.5 * charge * charge;
+        // Base emissive 0.5, modulated by 0.6×charge² so the pulse visually
+        // matches the scale breathe curve. Pre-burst: ~1.1× baseline (not
+        // 2.0×). Phase 6c tuning: dropped further so bloom doesn't swallow
+        // the yellow electricity arcs (user feedback: still too bright).
+        fracturedMaterial.emissiveIntensity = 0.5 + 0.6 * charge * charge;
       }
       // Drive the electricity arc — rebuilt every ARC_REBUILD_INTERVAL inside
       // ElectricityArc.update, but its opacity tracks crystalCharge so the

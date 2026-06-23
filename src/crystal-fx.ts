@@ -239,22 +239,36 @@ export function getBurstFlash(t: number): number {
  * Replaces the previous cracked-vein material. The Game drives the
  * emissiveIntensity from crystalCharge + getBurstFlash each frame.
  *
- * Uses a hot cyan emissive color (#22f0ff) at intensity 1.0 baseline, so when
- * the pulse is at 0.3 (post-burst) the crystal is still visibly glowing and
- * when the pulse spikes to 1.4 (pre-burst) the bloom pass carries the
- * "charged up" look.
+ * Uses a hot cyan emissive color (#22f0ff) at intensity 0.5 baseline (Phase
+ * 6c tuning: dropped from 1.0 to tame the bloom). When the pulse is at 0.5
+ * the crystal is still visibly glowing, and when it spikes to ~1.0 the bloom
+ * pass carries the "charged up" look without saturating the center of the
+ * frame. The electricity arcs are now yellow (#ffe066) for color contrast
+ * against the cyan crystal — they read as "shorting out" rather than as
+ * another shade of the same glow.
  */
 export function createFracturedMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color: 0x88e6ff,
     emissive: 0x22f0ff,
-    emissiveIntensity: 1.0,
+    emissiveIntensity: 0.5,
     flatShading: true,
     metalness: 0,
     roughness: 0.35,
     envMapIntensity: 0,
   });
 }
+
+/**
+ * Arc color. Phase 6c tuning: switched from cyan to yellow so the arcs stand
+ * out against the cyan crystal bloom. Yellow on cyan = complementary color
+ * contrast = the arcs punch through the halo instead of getting swallowed
+ * by it. RGB channels are kept saturated (1.0, 0.88, 0.4) so AdditiveBlending
+ * pushes them above the bloom threshold even at low intensity values.
+ */
+export const ARC_COLOR_R = 1.0;
+export const ARC_COLOR_G = 0.88;
+export const ARC_COLOR_B = 0.4;
 
 /**
  * Electricity-arc visual for one fractured crystal. Owns a LineSegments mesh
@@ -343,14 +357,18 @@ export class ElectricityArc {
       this.elapsed = 0;
       this.regenerate(seed);
     }
-    // Opacity = charge^2: invisible in the first half of the burst window,
-    // then ramps up to full as the next burst approaches. The per-vertex
-    // brightness baked in regenerate() is stored in this.bakedBrightness;
-    // we copy it into the actual color buffer and multiply by intensity
-    // so the "core + halo" look is preserved across frames.
-    const intensity = charge * charge;
+    // Opacity = 0.6 + 0.8 * charge². Floor of 0.6 (up from 0.4) keeps the
+    // arcs clearly visible even at the start of the burst window; ceiling
+    // of 1.4 pushes past the bloom threshold at peak so the yellow really
+    // pops against the cyan crystal. Per-vertex brightness baked in
+    // regenerate() is stored in this.bakedBrightness; we copy it into
+    // the actual color buffer and multiply by intensity AND the yellow
+    // tint (ARC_COLOR_*) so the final color = brightness × intensity × yellow.
+    const intensity = 0.6 + 0.8 * charge * charge;
     for (let i = 0; i < this.colors.length; i += 1) {
-      this.colors[i] = this.bakedBrightness[i] * intensity;
+      const channel = i % 3;
+      const tint = channel === 0 ? ARC_COLOR_R : channel === 1 ? ARC_COLOR_G : ARC_COLOR_B;
+      this.colors[i] = this.bakedBrightness[i] * intensity * tint;
     }
     (this.mesh.geometry.getAttribute('color') as BufferAttribute).needsUpdate = true;
     // (radius is kept as a param for future per-frame resizing hooks; the
@@ -399,14 +417,16 @@ export class ElectricityArc {
         this.bakedBrightness[base + 3] = bright1;
         this.bakedBrightness[base + 4] = bright1;
         this.bakedBrightness[base + 5] = bright1;
-        // Initialize colors to the baked brightness so the first frame
-        // (charge=0) reads as a faint glow rather than invisible.
-        this.colors[base] = bright0;
-        this.colors[base + 1] = bright0;
-        this.colors[base + 2] = bright0;
-        this.colors[base + 3] = bright1;
-        this.colors[base + 4] = bright1;
-        this.colors[base + 5] = bright1;
+        // Initialize colors to baked brightness × yellow tint. update()
+        // later multiplies by intensity, so the final color is:
+        //   final = bakedBrightness × (0.4 + 0.6·charge²) × yellow
+        // Yellow on cyan = complementary contrast = arcs punch through bloom.
+        this.colors[base] = bright0 * ARC_COLOR_R;
+        this.colors[base + 1] = bright0 * ARC_COLOR_G;
+        this.colors[base + 2] = bright0 * ARC_COLOR_B;
+        this.colors[base + 3] = bright1 * ARC_COLOR_R;
+        this.colors[base + 4] = bright1 * ARC_COLOR_G;
+        this.colors[base + 5] = bright1 * ARC_COLOR_B;
       }
     }
     (this.mesh.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
