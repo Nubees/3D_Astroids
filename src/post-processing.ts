@@ -34,20 +34,18 @@ export function createBloomComposer(
   composer.addPass(renderPass);
 
   // Resolution, strength, radius, threshold.
-  // Strength is kept moderate so the bloom feels like energy bleed rather than
-  // an over-exposed halo. Threshold is low so even the dim shield pulses bloom.
-  // Phase 6c3 revert: threshold 0.35 → 0.15, strength 0.4 → 0.55. The
-  // Phase 6c2 dim values were needed because yellow arcs were drawn over
-  // a bright cyan core and bloomed into a white-out. Phase 6c3 uses
-  // white-hot bolts on a bright cyan body — both colors bloom against
-  // each other naturally without needing dim suppression.
+  // Phase 6c3 follow-up: threshold 0.15 → 0.35, strength 0.55 → 0.4. The
+  // bright bloom (low threshold) bloomed the whole crystal + bolt cluster
+  // into a white-out that drowned the actual line work. New threshold is
+  // high enough that only the bright bolt endpoints and the very peak of
+  // the cyan emissive bloom; the crystal silhouette itself stays crisp.
   const width = renderer.domElement.clientWidth;
   const height = renderer.domElement.clientHeight;
   const bloomPass = new UnrealBloomPass(
     new ThreeVector2(width, height),
-    0.55,
+    0.4,
     0.35,
-    0.15,
+    0.35,
   );
   composer.addPass(bloomPass);
 
