@@ -4,13 +4,14 @@ import {
   BufferGeometry,
   LineBasicMaterial,
   LineSegments,
+  Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   Points,
   ShaderMaterial,
+  Vector3,
 } from 'three';
-import { Line2 } from 'three/addons/lines/Line2.js';
-import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { LightningStrike } from './vendor/three-r149-LightningStrike.js';
 import {
   BURST_INTERVAL_SECONDS,
   BURST_SCHEDULE,
@@ -23,40 +24,58 @@ import {
 } from './types';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Crystal FX (Phase 6c3 — Extruding Lightning)
+// My Rules — Crystal FX (Phase 6d — Vendored LightningStrike)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Pure helpers + scene classes for the crystal-fracture effect.
 //          The visual story is "the crystal is overloaded and discharging"
-//          (charge-driven pulse, scale breathe, extruding lightning bolts,
-//          per-crystal spark particles). The cracked-vein texture, the
-//          halo-style ElectricityArc (Phase 6c2), and the scene-wide
+//          (charge-driven pulse, scale breathe, vendored fractal-branched
+//          lightning strikes, per-crystal spark particles). The cracked-vein
+//          texture (Phase 6c1), the halo-style ElectricityArc (Phase 6c2),
+//          the ExtrudingBolt zigzag (Phase 6c3), and the scene-wide
 //          SparkParticles pool have all been removed/replaced — see git
 //          history if you need to resurrect any of them.
 // Setup:   Imported by src/game.ts and tests/shard-burst.test.ts.
-// Issues:  Phase 6c2's ElectricityArc drew bolts BETWEEN two random surface
-//          points, which read as "halo decoration" rather than "lightning
-//          coming out" — the player didn't connect the visual to "about to
-//          burst" (the cue is energy leaving the crystal, not circling it).
-// Fix:     Phase 6c3's ExtrudingBolt starts each bolt at a point on the
-//          crystal surface (radius * 0.95) and extrudes it OUTWARD 1.5–2.5
-//          crystal-radii along a perturbed radial direction. The reading is
-//          "Tesla coil" / "plasma globe" — energy leaving the surface, not
-//          circling it. 5 bolts × 8–10 segments each, regenerated every
-//          60ms. Per-vertex color = white-hot tint × (0.6 + 0.8·charge²).
+// Issues:  Phase 6c3's ExtrudingBolt used a hand-rolled zigzag polyline
+//          rebuilt every frame from `computeBoltEndpoints`. With 5 bolts ×
+//          8-10 segments each, every frame rewrote the same 50 vertices
+//          with new jitter. The result read as "stiff scribbles" — too
+//          uniform, no real branching, and the jitter didn't feel like
+//          crackling electricity.
+// Fix:     Phase 6d's CrystalLightning wraps the vendored r149
+//          `LightningStrike` (BufferGeometry subclass). The library does
+//          the fractal subdivision via 4D simplex noise `noise4d(x, y, z,
+//          time)`, so per-frame flicker comes "for free" from the time
+//          component. STRIKES_PER_CRYSTAL=4 independent strikes per crystal
+//          read as a Tesla-coil / plasma-globe multi-streamer. Each strike
+//          has its own birthTime/deathTime (50-150ms lifetime) so adjacent
+//          strikes overlap slightly and the visual feels continuous rather
+//          than blinky.
 // Gotchas:
 //  - crystalCharge uses timeToNextBurst (NOT a free-running sine) so the
 //    pulse visibly intensifies as the next burst approaches — same shape as
 //    the old getCrackPulse (0.3 → 1.0) but with a steeper t³ so the visual
 //    is more dramatic at the end.
-//  - ExtrudingBolt pre-allocates the largest-possible position/color
-//    buffers (BOLTS_PER_CRYSTAL × (BOLT_SEGMENT_MAX + 1) vertices) and
-//    rewrites them in place on every regenerate(). This avoids per-frame
-//    Float32Array allocation and keeps the per-crystal alloc count at 1.
-//  - CrystalBoltSparks is a per-crystal Points pool (Phase 6c3): one geometry,
-//    one material, one draw call per crystal. The pool size is 40; when full,
-//    oldest particles recycle. The Phase 6c2 scene-wide pool (120 particles
-//    shared across all crystals) was replaced so dispose chains are simpler —
-//    when a crystal dies, its spark pool dies with it.
+//  - CrystalLightning.mesh is a `Mesh` with an empty `BufferGeometry` and
+//    a SHARED `MeshBasicMaterial`. The strike meshes are CHILDREN of this
+//    parent (each with their own `LightningStrike` BufferGeometry), and all
+//    strikes reference the parent's material — so a single
+//    `material.opacity = ...` mutates every strike at once. The test file
+//    relies on `bolt.mesh.material.blending` / `.opacity`; keep that
+//    surface intact.
+//  - The parent's `position` is updated each frame to follow the crystal
+//    in WORLD space — do NOT parent the bolt to the crystal Group in
+//    game.ts, or the position would be relative and double-transform.
+//  - LightningStrike requires a NON-NEGATIVE `time` argument to
+//    `update(currentTime)`. The internal `currentTime` accumulator
+//    starts at 0 and only moves forward.
+//  - When a strike's lifetime expires, we dispose the old geometry and
+//    `new LightningStrike(...)` to refresh birthTime/deathTime cleanly.
+//    `LightningStrike.copyParameters` exists for partial refreshes, but
+//    full disposal+rebuild is simpler and the cost is bounded (4 strikes,
+//    every 50-150ms).
+//  - CrystalBoltSparks is a per-crystal Points pool: one geometry, one
+//    material, one draw call per crystal. The pool size is 40; when full,
+//    oldest particles recycle.
 //  - createFracturedMaterial returns a bright cyan MeshStandardMaterial with
 //    no emissiveMap (the texture is gone) and an emissiveIntensity that the
 //    Game drives from crystalCharge each frame. emissive color is the same
@@ -320,118 +339,167 @@ export const SPARK_COLOR_G = 0.88;
 export const SPARK_COLOR_B = 0.4;
 
 /**
- * Number of independent bolts to draw per fractured crystal. 5 strikes
- * a balance — enough to feel like a multi-streamer Tesla coil, few enough
- * that the geometry rebuild (5 × 10 vertices = 50 vertices, every 60ms)
- * doesn't thrash the CPU.
- */
-const BOLTS_PER_CRYSTAL = 5;
-
-/**
- * Per-bolt segment count range. We sample 8-10 per bolt via a 0..2 floor
- * inside ExtrudingBolt constructor. 8-10 reads as jagged lightning without
- * looking noisy.
- */
-const BOLT_SEGMENT_MIN = 8;
-const BOLT_SEGMENT_MAX = 10;
-
-/**
- * How often (in seconds) the bolt geometry regenerates. 60 ms = ~17
- * redraws per second — fast enough to read as flickering electricity,
- * aggressive enough that the bolts visibly shift frame-to-frame.
- */
-const BOLT_REBUILD_INTERVAL_SECONDS = 0.06;
-
-/**
- * Lightning color (white-hot, slightly warm). Kept as RGB constants so
- * the bolt vertex colors and the per-frame intensity multiplier both
- * reference the same source of truth.
+ * Lightning color (white-hot, slightly warm). Kept as RGB constants so the
+ * bolt color and the spark color (in CrystalBoltSparks) both reference the
+ * same source of truth.
  */
 export const BOLT_COLOR_R = 1.0;
 export const BOLT_COLOR_G = 0.98;
 export const BOLT_COLOR_B = 0.92;
 
 /**
- * Lightning-bolt visual for one fractured crystal. Owns a Line2 mesh with
- * `BOLTS_PER_CRYSTAL` jagged bolts that all radiate FROM a point on the
- * crystal's surface OUTWARD 1.5-2.5 crystal-radii into the surrounding
- * space. The geometry is rebuilt in place every `BOLT_REBUILD_INTERVAL_SECONDS`
- * so the bolts visibly flicker and shift; intensity is driven by `crystalCharge`
- * from the Game.
- *
- * Phase 6c3 — replaces Phase 6c2's ElectricityArc, which drew bolts
- * BETWEEN two random surface points (read as "halo decoration" not
- * "lightning coming out"). Phase 6c3 bolts start at the surface and
- * extrude outward — Tesla coil / plasma globe reading.
- *
- * Setup:    Call `bolt.attach(scene)` once to get the mesh into the
- *           scene. Each frame, call `bolt.update(deltaTime, charge,
- *           worldPos, radius, seed)`. Call `bolt.detach(scene)` to
- *           remove from the scene. Call `bolt.dispose()` to free GPU.
- * Gotchas:  The mesh's `position` is updated each frame to follow the
- *           crystal — do NOT parent the bolt to the crystal Group, or
- *           the position would be relative and double-transform.
- *
- * Line2 + LineMaterial requires `resolution` to be set so it knows
- * the viewport size in pixels (it computes screen-space line thickness
- * from this). The Game calls setResolution(w, h) on construction AND
- * on canvas resize.
+ * How many independent LightningStrike instances per fractured crystal.
+ * 4 strikes a balance — enough to read as a multi-streamer, few enough
+ * that the per-frame fractal-subdivision cost stays under 1ms even on
+ * mid-range laptops.
  */
-export class ExtrudingBolt {
-  readonly mesh: Line2;
-  private readonly geometry: LineGeometry;
-  private readonly material: LineMaterial;
-  private readonly positions: Float32Array;
-  private readonly colors: Float32Array;
-  private elapsed = 0;
-  private frameCounter = 0;
+const STRIKES_PER_CRYSTAL = 4;
+
+/**
+ * Per-strike lifetime range. The yomboprime demo uses 1.0–2.5s for ground
+ * strikes; we want shorter (50-150ms) so the strikes feel like rapid
+ * crackling rather than sustained beams. Adjacent strikes overlap
+ * slightly so the visual stays continuous.
+ */
+const STRIKE_LIFETIME_MIN_S = 0.05;
+const STRIKE_LIFETIME_MAX_S = 0.15;
+
+/**
+ * Strike radius range. The r149 defaults are 1.0; we want thin bolts that
+ * read as "lightning" not "ribbon" so we scale to crystal-radius fractions.
+ * The trunk tapers (0.05 → 0.02) so the strike gets thinner as it leaves
+ * the crystal, matching how a real arc attenuates with distance.
+ */
+const STRIKE_RADIUS0_FRAC = 0.05;
+const STRIKE_RADIUS1_FRAC = 0.02;
+
+/**
+ * ── My Rules ──
+ * Purpose: Phase 6d drop-in replacement for the rejected Phase 6c3
+ *   `ExtrudingBolt`. Wraps the vendored r149 `LightningStrike` so the
+ *   visual reads as real fractal-branched lightning instead of a stiff
+ *   hand-rolled zigzag polyline.
+ * Setup:  Imported by `src/game.ts` as `CrystalLightning` (Task 3 swaps
+ *   the import line from `ExtrudingBolt`). Constructor takes a per-
+ *   crystal `seed` (currently unused — the time-varying geometry comes
+ *   from `LightningStrike`'s internal 4D simplex noise). Each frame the
+ *   Game calls `update(dt, charge, worldPos, radius, seed)`; the parent
+ *   mesh's position is set to `worldPos` and the shared material's
+ *   opacity is driven by `0.3 + 0.7 * charge`. The strike meshes are
+ *   CHILDREN of `this.mesh` (a parent `Mesh` with empty BufferGeometry +
+ *   shared `MeshBasicMaterial`) so the test can read `bolt.mesh.material`
+ *   directly and a single opacity change affects every strike.
+ * Issues: ExtrudingBolt's per-frame regenerate() rewrote the same ~150
+ *   vertex buffers every frame; the bolts visibly shifted but the geometry
+ *   was a 2D polyline so it read as "scribble" not "lightning".
+ * Fix:    LightningStrike uses `noise4d(x, y, z, time)` to generate fractal
+ *   ramification per call to `geometry.update(currentTime)`. Multiple
+ *   strikes (STRIKES_PER_CRYSTAL=4) with short, overlapping lifetimes
+ *   (50-150ms) give a continuous crackling "Tesla coil" reading.
+ * Gotchas:
+ *   - `mesh` MUST be a `Mesh` (not a `Group`) because the test asserts
+ *     `bolt.mesh.material.blending` and the parent surface needs a
+ *     `material` property. Use an empty `BufferGeometry` as the geometry.
+ *   - Each strike has its OWN `LightningStrike` geometry instance. They
+ *     all SHARE the parent's `MeshBasicMaterial` — that's how a single
+ *     opacity assignment propagates to every strike.
+ *   - When a strike's lifetime expires we dispose the geometry and `new
+ *     LightningStrike(...)` to refresh birthTime/deathTime cleanly.
+ *     The library exposes `LightningStrike.copyParameters` for partial
+ *     refreshes, but full disposal+rebuild is simpler and bounded.
+ *   - `setResolution(w, h)` is a no-op kept for API compat with the
+ *     `ExtrudingBolt` interface (`game.ts` calls it on construction
+ *     AND on canvas resize). LightningStrike doesn't need it.
+ */
+export class CrystalLightning {
+  readonly mesh: Mesh;
+  private readonly strikes: Array<{
+    geometry: LightningStrike;
+    mesh: Mesh;
+    nextBirth: number;
+    lifetime: number;
+  }> = [];
+  private readonly material: MeshBasicMaterial;
+  private currentTime = 0;
   private attached = false;
-  private currentRadius = 1.0;
 
   constructor(seed: number) {
-    const rngSeeds: number[] = [];
-    for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
-      rngSeeds.push(seed * (b + 1) * 31 + 1);
-    }
-    // Per-bolt segment count, sampled once at construction (8-10).
-    const segmentsPerBolt: number[] = [];
-    for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
-      segmentsPerBolt.push(
-        BOLT_SEGMENT_MIN + Math.floor((rngSeeds[b] % (BOLT_SEGMENT_MAX - BOLT_SEGMENT_MIN + 1))),
-      );
-    }
-    // Allocate the largest-possible buffer (max segments × max bolts).
-    const maxVerts = BOLTS_PER_CRYSTAL * (BOLT_SEGMENT_MAX + 1);
-    this.positions = new Float32Array(maxVerts * 3);
-    this.colors = new Float32Array(maxVerts * 3);
-    this.geometry = new LineGeometry();
-    this.geometry.setPositions(this.positions);
-    this.geometry.setColors(this.colors);
-    this.material = new LineMaterial({
-      vertexColors: true,
+    void seed;
+    this.material = new MeshBasicMaterial({
+      color: 0xfff0d0, // warm white-hot
       transparent: true,
+      opacity: 0.3,
       blending: AdditiveBlending,
       depthWrite: false,
-      linewidth: 5, // pixels (LineMaterial uses shader for true thick lines)
-      worldUnits: false,
     });
-    this.mesh = new Line2(this.geometry, this.material);
+    // Parent Mesh: empty BufferGeometry + shared material. The strike
+    // meshes are added as children so a single `material.opacity = ...`
+    // mutates every strike at once.
+    this.mesh = new Mesh(new BufferGeometry(), this.material);
     this.mesh.frustumCulled = false;
-    this.regenerate(rngSeeds, segmentsPerBolt);
+    // Build the strike pool. Each strike is born at a slightly different
+    // time (staggered by i * 0.05s) so they don't all fire in lockstep —
+    // the result is continuous crackling rather than a single flash.
+    for (let i = 0; i < STRIKES_PER_CRYSTAL; i += 1) {
+      const strike = this.makeStrike(i * STRIKE_LIFETIME_MIN_S, 1.0);
+      this.strikes.push(strike);
+      this.mesh.add(strike.mesh);
+    }
   }
 
   /**
-   * Set the viewport resolution in pixels. Line2 + LineMaterial needs this
-   * to compute screen-space line thickness.
+   * Build a single LightningStrike + its Mesh wrapper. The strike is born
+   * `birthOffset` seconds in the future, lives for `lifetime` seconds, and
+   * samples its source/dest offsets from a sphere of the given `radius`.
+   */
+  private makeStrike(birthOffset: number, radius: number): {
+    geometry: LightningStrike;
+    mesh: Mesh;
+    nextBirth: number;
+    lifetime: number;
+  } {
+    const lifetime =
+      STRIKE_LIFETIME_MIN_S +
+      Math.random() * (STRIKE_LIFETIME_MAX_S - STRIKE_LIFETIME_MIN_S);
+    const nextBirth = birthOffset;
+    const geometry = new LightningStrike({
+      sourceOffset: this.randomSurfacePoint(radius),
+      destOffset: this.randomOuterPoint(radius),
+      radius0: radius * STRIKE_RADIUS0_FRAC,
+      radius1: radius * STRIKE_RADIUS1_FRAC,
+      birthTime: nextBirth,
+      deathTime: nextBirth + lifetime,
+      isEternal: false,
+      ramification: 5,
+      recursionProbability: 0.6,
+      maxIterations: 5,
+      roughness: 0.9,
+      straightness: 0.6,
+      propagationTimeFactor: 0.1,
+      vanishingTimeFactor: 0.9,
+    });
+    // Cast: vendored LightningStrike extends BufferGeometry at runtime;
+    // our .d.ts declares it as a plain class so tsc does not auto-
+    // promote the type. The Mesh constructor requires a BufferGeometry.
+    const mesh = new Mesh(geometry as unknown as BufferGeometry, this.material);
+    mesh.frustumCulled = false;
+    return { geometry, mesh, nextBirth, lifetime };
+  }
+
+  /**
+   * Set the viewport resolution in pixels. No-op kept for API compat with
+   * `ExtrudingBolt` — `game.ts` calls this on construction AND on canvas
+   * resize. LightningStrike does not need it.
    */
   setResolution(width: number, height: number): void {
-    this.material.resolution.set(width, height);
+    void width;
+    void height;
   }
 
   /**
    * Add the bolt to a scene. Idempotent.
    */
-  attach(scene: { add: (obj: Line2) => void }): void {
+  attach(scene: { add: (obj: Mesh) => void }): void {
     if (this.attached) return;
     scene.add(this.mesh);
     this.attached = true;
@@ -440,7 +508,7 @@ export class ExtrudingBolt {
   /**
    * Remove the bolt from its scene. Idempotent.
    */
-  detach(scene: { remove: (obj: Line2) => void }): void {
+  detach(scene: { remove: (obj: Mesh) => void }): void {
     if (!this.attached) return;
     scene.remove(this.mesh);
     this.attached = false;
@@ -450,7 +518,7 @@ export class ExtrudingBolt {
    * Per-frame tick. `charge` is crystalCharge (0..1); `worldPos` is the
    * crystal's current world position (already includes shake); `radius`
    * is the crystal's visual radius; `seed` is a per-crystal seed so
-   * adjacent crystals don't share bolt patterns.
+   * adjacent crystals don't share strike patterns.
    */
   update(
     deltaTime: number,
@@ -459,73 +527,83 @@ export class ExtrudingBolt {
     radius: number,
     seed: number,
   ): void {
-    this.elapsed += deltaTime;
-    this.frameCounter += 1;
+    void seed;
+    this.currentTime += deltaTime;
     this.mesh.position.set(worldPos.x, worldPos.y, 0.1);
-    // Track radius for regenerate(). If it changed (rare, but possible if the
-    // crystal resizes), regenerate immediately at the new size so the bolt
-    // geometry matches the asteroid body.
-    const radiusChanged = Math.abs(this.currentRadius - radius) > 0.001;
-    this.currentRadius = radius;
-    // Phase 6c3 follow-up: rebuild geometry EVERY frame so the bolts visibly
-    // flicker. The old BOLT_REBUILD_INTERVAL_SECONDS=0.06 (~4 frames) was too
-    // slow — adjacent frames had nearly identical geometry, reading as stiff
-    // lines instead of lightning. Per-frame rebuild at ~150 vertices total
-    // is sub-millisecond on modern CPUs.
-    if (radiusChanged || true) {
-      // Re-sample the per-bolt seeds each frame. The frameCounter is the
-      // time-varying component so adjacent frames produce visibly different
-      // geometry (this is what makes the flicker read as lightning).
-      const rngSeeds: number[] = [];
-      for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
-        rngSeeds.push(seed * (b + 1) * 31 + this.frameCounter * 7 + 1);
+    // Recycle strikes whose lifetime has expired. Disposal + rebuild keeps
+    // birthTime/deathTime clean and avoids the partial-refresh path through
+    // `LightningStrike.copyParameters`.
+    for (const s of this.strikes) {
+      if (this.currentTime >= s.nextBirth + s.lifetime) {
+        s.geometry.dispose();
+        // Detach the old child mesh and replace with a fresh one.
+        this.mesh.remove(s.mesh);
+        const fresh = this.makeStrike(this.currentTime, radius);
+        s.geometry = fresh.geometry;
+        s.mesh = fresh.mesh;
+        s.nextBirth = fresh.nextBirth;
+        s.lifetime = fresh.lifetime;
+        this.mesh.add(s.mesh);
       }
-      const segmentsPerBolt = rngSeeds.map((s) =>
-        BOLT_SEGMENT_MIN + (Math.abs(s) % (BOLT_SEGMENT_MAX - BOLT_SEGMENT_MIN + 1)),
-      );
-      this.regenerate(rngSeeds, segmentsPerBolt);
+      // Re-sample source/dest each frame so the strike's origin point on
+      // the crystal surface shifts slightly (read as "energy moving"
+      // rather than "same bolt re-rendered"). LightningStrike stores
+      // its parameters on `rayParameters`, NOT on the instance itself
+      // (verified: vendored init() does `this.rayParameters = rayParameters`).
+      s.geometry.rayParameters.sourceOffset.copy(this.randomSurfacePoint(radius));
+      s.geometry.rayParameters.destOffset.copy(this.randomOuterPoint(radius));
+      // LightningStrike.update(time) regenerates the fractal subdivision
+      // using `noise4d(x, y, z, time)` — the time component is what makes
+      // the geometry crackle frame-to-frame.
+      s.geometry.update(this.currentTime);
     }
-    // Phase 6c3 follow-up: drive opacity on the material instead of multiplying
-    // per-vertex colors. The old code multiplied `this.colors[i] *= intensity`
-    // every frame, which compounded across frames until the next regenerate
-    // reset the colors — producing a slow glow rather than a flicker, and
-    // washing out the white-hot tint once intensity pushed past ~1.0.
-    // material.opacity is a uniform Three.js reads each frame, so the bolt
-    // visibly fades with charge without the compounding bug.
-    // Floor 0.4 keeps bolts visible from the start of the burst window;
+    // Drive opacity on the shared material so every strike fades together.
+    // Floor 0.3 keeps bolts visible from the start of the burst window;
     // ceiling 1.0 (max alpha) makes them pop at peak charge.
-    this.material.opacity = 0.4 + 0.6 * charge;
-    void radius;
+    this.material.opacity = 0.3 + 0.7 * charge;
   }
 
   /**
-   * Rebuild the bolt geometry in place. Calls computeBoltEndpoints for
-   * each of BOLTS_PER_CRYSTAL bolts, then uploads positions + colors to
-   * the LineGeometry.
+   * Uniformly sample a point on a sphere of given radius (Marsaglia method).
+   * Output is multiplied by `radius * 0.95` so the point sits just INSIDE
+   * the crystal surface, giving the bolt a clear origin.
    */
-  private regenerate(rngSeeds: number[], segmentsPerBolt: number[]): void {
-    let writeIdx = 0;
-    for (let b = 0; b < BOLTS_PER_CRYSTAL; b += 1) {
-      const { positions, colors } = computeBoltEndpoints(
-        rngSeeds[b],
-        this.currentRadius,
-        segmentsPerBolt[b],
-      );
-      for (let i = 0; i < positions.length; i += 1) {
-        this.positions[writeIdx + i] = positions[i];
-        this.colors[writeIdx + i] = colors[i];
-      }
-      writeIdx += positions.length;
-    }
-    this.geometry.setPositions(this.positions);
-    this.geometry.setColors(this.colors);
+  private randomSurfacePoint(radius: number): Vector3 {
+    let x1: number;
+    let x2: number;
+    let s: number;
+    do {
+      x1 = Math.random() * 2 - 1;
+      x2 = Math.random() * 2 - 1;
+      s = x1 * x1 + x2 * x2;
+    } while (s >= 1 || s === 0);
+    const factor = 2 * Math.sqrt(1 - s);
+    return new Vector3(
+      x1 * factor * radius * 0.95,
+      x2 * factor * radius * 0.95,
+      (1 - 2 * s) * radius * 0.95,
+    );
+  }
+
+  /**
+   * Sample a point in the space OUTSIDE the crystal surface — used as the
+   * strike's destination so the bolt visibly extends 1.5-2.5 crystal-radii
+   * away from the body. Implementation: take a surface point and stretch
+   * by a random factor in [1.5, 2.5] divided by the surface offset (0.95).
+   */
+  private randomOuterPoint(radius: number): Vector3 {
+    const surface = this.randomSurfacePoint(radius);
+    const extension = 1.5 + Math.random() * 1.0;
+    return surface.multiplyScalar(extension / 0.95);
   }
 
   /**
    * Release GPU resources.
    */
   dispose(): void {
-    this.geometry.dispose();
+    for (const s of this.strikes) {
+      s.geometry.dispose();
+    }
     this.material.dispose();
   }
 }
