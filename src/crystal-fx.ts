@@ -371,15 +371,19 @@ const STRIKE_LIFETIME_MIN_S = 0.05;
 const STRIKE_LIFETIME_MAX_S = 0.15;
 
 /**
- * Strike radius range. Phase 6d follow-up: trunk thickness halved (0.05 → 0.025)
- * and tip thickness halved (0.02 → 0.012) so the bolts read as fine electrical
- * arcs instead of thick ribbons. With 2 strikes (down from 4) and the new
- * opacity cap of 0.35 (down from 0.55), the per-frame additive contribution
- * drops by ~6× from the Phase 6d initial tuning — visually a much quieter
- * crackle, still readable against the cyan crystal.
+ * Strike radius range. Phase 6d follow-up (round 4): the round-1
+ * dial-down (0.025/0.012) was the right call when the bolt was
+ * competing with the crystal's emissive body pulse, but with that
+ * glow disabled in round 3, the bolt now reads as too thin. Restored
+ * to the original 0.05/0.02 with a small bump (0.06/0.025) so the
+ * strikes are clearly visible against the dark starfield. With
+ * AdditiveBlending + 2 strikes at peak 0.50, per-channel contribution
+ * is ~1.0 — same as round 2, no white-out risk. The thickness
+ * increase affects ONLY pixel coverage, not pixel brightness, so
+ * the saturation math doesn't change.
  */
-const STRIKE_RADIUS0_FRAC = 0.025;
-const STRIKE_RADIUS1_FRAC = 0.012;
+const STRIKE_RADIUS0_FRAC = 0.06;
+const STRIKE_RADIUS1_FRAC = 0.025;
 
 /**
  * ── My Rules ──
