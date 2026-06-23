@@ -238,7 +238,9 @@ export class Game {
   private crystalsSpawnedThisWave: number = 0;
   private scrap: LiveScrap[] = [];
   private readonly controller: ArenaMovementController;
-  private readonly bloomComposer: EffectComposer;
+  // Phase 6c3: bloom disabled. The factory returns a stub with composer: null.
+  // Kept as a field so the call sites don't need to change; null guards before use.
+  private readonly bloomComposer: EffectComposer | null;
   private lastTime = 0;
   private running = true;
   private gameTimeSeconds = 0;
@@ -338,7 +340,7 @@ export class Game {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
-      this.bloomComposer.setSize(w, h);
+      if (this.bloomComposer) this.bloomComposer.setSize(w, h);
       // Phase 6c follow-up: Line2 + LineMaterial needs the viewport
       // resolution in pixels to compute screen-space line thickness. Push
       // it to every active bolt so they stay thick after a window resize
@@ -453,7 +455,11 @@ export class Game {
     this.isCrystalBurstFrame = false;
 
     this.update(deltaTime);
-    this.bloomComposer.render();
+    if (this.bloomComposer) {
+      this.bloomComposer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
     requestAnimationFrame(this.loop);
   };
 
