@@ -269,32 +269,26 @@ export function getHeartbeatPhase(t: number): number {
 }
 
 /**
- * Build the bright cyan MeshStandardMaterial used for fractured crystals.
+ * Build the cyan MeshStandardMaterial used for fractured crystals.
  * Replaces the previous cracked-vein material. The Game drives the
  * emissiveIntensity from crystalCharge + getBurstFlash each frame.
  *
- * Phase 6c follow-up: emissiveIntensity dropped 0.5 → 0.25 AND emissive
- * color shifted from saturated cyan (#22f0ff = 0.13, 0.94, 1.0) to a
- * darker cyan (#0e8fa0 = 0.055, 0.56, 0.63). The two brightest channels
- * were both > 0.9, which crossed UnrealBloomPass's threshold (0.15) by a
- * wide margin and produced a white-out halo that swallowed the yellow
- * arcs. Halving intensity + darkening the color keeps the crystal visibly
- * glowing but drops both peak channels below 0.45 so the bloom kernel
- * only catches the brightest moments (pre-burst spikes + arc flash frames).
+ * Phase 6c3 revert: emissive color restored to Phase 6c value (#22f0ff
+ * saturated cyan) and intensity restored to 0.5. The Phase 6c2 dim
+ * values (#0e8fa0 / 0.25) were paired with the yellow arcs (which needed
+ * to read against a dim cyan core). Phase 6c3 uses white-hot bolts
+ * instead of yellow, so the brighter cyan body works better — it bloom-
+ * bleeds against the white-hot without becoming a yellow halo.
  *
  * `transparent: true` is set at creation so the death tween's opacity
- * fade actually works — setting it at runtime forces a shader recompile
- * that produced ghost marks on the inner mesh (Phase 6c follow-up bug:
- * user reported "marks that don't disappear" after destruction).
- *
- * The electricity arcs and sparks carry the actual color now — the crystal
- * is the "power source" silhouette, not the "glow centerpiece."
+ * fade works without forcing a shader recompile at runtime (Phase 6c2
+ * post-mortem: runtime transparent flip left ghost marks on inner meshes).
  */
 export function createFracturedMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color: 0x88e6ff,
-    emissive: 0x0e8fa0,
-    emissiveIntensity: 0.25,
+    emissive: 0x22f0ff,
+    emissiveIntensity: 0.5,
     flatShading: true,
     metalness: 0,
     roughness: 0.35,
