@@ -293,26 +293,23 @@ export function getHeartbeatPhase(t: number): number {
 }
 
 /**
- * Build the cyan MeshStandardMaterial used for fractured crystals.
- * Replaces the previous cracked-vein material. The Game drives the
- * emissiveIntensity from crystalCharge + getBurstFlash each frame.
+ * Build the crystal material used when a crystal is fractured.
+ * Phase 6d follow-up (round 3): the user said 'disable all these effects,
+ * and return the lightling' — the crystal's own emissive body glow
+ * (cyan, driven by emissiveIntensity 0.5 + 0.6 * charge² + 0.4 burst flash)
+ * was overpowering the lightning and reading as a 'blooming light flash'.
+ * Emissive is now zero, so the crystal body is its base diffuse color
+ * (0x88e6ff cyan) with no self-illumination. The lightning is the only
+ * luminous effect on the crystal now.
  *
- * Phase 6c3 revert: emissive color restored to Phase 6c value (#22f0ff
- * saturated cyan) and intensity restored to 0.5. The Phase 6c2 dim
- * values (#0e8fa0 / 0.25) were paired with the yellow arcs (which needed
- * to read against a dim cyan core). Phase 6c3 uses white-hot bolts
- * instead of yellow, so the brighter cyan body works better — it bloom-
- * bleeds against the white-hot without becoming a yellow halo.
- *
- * `transparent: true` is set at creation so the death tween's opacity
- * fade works without forcing a shader recompile at runtime (Phase 6c2
- * post-mortem: runtime transparent flip left ghost marks on inner meshes).
+ * `transparent: true` is kept at creation so the death tween's opacity
+ * fade works without forcing a shader recompile at runtime.
  */
 export function createFracturedMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color: 0x88e6ff,
-    emissive: 0x22f0ff,
-    emissiveIntensity: 0.5,
+    emissive: 0x000000,
+    emissiveIntensity: 0,
     flatShading: true,
     metalness: 0,
     roughness: 0.35,

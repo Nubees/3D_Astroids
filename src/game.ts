@@ -938,10 +938,15 @@ export class Game {
       this.isCrystalBurstFrame = true;
 
       // Burst-shape telegraph: a 0.15s preview of where shards will go.
-      // Skipped if the burst was capped (don't telegraph a fake count).
-      if (actual === requestedCount && actual > 0) {
-        this.spawnTelegraph(target.state.position, angles, this.gameTimeSeconds + TELEGRAPH_DURATION_SECONDS, actual);
-      }
+      // Phase 6d follow-up (round 3): telegraph lines disabled per user
+      // feedback. The user said 'disable all these effects, and return
+      // the lightling' — the cyan radial spike lines were reading as
+      // additional 'blooming light flashes' and drawing attention away
+      // from the actual lightning. Shards still spawn at the burst
+      // frame; only the preview lines are gone. Re-enable by uncommenting:
+      //   if (actual === requestedCount && actual > 0) {
+      //     this.spawnTelegraph(target.state.position, angles, this.gameTimeSeconds + TELEGRAPH_DURATION_SECONDS, actual);
+      //   }
 
       // Spawn the actual shards (after the telegraph finishes). The telegraph
       // is purely visual — the shards are dispatched now because the player
@@ -955,26 +960,6 @@ export class Game {
         orientShard(mesh, state.angle);
         this.activeShards.push({ state, mesh });
         this.scene.add(mesh);
-      }
-
-      // White flash on the crystal mesh. Use crystalCharge at the pre-burst
-      // peak (time-to-next ≈ 0) so the flash visibly pulses with the cascade.
-      // (Phase 6c: pulse replaced by crystalCharge so the flash math stays
-      // consistent with the per-frame update in updateCrystalVisuals.)
-      // Phase 6c3 revert: emissive base restored to 0.5, charge² coefficient
-      // restored to 0.6, flash coefficient restored to 0.4. These match the
-      // original Phase 6c values; the dim Phase 6c2 numbers (0.25 / 0.4 / 0.3)
-      // were paired with the dim bloom (threshold 0.35) so the yellow arcs
-      // could read. The new white-hot bolts against brighter cyan need the
-      // brighter pulse to feel like a real charge-up.
-      const inner = target.mesh.children[0];
-      if (inner instanceof Mesh) {
-        const fractured = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
-        if (fractured) {
-          const charge = crystalCharge(scheduler.getTimeToNextBurst(this.gameTimeSeconds));
-          const flash = getBurstFlash(0.075); // peak flash
-          fractured.emissiveIntensity = 0.5 + 0.6 * charge * charge + 0.4 * flash;
-        }
       }
 
       // Shockwave ring at the crystal position.
@@ -1042,47 +1027,38 @@ export class Game {
       if (!target) continue;
       const fracturedMaterial = (target.mesh.userData as CrystalMeshUserData).fracturedMaterial;
       if (!fracturedMaterial) continue;
-      const timeToNext = scheduler.getTimeToNextBurst(gameTime);
-      const charge = crystalCharge(timeToNext);
-      // Scale breathe: 1.0 baseline → 1.05 peak pre-burst. Uses charge^2 so
-      // the breathe "stretches" only in the final third of the interval —
-      // matches the visual intuition of a charging capacitor.
-      const breathe = 1.0 + 0.05 * charge * charge;
-      // Continuous shake of the mesh position (kept from Phase 6b).
-      const shakeSeed = (target.mesh.userData as CrystalMeshUserData).shakeSeed ?? id;
-      const shakeX = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 1.7);
-      const shakeY = 0.05 * Math.sin(gameTime * Math.PI * 2 * 20 + shakeSeed + 0.3) + 0.025 * Math.sin(gameTime * Math.PI * 2 * 37 + shakeSeed + 2.0);
-      target.mesh.position.set(
-        target.state.position.x + shakeX,
-        target.state.position.y + shakeY,
-        0,
-      );
-      target.mesh.scale.set(breathe, breathe, 1);
-      // Apply base pulse; spawnBurst may temporarily spike this for the flash frame.
-      if (!this.isCrystalBurstFrame) {
-        // Phase 6c3 revert: emissive base restored to 0.5, charge² coefficient
-        // restored to 0.6. Matches the original Phase 6c values; the dim
-        // Phase 6c2 numbers (0.25 / 0.4) were paired with dim bloom. Bloom
-        // is now disabled entirely (per user feedback) so the cyan body
-        // shows its full saturation without any glow halo.
-        fracturedMaterial.emissiveIntensity = 0.5 + 0.6 * charge * charge;
-      }
+      // Phase 6d follow-up (round 3): disabled the crystal body pulse,
+      // scale breathe, and position shake. The user said 'disable all
+      // these effects, and return the lightling' — those FX were
+      // overpowering the lightning with a 'blooming light flash' look.
+      // The crystal is now visually static between bursts; only the
+      // lightning animates around it.
+      // Position is left at the crystal's authoritative position with no
+      // shake. Scale stays at 1.0 — no breathe. The mesh only moves when
+      // the Game moves it (e.g. when the asteroid drifts).
+      target.mesh.position.set(target.state.position.x, target.state.position.y, 0);
+      target.mesh.scale.set(1, 1, 1);
+      // Emissive intensity stays at 0 (set by createFracturedMaterial);
+      // the per-frame ramp and the per-burst flash are both no-ops now.
       // Drive the crystal lightning — strike geometry regenerated each frame
       // inside CrystalLightning.update via LightningStrike.update(currentTime),
       // opacity tracks crystalCharge so the bolts only really light up just
       // before a burst.
+      const timeToNext = scheduler.getTimeToNextBurst(gameTime);
+      const charge = crystalCharge(timeToNext);
       const crystalRadius = SIZE_RADIUS[target.state.size];
       const bolt = this.crystalBolts.get(id);
       if (bolt) {
         bolt.update(deltaTime, charge, target.state.position, crystalRadius, id);
       }
-      // Emit sparks from the crystal surface and advance the per-crystal pool.
-      // Each crystal has its own CrystalBoltSparks (built in fractureCrystal),
-      // so draw cost scales linearly with the number of fractured crystals on
-      // screen — acceptable for the typical 1-3 active crystals.
+      // Yellow sparks emission disabled (Phase 6d round 3). The spark
+      // pool is still constructed at fracture time so dispose chains
+      // stay simple, but we don't call emit() so no new sparks spawn
+      // and existing ones age out within SPARK_LIFETIME_SECONDS (0.6s).
+      // Tick the pool anyway so any in-flight particles still update
+      // their fade and age — without this they'd freeze on screen.
       const sparks = this.crystalSparks.get(id);
       if (sparks) {
-        sparks.emit(charge, target.state.position, crystalRadius, deltaTime);
         sparks.update(deltaTime);
       }
     }
