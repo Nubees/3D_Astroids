@@ -65,7 +65,7 @@ import {
 import {
   CrystalBoltSparks,
   CrystalFractureScheduler,
-  ExtrudingBolt,
+  CrystalLightning,
   computeTimeBonusTier,
   createBurstTelegraph,
   createFracturedMaterial,
@@ -249,7 +249,7 @@ export class Game {
   private crystalDeathTimes = new Map<number, number>();
   private crystalShardsAbsorbed = new Map<number, number>();
   private crystalDeathTweens: CrystalDeathTween[] = [];
-  private crystalBolts = new Map<number, ExtrudingBolt>();
+  private crystalBolts = new Map<number, CrystalLightning>();
   // Per-crystal spark particle pools. One Points draw call per fractured
   // crystal on screen — disposed with the crystal in destroyCrystal.
   private crystalSparks = new Map<number, CrystalBoltSparks>();
@@ -341,10 +341,10 @@ export class Game {
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
       if (this.bloomComposer) this.bloomComposer.setSize(w, h);
-      // Phase 6c follow-up: Line2 + LineMaterial needs the viewport
-      // resolution in pixels to compute screen-space line thickness. Push
-      // it to every active bolt so they stay thick after a window resize
-      // (otherwise they'd render at 0px on the new resolution).
+      // Phase 6c follow-up: Line2 + LineMaterial needed the viewport
+      // resolution in pixels to compute screen-space line thickness. The
+      // Phase 6d CrystalLightning class keeps setResolution as a no-op so
+      // this loop still compiles but does nothing — kept for API compat.
       for (const bolt of this.crystalBolts.values()) {
         bolt.setResolution(w, h);
       }
@@ -838,7 +838,7 @@ export class Game {
    * The visual is now carried per-frame by:
    *   - emissiveIntensity pulse via crystalCharge
    *   - scale breathe ±5% via crystalCharge
-   *   - ExtrudingBolt rebuilds + opacity flicker
+   *   - CrystalLightning rebuilds + opacity flicker
    *   - Per-crystal CrystalBoltSparks emission bursts from the surface
    */
   private fractureCrystal(asteroid: LiveAsteroid): void {
@@ -849,12 +849,11 @@ export class Game {
     const fracturedMaterial = createFracturedMaterial();
     swapToFracturedMaterial(asteroid.mesh, fracturedMaterial);
 
-    // 2. Build the extruding-bolt Line2 mesh and attach to scene.
-    //    ExtrudingBolt takes only a seed; position is set per-frame in update().
-    //    Line2 needs the viewport resolution so its custom shader can compute
-    //    screen-space thickness. Pulled from the renderer's drawing buffer size
-    //    (CSS pixels × DPR).
-    const bolt = new ExtrudingBolt(crystalId);
+    // 2. Build the CrystalLightning mesh and attach to scene.
+    //    CrystalLightning takes only a seed; position is set per-frame in update().
+    //    setResolution is a no-op kept for API compat with the old ExtrudingBolt
+    //    signature — LightningStrike does not need viewport resolution.
+    const bolt = new CrystalLightning(crystalId);
     bolt.setResolution(
       this.renderer.domElement.clientWidth,
       this.renderer.domElement.clientHeight,
@@ -1068,9 +1067,10 @@ export class Game {
         // shows its full saturation without any glow halo.
         fracturedMaterial.emissiveIntensity = 0.5 + 0.6 * charge * charge;
       }
-      // Drive the extruding bolt — geometry rebuilt every BOLT_REBUILD_INTERVAL
-      // inside ExtrudingBolt.update, intensity tracks crystalCharge so the
-      // bolts only really light up just before a burst.
+      // Drive the crystal lightning — strike geometry regenerated each frame
+      // inside CrystalLightning.update via LightningStrike.update(currentTime),
+      // opacity tracks crystalCharge so the bolts only really light up just
+      // before a burst.
       const crystalRadius = SIZE_RADIUS[target.state.size];
       const bolt = this.crystalBolts.get(id);
       if (bolt) {
@@ -1433,7 +1433,7 @@ export class Game {
     this.fractureSchedulers.delete(crystalId);
     this.crystalDeathTimes.delete(crystalId);
     this.crystalShardsAbsorbed.delete(crystalId);
-    // Phase 6c3: remove the extruding-bolt Line2 + per-crystal spark pool
+    // Phase 6d: remove the CrystalLightning mesh + per-crystal spark pool
     // from the scene and dispose their GPU resources. Done before the death
     // tween starts so the bolt does not flicker on a fading mesh.
     const bolt = this.crystalBolts.get(crystalId);

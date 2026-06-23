@@ -31,9 +31,8 @@ import {
 //          (charge-driven pulse, scale breathe, vendored fractal-branched
 //          lightning strikes, per-crystal spark particles). The cracked-vein
 //          texture (Phase 6c1), the halo-style ElectricityArc (Phase 6c2),
-//          the ExtrudingBolt zigzag (Phase 6c3), and the scene-wide
-//          SparkParticles pool have all been removed/replaced — see git
-//          history if you need to resurrect any of them.
+//          and the Phase 6c3 ExtrudingBolt zigzag have all been removed/
+//          replaced — see git history if you need to resurrect any of them.
 // Setup:   Imported by src/game.ts and tests/shard-burst.test.ts.
 // Issues:  Phase 6c3's ExtrudingBolt used a hand-rolled zigzag polyline
 //          rebuilt every frame from `computeBoltEndpoints`. With 5 bolts ×
@@ -42,14 +41,17 @@ import {
 //          uniform, no real branching, and the jitter didn't feel like
 //          crackling electricity.
 // Fix:     Phase 6d's CrystalLightning wraps the vendored r149
-//          `LightningStrike` (BufferGeometry subclass). The library does
+//          `LightningStrike` (BufferGeometry subclass from
+//          src/vendor/three-r149-LightningStrike.js). The library does
 //          the fractal subdivision via 4D simplex noise `noise4d(x, y, z,
 //          time)`, so per-frame flicker comes "for free" from the time
 //          component. STRIKES_PER_CRYSTAL=4 independent strikes per crystal
 //          read as a Tesla-coil / plasma-globe multi-streamer. Each strike
 //          has its own birthTime/deathTime (50-150ms lifetime) so adjacent
 //          strikes overlap slightly and the visual feels continuous rather
-//          than blinky.
+//          than blinky. CrystalLightning has the same
+//          `attach/detach/update/dispose/setResolution` surface as the old
+//          ExtrudingBolt, so game.ts wire-up was a one-line rename.
 // Gotchas:
 //  - crystalCharge uses timeToNextBurst (NOT a free-running sine) so the
 //    pulse visibly intensifies as the next burst approaches — same shape as
@@ -73,6 +75,10 @@ import {
 //    `LightningStrike.copyParameters` exists for partial refreshes, but
 //    full disposal+rebuild is simpler and the cost is bounded (4 strikes,
 //    every 50-150ms).
+//  - setResolution(w, h) on CrystalLightning is a no-op kept for API compat
+//    with the old ExtrudingBolt interface (game.ts calls it on construction
+//    AND on canvas resize). LightningStrike doesn't need viewport
+//    resolution.
 //  - CrystalBoltSparks is a per-crystal Points pool: one geometry, one
 //    material, one draw call per crystal. The pool size is 40; when full,
 //    oldest particles recycle.
@@ -376,22 +382,22 @@ const STRIKE_RADIUS1_FRAC = 0.02;
 /**
  * ── My Rules ──
  * Purpose: Phase 6d drop-in replacement for the rejected Phase 6c3
- *   `ExtrudingBolt`. Wraps the vendored r149 `LightningStrike` so the
- *   visual reads as real fractal-branched lightning instead of a stiff
- *   hand-rolled zigzag polyline.
- * Setup:  Imported by `src/game.ts` as `CrystalLightning` (Task 3 swaps
- *   the import line from `ExtrudingBolt`). Constructor takes a per-
- *   crystal `seed` (currently unused — the time-varying geometry comes
- *   from `LightningStrike`'s internal 4D simplex noise). Each frame the
- *   Game calls `update(dt, charge, worldPos, radius, seed)`; the parent
- *   mesh's position is set to `worldPos` and the shared material's
- *   opacity is driven by `0.3 + 0.7 * charge`. The strike meshes are
- *   CHILDREN of `this.mesh` (a parent `Mesh` with empty BufferGeometry +
- *   shared `MeshBasicMaterial`) so the test can read `bolt.mesh.material`
- *   directly and a single opacity change affects every strike.
- * Issues: ExtrudingBolt's per-frame regenerate() rewrote the same ~150
- *   vertex buffers every frame; the bolts visibly shifted but the geometry
- *   was a 2D polyline so it read as "scribble" not "lightning".
+ *   hand-rolled zigzag bolt. Wraps the vendored r149 `LightningStrike`
+ *   so the visual reads as real fractal-branched lightning instead of a
+ *   stiff hand-rolled zigzag polyline.
+ * Setup:  Imported by `src/game.ts` as `CrystalLightning`. Constructor
+ *   takes a per-crystal `seed` (currently unused — the time-varying
+ *   geometry comes from `LightningStrike`'s internal 4D simplex noise).
+ *   Each frame the Game calls `update(dt, charge, worldPos, radius, seed)`;
+ *   the parent mesh's position is set to `worldPos` and the shared
+ *   material's opacity is driven by `0.3 + 0.7 * charge`. The strike
+ *   meshes are CHILDREN of `this.mesh` (a parent `Mesh` with empty
+ *   BufferGeometry + shared `MeshBasicMaterial`) so the test can read
+ *   `bolt.mesh.material` directly and a single opacity change affects
+ *   every strike.
+ * Issues: Phase 6c3's per-frame regenerate() rewrote the same ~150
+ *   vertex buffers every frame; the bolts visibly shifted but the
+ *   geometry was a 2D polyline so it read as "scribble" not "lightning".
  * Fix:    LightningStrike uses `noise4d(x, y, z, time)` to generate fractal
  *   ramification per call to `geometry.update(currentTime)`. Multiple
  *   strikes (STRIKES_PER_CRYSTAL=4) with short, overlapping lifetimes
@@ -407,9 +413,9 @@ const STRIKE_RADIUS1_FRAC = 0.02;
  *     LightningStrike(...)` to refresh birthTime/deathTime cleanly.
  *     The library exposes `LightningStrike.copyParameters` for partial
  *     refreshes, but full disposal+rebuild is simpler and bounded.
- *   - `setResolution(w, h)` is a no-op kept for API compat with the
- *     `ExtrudingBolt` interface (`game.ts` calls it on construction
- *     AND on canvas resize). LightningStrike doesn't need it.
+ *   - `setResolution(w, h)` is a no-op kept for API compat with the old
+ *     ExtrudingBolt interface (`game.ts` calls it on construction AND on
+ *     canvas resize). LightningStrike doesn't need viewport resolution.
  */
 export class CrystalLightning {
   readonly mesh: Mesh;
@@ -807,147 +813,6 @@ export function createBurstTelegraph(position: Vector2, angles: readonly number[
     depthWrite: false,
   });
   return new LineSegments(geometry, material);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Vector helpers for the arc geometry (kept local to avoid cluttering
-// src/utils with single-file math).
-// ═══════════════════════════════════════════════════════════════════════════
-
-function sampleUnitVector(rng: () => number): { x: number; y: number; z: number } {
-  // Marsaglia method: pick (x, y) uniformly in the unit disk, then project.
-  let x1: number;
-  let x2: number;
-  let s: number;
-  do {
-    x1 = rng() * 2 - 1;
-    x2 = rng() * 2 - 1;
-    s = x1 * x1 + x2 * x2;
-  } while (s >= 1 || s === 0);
-  const factor = 2 * Math.sqrt(1 - s);
-  return { x: x1 * factor, y: x2 * factor, z: 1 - 2 * s };
-}
-
-function scaleVec(v: { x: number; y: number; z: number }, s: number): { x: number; y: number; z: number } {
-  return { x: v.x * s, y: v.y * s, z: v.z * s };
-}
-
-function lerpVec(
-  a: { x: number; y: number; z: number },
-  b: { x: number; y: number; z: number },
-  t: number,
-): { x: number; y: number; z: number } {
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
-}
-
-function addVec(
-  a: { x: number; y: number; z: number },
-  b: { x: number; y: number; z: number },
-): { x: number; y: number; z: number } {
-  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
-}
-
-function normalize(v: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
-  const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-  if (len === 0) return { x: 0, y: 0, z: 0 };
-  return { x: v.x / len, y: v.y / len, z: v.z / len };
-}
-
-/**
- * Mulberry32 seeded RNG. Produces deterministic floats in [0, 1) so the
- * same crystal seed always generates the same arc pattern and spark
- * distribution (per emit frame — `Math.random` in `emit()` is intentional
- * for inter-frame variety on the same crystal).
- */
-function mulberry32(seed: number): () => number {
-  let s = seed >>> 0;
-  return (): number => {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/**
- * Compute the position + color buffers for ONE extruding lightning bolt.
- * Pure function — no WebGL/Three.js types — so it can be unit-tested.
- *
- * The bolt starts just inside the crystal surface (radius * 0.95) at a
- * random direction, and extends 1.5-2.5 crystal-radii OUTWARD along that
- * direction (with ≤ 0.3 perpendicular jitter for organic feel). The bolt
- * has (segs + 1) vertices forming a jagged polyline.
- *
- * Colors are baked as per-vertex brightness in [0.6, 1.0] (white-hot tint).
- * The caller multiplies by intensity at runtime.
- *
- * Used by ExtrudingBolt (which wraps the result in a Line2 mesh).
- *
- * ── My Rules ──
- * Purpose: Pure helper that lets ExtrudingBolt (Task 3) wrap a jagged,
- *   white-hot polyline in a Line2 mesh without pulling WebGL/Three.js
- *   into the unit tests. Determinism matters because the same crystal
- *   seed must always produce the same bolt shape.
- * Setup:  Reuses `mulberry32`, `sampleUnitVector`, `scaleVec`, `addVec`,
- *   `lerpVec`, and the new `normalize` helper from this file.
- * Issues: WebGL/Three.js types forced us to keep the geometry math in
- *   a separate file or to mock Three.js in vitest.
- * Fix:    Made the function pure — returns Float32Arrays only, no Mesh,
- *   so vitest can call it directly without a WebGL context.
- * Gotchas:
- *   - The end direction is `normalize(startDir + 0.3*jitter)`. If
- *     `startDir` and `jitter` happen to point exactly opposite each
- *     other the result is the zero vector; `normalize` returns the
- *     origin vector in that case, which then scales to (0,0,0). In
- *     practice this is vanishingly rare with mulberry32; if it ever
- *     becomes a problem, retry the jitter until dot(startDir,jitter)
- *     is non-negative.
- *   - Colors are baked at construction; runtime intensity must be
- *     applied by the caller (ExtrudingBolt), not here.
- */
-export function computeBoltEndpoints(
-  seed: number,
-  radius: number,
-  segs: number,
-): { positions: Float32Array; colors: Float32Array } {
-  const rng = mulberry32(seed);
-  const startDir = sampleUnitVector(rng);
-  const start = scaleVec(startDir, radius * 0.95);
-  const extension = 1.5 + rng() * 1.0;
-  const endDir = normalize(addVec(startDir, scaleVec(sampleUnitVector(rng), 0.3)));
-  const end = scaleVec(endDir, radius * extension);
-
-  const vertexCount = segs + 1;
-  const positions = new Float32Array(vertexCount * 3);
-  const colors = new Float32Array(vertexCount * 3);
-  for (let s = 0; s <= segs; s += 1) {
-    const t = s / segs;
-    let p: { x: number; y: number; z: number };
-    if (s === 0) {
-      p = start;
-    } else if (s === segs) {
-      p = end;
-    } else {
-      const lerped = lerpVec(start, end, t);
-      // Phase 6c3 follow-up: crank jitter amplitude proportional to t so
-      // midpoints near the tip wiggle more than midpoints near the root,
-      // giving the bolt a "whip crack" shape rather than a uniform wobble.
-      // The base amplitude of 0.6 is roughly twice the previous 0.3, so the
-      // per-segment displacement is now visually obvious at any zoom.
-      const jitter = scaleVec(sampleUnitVector(rng), 0.3 + 0.3 * t);
-      p = addVec(lerped, jitter);
-    }
-    const bright = 0.6 + 0.4 * rng();
-    positions[s * 3] = p.x;
-    positions[s * 3 + 1] = p.y;
-    positions[s * 3 + 2] = p.z;
-    // White-hot tint baked per vertex
-    colors[s * 3] = bright * 1.0;       // R
-    colors[s * 3 + 1] = bright * 0.98;  // G
-    colors[s * 3 + 2] = bright * 0.92;  // B
-  }
-  return { positions, colors };
 }
 
 /**
