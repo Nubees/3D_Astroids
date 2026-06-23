@@ -1059,13 +1059,17 @@ export class Game {
       if (bolt) {
         bolt.update(deltaTime, charge, target.state.position, crystalRadius, id);
       }
-      // Emit yellow sparks from the crystal surface and advance the
-      // per-crystal pool. `rateScale` 0.65 (Phase 6d round 5) dials
-      // down the spark rate so the sparks read as supporting FX
-      // around the now-dominant bolt instead of competing with it.
+      // Yellow sparks disabled (Phase 6d round 6). The user said
+      // '-disbale Yellow spark particles' — they're reading as
+      // visual noise against the now-dominant bolt and the
+      // re-enabled breathe / shake. The pool is still constructed
+      // and ticked (sparks.update) so any in-flight particles age
+      // out cleanly within SPARK_LIFETIME_SECONDS (0.6s), and the
+      // dispose chain in destroyCrystal stays simple. Re-enable by
+      // uncommenting the sparks.emit() line.
       const sparks = this.crystalSparks.get(id);
       if (sparks) {
-        sparks.emit(charge, target.state.position, crystalRadius, deltaTime, 0.65);
+        // sparks.emit(charge, target.state.position, crystalRadius, deltaTime, 0.65);
         sparks.update(deltaTime);
       }
     }
