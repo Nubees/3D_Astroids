@@ -104,7 +104,9 @@ describe('CrystalBoltSparks', () => {
 
   it('emits sparks when charge > 0', () => {
     const sparks = new CrystalBoltSparks(42);
-    sparks.emit(0.5, { x: 0, y: 0 }, 1.0, 0.016);
+    // deltaTime 0.05s × rate 35 (charge=0.5 → rate=35) → expected ~1.75+r,
+    // capped at 8 per frame. Rounds to ≥1 in 100% of trials.
+    sparks.emit(0.5, { x: 0, y: 0 }, 1.0, 0.05);
     const positionsAttr = (sparks.points.geometry.getAttribute('position') as { array: Float32Array });
     let movedCount = 0;
     for (let i = 0; i < positionsAttr.array.length; i += 3) {

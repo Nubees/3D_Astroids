@@ -543,15 +543,20 @@ export class ExtrudingBolt {
  *           `sparks.emit(charge, worldPos, radius, deltaTime)` and
  *           `sparks.update(deltaTime)` once per crystal.
  * Gotchas:  Sprite size = base × (1 + multiplier × charge²) × (300 / -z)
- *           in the vertex shader. Distance scaling via standard
- *           perspective-projection trick.
+ *           in the vertex shader, where charge² is read from the per-vertex
+ *           `aChargeSq` attribute (baked at birth, frozen until the particle
+ *           is recycled). The fade opacity is a separate `aAlpha` attribute
+ *           driven by `update()` each frame; the two channels no longer share
+ *           storage. Distance scaling via standard perspective-projection
+ *           trick.
  */
 export class CrystalBoltSparks {
   readonly points: Points;
   private readonly positions: Float32Array;
   private readonly velocities: Float32Array;
   private readonly ages: Float32Array;
-  private readonly alphas: Float32Array;
+  private readonly alphas: Float32Array;       // fade opacity, written by update() each frame
+  private readonly chargeSqs: Float32Array;    // charge^2 baked at birth, frozen until recycled
   private nextIndex = 0;
 
   constructor(seed: number) {
@@ -560,9 +565,11 @@ export class CrystalBoltSparks {
     this.velocities = new Float32Array(SPARK_POOL_SIZE * 3);
     this.ages = new Float32Array(SPARK_POOL_SIZE).fill(SPARK_LIFETIME_SECONDS);
     this.alphas = new Float32Array(SPARK_POOL_SIZE);
+    this.chargeSqs = new Float32Array(SPARK_POOL_SIZE);
     const geometry = new BufferGeometry();
     geometry.setAttribute('position', new BufferAttribute(this.positions, 3));
     geometry.setAttribute('aAlpha', new BufferAttribute(this.alphas, 1));
+    geometry.setAttribute('aChargeSq', new BufferAttribute(this.chargeSqs, 1));
     const material = new ShaderMaterial({
       uniforms: {
         uColor: { value: { x: BOLT_COLOR_R, y: BOLT_COLOR_G, z: BOLT_COLOR_B } },
@@ -573,16 +580,14 @@ export class CrystalBoltSparks {
       },
       vertexShader: `
         attribute float aAlpha;
+        attribute float aChargeSq;
         varying float vAlpha;
         uniform float uSize;
         uniform float uChargeSizeMul;
         void main() {
           vAlpha = aAlpha;
-          // aAlpha encodes charge² — packed into the alpha channel so we
-          // don't need a separate per-vertex charge attribute.
-          float chargeSq = aAlpha * (1.0 / 0.85); // approximate; see note
           vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          float sizeMul = 1.0 + uChargeSizeMul * chargeSq;
+          float sizeMul = 1.0 + uChargeSizeMul * aChargeSq;
           gl_PointSize = uSize * sizeMul * (300.0 / -mvPosition.z);
           gl_Position = projectionMatrix * mvPosition;
         }
@@ -640,12 +645,17 @@ export class CrystalBoltSparks {
       this.velocities[i * 3 + 1] = dirY * speed;
       this.velocities[i * 3 + 2] = 0;
       this.ages[i] = 0;
-      // Pack charge² into alpha upper bits so the vertex shader can scale
-      // sprite size. We use alpha as the carrier.
-      this.alphas[i] = 0.85 * (0.5 + charge * charge * 0.5);
+      // aAlpha carries the fade opacity (1.0 at birth; update() drives it down).
+      // aChargeSq carries the squared charge the particle was born with; the
+      // vertex shader reads it directly for sprite-size scaling so the size
+      // stays correct across the full lifetime instead of decaying with the
+      // fade channel.
+      this.alphas[i] = 1.0;
+      this.chargeSqs[i] = charge * charge;
     }
     (this.points.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
     (this.points.geometry.getAttribute('aAlpha') as BufferAttribute).needsUpdate = true;
+    (this.points.geometry.getAttribute('aChargeSq') as BufferAttribute).needsUpdate = true;
   }
 
   /**
@@ -661,19 +671,21 @@ export class CrystalBoltSparks {
         this.positions[i * 3 + 1] = 9999;
         this.positions[i * 3 + 2] = 0;
         this.alphas[i] = 0;
+        this.chargeSqs[i] = 0;
         alphaDirty = true;
         continue;
       }
       this.positions[i * 3] += this.velocities[i * 3] * deltaTime;
       this.positions[i * 3 + 1] += this.velocities[i * 3 + 1] * deltaTime;
       const lifeFrac = this.ages[i] / SPARK_LIFETIME_SECONDS;
-      // Slight ease-out fade
-      this.alphas[i] = (1 - lifeFrac) * (1 - lifeFrac) * 0.85;
+      // Slight ease-out fade; aChargeSq is frozen at birth so size stays correct.
+      this.alphas[i] = (1 - lifeFrac) * (1 - lifeFrac);
       alphaDirty = true;
     }
     (this.points.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
     if (alphaDirty) {
       (this.points.geometry.getAttribute('aAlpha') as BufferAttribute).needsUpdate = true;
+      (this.points.geometry.getAttribute('aChargeSq') as BufferAttribute).needsUpdate = true;
     }
   }
 
