@@ -431,10 +431,18 @@ export class CrystalLightning {
 
   constructor(seed: number) {
     void seed;
+    // Color: pale cyan-white at 0.55 intensity (NOT full 0xfff0d0).
+    //   With 4 overlapping strikes + AdditiveBlending, a near-white color
+    //   at full opacity sums past 1.0 in every channel and the framebuffer
+    //   clamps to white — washing out the whole screen. The 0.55 base
+    //   leaves headroom so 4 strikes at peak charge sum to a bright
+    //   cyan-white flash, not pure white. Matches the existing crystal
+    //   cyan tint so the lightning reads as the same "electrical discharge"
+    //   event, not a separate yellow/white fire.
     this.material = new MeshBasicMaterial({
-      color: 0xfff0d0, // warm white-hot
+      color: 0x8cd0ff,
       transparent: true,
-      opacity: 0.3,
+      opacity: 0.2,
       blending: AdditiveBlending,
       depthWrite: false,
     });
@@ -564,9 +572,13 @@ export class CrystalLightning {
       s.geometry.update(this.currentTime);
     }
     // Drive opacity on the shared material so every strike fades together.
-    // Floor 0.3 keeps bolts visible from the start of the burst window;
-    // ceiling 1.0 (max alpha) makes them pop at peak charge.
-    this.material.opacity = 0.3 + 0.7 * charge;
+    // Floor 0.15 keeps bolts visible from the start of the burst window
+    // (still 4× 0.55-color additive = 2.2 → clamped, so the floor has to be
+    // very low to avoid saturating during continuous crackling). Ceiling
+    // 0.55 caps the per-strike contribution so 4 overlapping strikes at
+    // peak charge sum to ~2.2, not 4.0 — still bright cyan-white, not
+    // pure white screen.
+    this.material.opacity = 0.15 + 0.4 * charge;
   }
 
   /**
