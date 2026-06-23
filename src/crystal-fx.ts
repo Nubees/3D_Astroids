@@ -355,11 +355,14 @@ export const BOLT_COLOR_B = 0.92;
 
 /**
  * How many independent LightningStrike instances per fractured crystal.
- * 4 strikes a balance — enough to read as a multi-streamer, few enough
- * that the per-frame fractal-subdivision cost stays under 1ms even on
- * mid-range laptops.
+ * Phase 6d follow-up: was 4 (multi-streamer Tesla-coil look). User reported
+ * the resulting additive glow as "too big and strong" — 4 strikes at full
+ * thickness summed past 1.0 even with the dimmed color and capped opacity.
+ * 2 strikes still reads as a crackling multi-streamer but with ~half the
+ * additive contribution per frame, so the bolt reads as "small electric
+ * arcs around the crystal" not "the whole crystal is electrified".
  */
-const STRIKES_PER_CRYSTAL = 4;
+const STRIKES_PER_CRYSTAL = 2;
 
 /**
  * Per-strike lifetime range. The yomboprime demo uses 1.0–2.5s for ground
@@ -371,13 +374,15 @@ const STRIKE_LIFETIME_MIN_S = 0.05;
 const STRIKE_LIFETIME_MAX_S = 0.15;
 
 /**
- * Strike radius range. The r149 defaults are 1.0; we want thin bolts that
- * read as "lightning" not "ribbon" so we scale to crystal-radius fractions.
- * The trunk tapers (0.05 → 0.02) so the strike gets thinner as it leaves
- * the crystal, matching how a real arc attenuates with distance.
+ * Strike radius range. Phase 6d follow-up: trunk thickness halved (0.05 → 0.025)
+ * and tip thickness halved (0.02 → 0.012) so the bolts read as fine electrical
+ * arcs instead of thick ribbons. With 2 strikes (down from 4) and the new
+ * opacity cap of 0.35 (down from 0.55), the per-frame additive contribution
+ * drops by ~6× from the Phase 6d initial tuning — visually a much quieter
+ * crackle, still readable against the cyan crystal.
  */
-const STRIKE_RADIUS0_FRAC = 0.05;
-const STRIKE_RADIUS1_FRAC = 0.02;
+const STRIKE_RADIUS0_FRAC = 0.025;
+const STRIKE_RADIUS1_FRAC = 0.012;
 
 /**
  * ── My Rules ──
@@ -572,13 +577,13 @@ export class CrystalLightning {
       s.geometry.update(this.currentTime);
     }
     // Drive opacity on the shared material so every strike fades together.
-    // Floor 0.15 keeps bolts visible from the start of the burst window
-    // (still 4× 0.55-color additive = 2.2 → clamped, so the floor has to be
-    // very low to avoid saturating during continuous crackling). Ceiling
-    // 0.55 caps the per-strike contribution so 4 overlapping strikes at
-    // peak charge sum to ~2.2, not 4.0 — still bright cyan-white, not
-    // pure white screen.
-    this.material.opacity = 0.15 + 0.4 * charge;
+    // Phase 6d follow-up: peak dropped 0.55 → 0.35 and floor 0.15 → 0.10.
+    // Combined with STRIKES_PER_CRYSTAL=2 and halved strike radius, the
+    // additive contribution per frame is ~1/4 of the Phase 6d initial
+    // tuning — fine electric arcs around the crystal, not a wash of glow.
+    // 2 strikes at peak × 0.35-color = 0.7 per channel, so channels still
+    // resolve (no white-out) and the bolts stay readable without dominating.
+    this.material.opacity = 0.1 + 0.25 * charge;
   }
 
   /**
@@ -605,23 +610,34 @@ export class CrystalLightning {
 
   /**
    * Sample a point in the space OUTSIDE the crystal surface — used as the
-   * strike's destination so the bolt visibly extends 1.5-2.5 crystal-radii
-   * away from the body. Implementation: take a surface point and stretch
-   * by a random factor in [1.5, 2.5] divided by the surface offset (0.95).
+   * strike's destination so the bolt visibly extends beyond the body.
+   * Phase 6d follow-up: was 1.5..2.5 crystal-radii (bolts reaching far
+   * into the background). User feedback said the bolts were "too big";
+   * narrowed to 1.0..1.4 so the strikes stay close to the crystal, reading
+   * as surface discharge rather than long arcs to the background.
    */
   private randomOuterPoint(radius: number): Vector3 {
     const surface = this.randomSurfacePoint(radius);
-    const extension = 1.5 + Math.random() * 1.0;
+    const extension = 1.0 + Math.random() * 0.4;
     return surface.multiplyScalar(extension / 0.95);
   }
 
   /**
-   * Release GPU resources.
+   * Release GPU resources. Also detaches every strike child mesh from the
+   * parent and clears the strikes array — this prevents stale geometry
+   * references from lingering if `this.mesh` is ever re-added to a scene
+   * after dispose (defensive: current game.ts callers always detach before
+   * disposing, but a stale child mesh with a disposed material could draw
+   * as a "ghost mark" if the parent re-entered the scene graph).
    */
   dispose(): void {
     for (const s of this.strikes) {
+      // Remove the strike's Mesh from the parent before disposing its
+      // geometry, so the child slot is truly empty.
+      this.mesh.remove(s.mesh);
       s.geometry.dispose();
     }
+    this.strikes.length = 0;
     this.material.dispose();
   }
 }
