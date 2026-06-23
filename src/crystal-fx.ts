@@ -53,11 +53,11 @@ import {
 //    buffers (BOLTS_PER_CRYSTAL × (BOLT_SEGMENT_MAX + 1) vertices) and
 //    rewrites them in place on every regenerate(). This avoids per-frame
 //    Float32Array allocation and keeps the per-crystal alloc count at 1.
-//  - SparkParticles is a scene-wide Points pool: one geometry, one material,
-//    one draw call for the whole game regardless of how many crystals are
-//    fractured. The pool size is 120; when full, oldest particles recycle.
-//    (Phase 6c3 plan will scope sparks per-crystal in a later task; this
-//    file still ships the scene-wide pool until then.)
+//  - CrystalBoltSparks is a per-crystal Points pool (Phase 6c3): one geometry,
+//    one material, one draw call per crystal. The pool size is 40; when full,
+//    oldest particles recycle. The Phase 6c2 scene-wide pool (120 particles
+//    shared across all crystals) was replaced so dispose chains are simpler —
+//    when a crystal dies, its spark pool dies with it.
 //  - createFracturedMaterial returns a bright cyan MeshStandardMaterial with
 //    no emissiveMap (the texture is gone) and an emissiveIntensity that the
 //    Game drives from crystalCharge each frame. emissive color is the same
@@ -102,18 +102,33 @@ const ARCS_PER_CRYSTAL = 3;
 const ARC_REBUILD_INTERVAL_SECONDS = 0.07;
 
 /**
- * Spark pool size. Shared across all fractured crystals; when full, the
- * oldest particle is recycled. 120 is the worst-case budget (4 crystals
- * fractured at once × 30 active particles each); most gameplay sees 1-2
- * crystals fractured, so the pool is rarely near-full.
+ * Spark pool size per fractured crystal. Pool is per-crystal (not
+ * scene-wide), so the worst case is 4 crystals fractured × 40 sparks
+ * each = 160 active particles, but typically 1-2 crystals fractured.
+ * Phase 6c3: was 120 in a single scene-wide pool. Per-crystal scoping
+ * simplifies dispose chains (one pool dies with one crystal).
  */
-const SPARK_POOL_SIZE = 120;
+const SPARK_POOL_SIZE = 40;
 
 /**
- * Per-particle lifetime in seconds. 0.6s gives a spark enough time to drift
- * outward and fade without lingering in the air after the burst.
+ * Per-particle lifetime in seconds. Phase 6c3: was 0.6s in Phase 6c2,
+ * kept the same. Long enough to read as "sparks flying outward", short
+ * enough to clear before the next burst.
  */
 const SPARK_LIFETIME_SECONDS = 0.6;
+
+/**
+ * Spark sprite base size in pixels. Phase 6c3: was 14 in Phase 6c2.
+ * Bumped to 18 base, then multiplied by 2.5× at peak charge (40+ effective).
+ * Distance scaling keeps it proportional to crystal at any zoom.
+ */
+const SPARK_BASE_SIZE_PX = 18;
+
+/**
+ * Multiplier applied to spark sprite size at charge = 1.0. Linear in
+ * charge² so the size ramps in the back half of the burst window.
+ */
+const SPARK_SIZE_CHARGE_MULTIPLIER = 2.5;
 
 /**
  * Score-tier result returned by computeTimeBonusTier. `bonus` is the integer
@@ -514,33 +529,24 @@ export class ExtrudingBolt {
 }
 
 /**
- * Scene-wide spark particle pool. One Points geometry, one PointsMaterial,
- * one draw call for the entire game. Crystals emit sparks into the pool
- * each frame at a rate proportional to crystalCharge²; particles drift
- * outward, fade, and recycle when their lifetime ends.
+ * Per-crystal spark particle pool. One Points geometry, one PointsMaterial,
+ * one draw call per crystal (not per spark). Particles drift outward at
+ * 3-6 units/s, lifetime 0.6s, then recycle.
  *
- * Setup:    `Game` constructs one SparkParticles and adds it to the scene
- *           at startup. Each frame, for each fractured crystal, call
- *           `sparks.emit(crystalCharge, worldPos, radius, seed, deltaTime)`.
- *           Call `sparks.update(deltaTime)` once per frame regardless of
- *           whether any crystals are fractured.
- * Issues:   Per-crystal particle pools (one Points per crystal) would mean
- *           N draw calls for N crystals and would scale poorly when the
- *           burst cascade fires 4 crystals at once.
- * Fix:      Single scene-wide pool of SPARK_POOL_SIZE particles. Emission
- *           is keyed on crystalCharge², so the back half of the burst
- *           window sees the most sparks and the front half sees almost
- *           none. Particles drift radially outward at 1.5–3.0 units/s,
- *           gravity-free, with additive blending so they read as
- *           electricity rather than dust.
- * Gotchas:  The position/velocity/age arrays are preallocated. Writing to
- *           index `i` while another frame reads from index `j` is safe
- *           because each particle owns one slot for its entire lifetime.
- *           The `nextIndex` cursor wraps at SPARK_POOL_SIZE so the pool
- *           is strictly bounded; older particles are overwritten when the
- *           pool is full.
+ * Phase 6c3 — replaces Phase 6c2's scene-wide SparkParticles. The scene-wide
+ * pool had the right idea (one draw call) but the per-crystal scoping
+ * simplifies dispose chains. The visual goal is the same: clearly visible
+ * sparks flying outward from the crystal as it charges up.
+ *
+ * Setup:    Game constructs one CrystalBoltSparks per fractured crystal
+ *           and adds it to the scene. Each frame, call
+ *           `sparks.emit(charge, worldPos, radius, deltaTime)` and
+ *           `sparks.update(deltaTime)` once per crystal.
+ * Gotchas:  Sprite size = base × (1 + multiplier × charge²) × (300 / -z)
+ *           in the vertex shader. Distance scaling via standard
+ *           perspective-projection trick.
  */
-export class SparkParticles {
+export class CrystalBoltSparks {
   readonly points: Points;
   private readonly positions: Float32Array;
   private readonly velocities: Float32Array;
@@ -548,39 +554,36 @@ export class SparkParticles {
   private readonly alphas: Float32Array;
   private nextIndex = 0;
 
-  constructor() {
+  constructor(seed: number) {
+    void seed;
     this.positions = new Float32Array(SPARK_POOL_SIZE * 3);
     this.velocities = new Float32Array(SPARK_POOL_SIZE * 3);
     this.ages = new Float32Array(SPARK_POOL_SIZE).fill(SPARK_LIFETIME_SECONDS);
     this.alphas = new Float32Array(SPARK_POOL_SIZE);
     const geometry = new BufferGeometry();
     geometry.setAttribute('position', new BufferAttribute(this.positions, 3));
-    // Per-particle alpha attribute drives the fade in the custom shader below.
-    // Stock PointsMaterial has a single shared opacity, so we use a small
-    // ShaderMaterial that reads per-vertex alpha and fades each particle
-    // independently over its lifetime.
     geometry.setAttribute('aAlpha', new BufferAttribute(this.alphas, 1));
     const material = new ShaderMaterial({
       uniforms: {
-        // Phase 6c follow-up: uColor was cyan (0.6, 0.97, 1.0) which read as
-        // "more of the same glow" rather than yellow discharge particles.
-        // Now matches ARC_COLOR_R/G/B so arcs + sparks read as one cohesive
-        // electric event.
-        uColor: { value: { x: SPARK_COLOR_R, y: SPARK_COLOR_G, z: SPARK_COLOR_B } },
-        // Phase 6c follow-up: bumped 9.0 → 14.0 so the sparks are clearly
-        // visible as discrete dots rather than single-pixel stars lost in the
-        // cyan bloom. Combined with the yellow color fix this is what makes
-        // the "electricity flashing outward" cue actually land.
-        uSize: { value: 14.0 * (typeof window !== 'undefined' ? Math.min(window.devicePixelRatio, 2) : 1) },
+        uColor: { value: { x: BOLT_COLOR_R, y: BOLT_COLOR_G, z: BOLT_COLOR_B } },
+        uSize: {
+          value: SPARK_BASE_SIZE_PX * (typeof window !== 'undefined' ? Math.min(window.devicePixelRatio, 2) : 1),
+        },
+        uChargeSizeMul: { value: SPARK_SIZE_CHARGE_MULTIPLIER },
       },
       vertexShader: `
         attribute float aAlpha;
         varying float vAlpha;
         uniform float uSize;
+        uniform float uChargeSizeMul;
         void main() {
           vAlpha = aAlpha;
+          // aAlpha encodes charge² — packed into the alpha channel so we
+          // don't need a separate per-vertex charge attribute.
+          float chargeSq = aAlpha * (1.0 / 0.85); // approximate; see note
           vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = uSize * (300.0 / -mvPosition.z);
+          float sizeMul = 1.0 + uChargeSizeMul * chargeSq;
+          gl_PointSize = uSize * sizeMul * (300.0 / -mvPosition.z);
           gl_Position = projectionMatrix * mvPosition;
         }
       `,
@@ -588,7 +591,6 @@ export class SparkParticles {
         uniform vec3 uColor;
         varying float vAlpha;
         void main() {
-          // Circular falloff so each spark reads as a glowing dot, not a square.
           vec2 c = gl_PointCoord - vec2(0.5);
           float d = length(c);
           if (d > 0.5) discard;
@@ -602,8 +604,6 @@ export class SparkParticles {
     });
     this.points = new Points(geometry, material);
     this.points.frustumCulled = false;
-    // Init particles to a far-away position so they don't render at origin
-    // when the pool is empty.
     for (let i = 0; i < SPARK_POOL_SIZE; i += 1) {
       this.positions[i * 3] = 9999;
       this.positions[i * 3 + 1] = 9999;
@@ -613,55 +613,50 @@ export class SparkParticles {
 
   /**
    * Emit sparks for one crystal this frame. `charge` is the crystalCharge
-   * curve (0..1); emission rate is `max(8, charge^2 * 140)` particles/sec
-   * (Phase 6c follow-up: was `charge^2 * 80` — too sparse to see), capped
-   * at 12 per frame per crystal to prevent single-frame spikes.
+   * curve (0..1); emission rate is `max(8, charge^2 * 140)` particles/sec,
+   * capped at 8 per frame per crystal.
    *
-   * The `max(8, ...)` floor guarantees at least ~8 sparks/sec (≈ 1 every
-   * other frame at 60fps) even at very low charge, so the player sees a
-   * continuous "fizz" off the crystal instead of nothing-then-burst.
+   * Phase 6c3 change: was scene-wide 120-pool; now per-crystal 40-pool.
+   * The emission RATE formula is unchanged from Phase 6c2 — what changed
+   * is the pool scoping and the sprite size.
    */
-  emit(charge: number, worldPos: Vector2, radius: number, seed: number, deltaTime: number): void {
+  emit(charge: number, worldPos: Vector2, radius: number, deltaTime: number): void {
     if (charge <= 0) return;
     const rate = Math.max(8, charge * charge * 140);
-    const count = Math.min(12, Math.floor(rate * deltaTime + Math.random()));
+    const count = Math.min(8, Math.floor(rate * deltaTime + Math.random()));
     if (count === 0) return;
-    const rng = mulberry32(seed * 31 + Math.floor(performance.now() * 1000));
     for (let n = 0; n < count; n += 1) {
       const i = this.nextIndex;
       this.nextIndex = (this.nextIndex + 1) % SPARK_POOL_SIZE;
-      const dir = sampleUnitVector(rng);
-      // Phase 6c follow-up: was 1.5–3.0 units/s — sparks barely moved before
-      // their 0.6s lifetime ended. Bumped to 3.0–6.0 so they actually travel
-      // 1.8–3.6 units of distance (= roughly 1–2 crystal radii) before
-      // fading, reading as "sparks shooting outward" rather than "sparks
-      // winking in place".
-      const speed = 3.0 + rng() * 3.0;
-      this.positions[i * 3] = worldPos.x + dir.x * radius * 0.8;
-      this.positions[i * 3 + 1] = worldPos.y + dir.y * radius * 0.8;
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.random() * radius * 0.2;
+      const dirX = Math.cos(angle);
+      const dirY = Math.sin(angle);
+      const speed = 3.0 + Math.random() * 3.0;
+      this.positions[i * 3] = worldPos.x + dirX * (radius * 0.95 + dist);
+      this.positions[i * 3 + 1] = worldPos.y + dirY * (radius * 0.95 + dist);
       this.positions[i * 3 + 2] = 0.1;
-      this.velocities[i * 3] = dir.x * speed;
-      this.velocities[i * 3 + 1] = dir.y * speed;
+      this.velocities[i * 3] = dirX * speed;
+      this.velocities[i * 3 + 1] = dirY * speed;
       this.velocities[i * 3 + 2] = 0;
       this.ages[i] = 0;
-      this.alphas[i] = 0.7 + rng() * 0.3;
+      // Pack charge² into alpha upper bits so the vertex shader can scale
+      // sprite size. We use alpha as the carrier.
+      this.alphas[i] = 0.85 * (0.5 + charge * charge * 0.5);
     }
     (this.points.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
     (this.points.geometry.getAttribute('aAlpha') as BufferAttribute).needsUpdate = true;
   }
 
   /**
-   * Tick the pool: advance positions, age out dead particles, and recompute
-   * per-particle alpha so the custom shader can fade each one independently.
-   * Called once per frame regardless of how many crystals are emitting.
+   * Tick the pool: advance positions, age out dead particles, recompute
+   * per-particle alpha for the shader fade.
    */
   update(deltaTime: number): void {
     let alphaDirty = false;
     for (let i = 0; i < SPARK_POOL_SIZE; i += 1) {
       this.ages[i] += deltaTime;
       if (this.ages[i] >= SPARK_LIFETIME_SECONDS) {
-        // Park the particle off-screen so it doesn't render at its last
-        // position with a stale alpha.
         this.positions[i * 3] = 9999;
         this.positions[i * 3 + 1] = 9999;
         this.positions[i * 3 + 2] = 0;
@@ -671,13 +666,9 @@ export class SparkParticles {
       }
       this.positions[i * 3] += this.velocities[i * 3] * deltaTime;
       this.positions[i * 3 + 1] += this.velocities[i * 3 + 1] * deltaTime;
-      // Linear fade: alpha = 1 at birth, 0 at expiry. The custom shader
-      // multiplies this by the radial glow falloff so each spark is a
-      // bright center fading to a soft edge.
       const lifeFrac = this.ages[i] / SPARK_LIFETIME_SECONDS;
-      // Slight ease-out so the particle looks "punchy" at birth then fades
-      // smoothly to nothing.
-      this.alphas[i] = (1 - lifeFrac) * (1 - lifeFrac);
+      // Slight ease-out fade
+      this.alphas[i] = (1 - lifeFrac) * (1 - lifeFrac) * 0.85;
       alphaDirty = true;
     }
     (this.points.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;

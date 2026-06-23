@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getHeartbeatPhase, computeBoltEndpoints, ExtrudingBolt } from '../src/crystal-fx';
+import { getHeartbeatPhase, computeBoltEndpoints, ExtrudingBolt, CrystalBoltSparks } from '../src/crystal-fx';
 
 describe('getHeartbeatPhase', () => {
   it('returns 0 at the start of each heartbeat cycle', () => {
@@ -78,5 +78,61 @@ describe('ExtrudingBolt', () => {
     const bolt = new ExtrudingBolt(42);
     bolt.dispose();
     expect(() => bolt.dispose()).not.toThrow();
+  });
+});
+
+describe('CrystalBoltSparks', () => {
+  it('pool size is between 32 and 48', () => {
+    const sparks = new CrystalBoltSparks(42);
+    // The positions buffer size reveals the pool size
+    const positionsAttr = (sparks.points.geometry.getAttribute('position') as { array: Float32Array });
+    const poolSize = positionsAttr.array.length / 3;
+    expect(poolSize).toBeGreaterThanOrEqual(32);
+    expect(poolSize).toBeLessThanOrEqual(48);
+    sparks.dispose();
+  });
+
+  it('all particles start parked off-screen at origin', () => {
+    const sparks = new CrystalBoltSparks(42);
+    const positionsAttr = (sparks.points.geometry.getAttribute('position') as { array: Float32Array });
+    for (let i = 0; i < positionsAttr.array.length; i += 3) {
+      expect(positionsAttr.array[i]).toBe(9999);
+      expect(positionsAttr.array[i + 1]).toBe(9999);
+    }
+    sparks.dispose();
+  });
+
+  it('emits sparks when charge > 0', () => {
+    const sparks = new CrystalBoltSparks(42);
+    sparks.emit(0.5, { x: 0, y: 0 }, 1.0, 0.016);
+    const positionsAttr = (sparks.points.geometry.getAttribute('position') as { array: Float32Array });
+    let movedCount = 0;
+    for (let i = 0; i < positionsAttr.array.length; i += 3) {
+      if (positionsAttr.array[i] !== 9999) movedCount += 1;
+    }
+    expect(movedCount).toBeGreaterThan(0);
+    sparks.dispose();
+  });
+
+  it('does not emit when charge is 0', () => {
+    const sparks = new CrystalBoltSparks(42);
+    sparks.emit(0, { x: 0, y: 0 }, 1.0, 0.016);
+    const positionsAttr = (sparks.points.geometry.getAttribute('position') as { array: Float32Array });
+    for (let i = 0; i < positionsAttr.array.length; i += 3) {
+      expect(positionsAttr.array[i]).toBe(9999);
+    }
+    sparks.dispose();
+  });
+
+  it('ages particles to 0.6s then parks them off-screen', () => {
+    const sparks = new CrystalBoltSparks(42);
+    sparks.emit(0.5, { x: 0, y: 0 }, 1.0, 0.016);
+    sparks.update(1.0); // 1 second > 0.6s lifetime
+    const positionsAttr = (sparks.points.geometry.getAttribute('position') as { array: Float32Array });
+    for (let i = 0; i < positionsAttr.array.length; i += 3) {
+      expect(positionsAttr.array[i]).toBe(9999);
+      expect(positionsAttr.array[i + 1]).toBe(9999);
+    }
+    sparks.dispose();
   });
 });
