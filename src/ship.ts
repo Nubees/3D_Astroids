@@ -53,7 +53,7 @@ export class Ship {
     };
   }
 
-  update(input: InputState, deltaTime: number): void {
+  update(input: InputState, deltaTime: number, fireRateMultiplier = 1): void {
     if (this.isDead) return;
 
     const aimDx = input.aim.x - this.state.position.x;
@@ -63,7 +63,7 @@ export class Ship {
       ? { x: aimDx / aimLength, y: aimDy / aimLength }
       : this.state.aim;
 
-    this.fireCooldown = Math.max(0, this.fireCooldown - deltaTime);
+    this.fireCooldown = Math.max(0, this.fireCooldown - deltaTime * fireRateMultiplier);
   }
 
   canFire(): boolean {

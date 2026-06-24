@@ -7,6 +7,7 @@ This directory contains project-specific rules that Claude Code should follow wh
 | File | Scope | Purpose |
 |------|-------|---------|
 | `code-style.md` | All source files | Engine-agnostic formatting, naming, imports, and game-code patterns |
+| `workflow-gates.md` | All sessions | Ask the user via `AskUserQuestion` before running quality gates — never run unprompted |
 
 ## Creating a New Rule
 

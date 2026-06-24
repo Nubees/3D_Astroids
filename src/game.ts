@@ -136,6 +136,40 @@ import {
   setShieldEnergy,
   updateShieldVisuals,
 } from './shield-visuals';
+import {
+  ActiveAmmoMap,
+  ACTIVE_KIND_SPECS,
+  ActivePickupEffect,
+  BOMB_STRIKE_DAMAGE,
+  BOMB_STRIKE_RADIUS,
+  HOMING_MISSILES_DAMAGE,
+  ORBIT_DRONES_COOLDOWN_SECONDS,
+  ORBIT_DRONES_DURATION_SECONDS,
+  PICKUP_COLOR,
+  PickupKind,
+  PickupState,
+  applyActivePickupEffect,
+  applyPickupEffect,
+  canFireActive,
+  consumeActiveCharge,
+  createEmptyActiveAmmo,
+  createPickupMesh,
+  createPickupState,
+  disposePickupMesh,
+  isPickupCollected,
+  isPickupExpired,
+  maybeDropPickup,
+  tickActiveAmmo,
+  updatePickup,
+} from './pickups';
+import {
+  DroneDeploymentState,
+  HomingMissileState,
+  spawnDroneDeployment,
+  spawnMissileVolley,
+  tickDroneDeployments,
+  tickHomingMissiles,
+} from './active-deployments';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -191,6 +225,18 @@ interface LiveShard {
 interface LiveScrap {
   state: ScrapState;
   mesh: Mesh;
+}
+
+interface LivePickup {
+  state: PickupState;
+  mesh: Group;
+}
+
+interface ActiveHudIcon {
+  container: HTMLDivElement;
+  countLabel: HTMLDivElement;
+  bar: HTMLDivElement;
+  stateLabel: HTMLDivElement; // "READY" / "COOLDOWN" / "DEPLOYED" / "EMPTY"
 }
 
 interface FloatingText {
@@ -255,6 +301,16 @@ export class Game {
   // crystal on screen — disposed with the crystal in destroyCrystal.
   private crystalSparks = new Map<number, CrystalBoltSparks>();
   private activeShockwaves: Shockwave[] = [];
+  // Phase 7 — pickup subsystem.
+  private pickups: LivePickup[] = [];
+  private activeEffects: ActivePickupEffect[] = [];
+  private activeAmmo: ActiveAmmoMap = createEmptyActiveAmmo();
+  private activeDeployments: DroneDeploymentState[] = [];
+  private homingMissiles: HomingMissileState[] = [];
+  private pickupHudElement: HTMLDivElement | null = null;
+  private pickupHudPills: Map<PickupKind, HTMLDivElement> = new Map();
+  private activeHudElement: HTMLDivElement | null = null;
+  private activeHudIcons: Map<PickupKind, ActiveHudIcon> = new Map();
   private pendingTelegraphs: PendingTelegraph[] = [];
   private cameraShakeAmplitude = 0;
   private cameraShakeRemaining = 0;
@@ -435,6 +491,44 @@ export class Game {
     this.crystalDeathTweens = [];
     this.cameraShakeAmplitude = 0;
     this.cameraShakeRemaining = 0;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // My Rules — Phase 7 HUD Cleanup
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Purpose:  Remove the 2 new HUD regions from the DOM and reset all
+    //           Phase 7 state so a stop() → start() cycle starts clean.
+    // Setup:    Called from Game.stop() right after camera-shake reset. The
+    //           order is: remove DOM → clear pill/icon maps → reset state
+    //           containers (effects, ammo, deployments, missiles, pickups).
+    // Issues:   None.
+    // Fix:      Phase 7 Task 13. Without this, a stop() followed by a new
+    //           Game instance would leak the previous HUD region (orphaned
+    //           div on document.body) and any active effects from the prior
+    //           run would persist via the long-lived pickupHudElement ref.
+    // Gotchas:  pill.remove() is called BEFORE the map delete so the loop
+    //           that mutates the map's iteration cursor isn't double-stepped.
+    //           createEmptyActiveAmmo() must be re-imported if the type
+    //           import isn't already present (it is — line ~153).
+    //           activeDeployments / homingMissiles / activeEffects / pickups
+    //           are reset to empty arrays here even though their per-frame
+    //           tickers normally prune them — defense in depth in case stop()
+    //           is called from a state where those arrays still hold entries.
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (this.pickupHudElement) {
+      this.pickupHudElement.remove();
+      this.pickupHudElement = null;
+    }
+    this.pickupHudPills.clear();
+    if (this.activeHudElement) {
+      this.activeHudElement.remove();
+      this.activeHudElement = null;
+    }
+    this.activeHudIcons.clear();
+    this.activeAmmo = createEmptyActiveAmmo();
+    this.activeDeployments = [];
+    this.homingMissiles = [];
+    this.activeEffects = [];
+    this.pickups = [];
   }
 
   private loop = (time: number): void => {
@@ -473,6 +567,9 @@ export class Game {
       aim: this.screenToWorld(rawInput.aim),
       fire: rawInput.fire,
       deployBreather: rawInput.deployBreather,
+      useActive1: rawInput.useActive1,
+      useActive2: rawInput.useActive2,
+      useActive3: rawInput.useActive3,
     };
 
     // Respawn flow: ship is dead/exploding; skip gameplay until it revives.
@@ -491,7 +588,13 @@ export class Game {
     updateBreather(this.breather, this.shield, this.ship.state.position, input.deployBreather, deltaTime);
 
     this.controller.apply(this.ship.state, input, deltaTime);
-    this.ship.update(input, deltaTime);
+    // Phase 7 Task 14 — FIRE_RATE passive pickup multiplies the per-frame
+    // cooldown decrement by 3× for 6 seconds. The Ship.update signature
+    // already accepts `fireRateMultiplier = 1` (Task 8), so passing 3 is
+    // the entire wiring. Default = 1 keeps behavior identical when no
+    // FIRE_RATE effect is active.
+    const fireRateMultiplier = this.activeEffects.some((e) => e.kind === PickupKind.FIRE_RATE) ? 3 : 1;
+    this.ship.update(input, deltaTime, fireRateMultiplier);
 
     if (input.fire && this.ship.canFire()) {
       this.fireProjectile();
@@ -503,6 +606,17 @@ export class Game {
     this.updateMagnetRing();
     this.updateBreatherMesh();
     this.updateProjectiles(deltaTime);
+    // Phase 7 — pickup subsystem ticks. Per spec, the four tickers run
+    // BEFORE updateShards so the drone/missile callbacks see the current
+    // frame's asteroid array.
+    this.updateActivePickupEffects(deltaTime);
+    this.updatePickups(deltaTime);
+    this.updateActiveAmmoCooldowns(deltaTime);
+    this.updateActiveDeployments(deltaTime);
+    // Phase 7 — active input dispatch (Digit1/2/3 → BOMB/DRONES/MISSILES).
+    if (input.useActive1) this.useActiveItem(PickupKind.BOMB_STRIKE);
+    if (input.useActive2) this.useActiveItem(PickupKind.ORBIT_DRONES);
+    if (input.useActive3) this.useActiveItem(PickupKind.HOMING_MISSILES);
     this.updateShards(deltaTime);
     this.updateAsteroids(deltaTime);
     this.handleAsteroidCollisions();
@@ -635,25 +749,86 @@ export class Game {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — spreadAnglesForFrame (Phase 7 Task 14)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose:  Pure function returning the per-frame projectile angle offsets
+  //           (radians) for the player's fireProjectile path. Default = [0]
+  //           (single shot); SPREAD pickup active = [-0.26, 0, 0.26] (3-way
+  //           spread at ±15°).
+  // Setup:    Called once per fire from fireProjectile. Reads only
+  //           `this.activeEffects` — no mutation.
+  // Issues:   None.
+  // Fix:      Phase 7 Task 14. Centralizes the spread logic so fireProjectile
+  //           stays a thin loop. ±15° (= 0.2618 rad) was chosen to match the
+  //           spec: each spread bullet is distinguishable from neighbors but
+  //           the trio still reads as "one shot" at gameplay distance.
+  // Gotchas:  The helper returns a fresh array each call — callers must not
+  //           hold on to the returned array across frames (the player can
+  //           collect/expire SPREAD between calls). The [0] default case is
+  //           the existing pre-Phase-7 behavior, byte-identical to a single
+  //           straight shot.
+  //           activeEffects is an array of ActivePickupEffect (kind + remaining
+  //           + total) — using `.some(e => e.kind === PickupKind.SPREAD)` is
+  //           O(n) but n ≤ 3 (3 passive kinds), so the scan is trivially cheap.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private spreadAnglesForFrame(): number[] {
+    const hasSpread = this.activeEffects.some((e) => e.kind === PickupKind.SPREAD);
+    if (!hasSpread) return [0];
+    // 3-way spread at ±15° (0.2618 rad).
+    return [-0.2618, 0, 0.2618];
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Spread-Shot Firing (Phase 7 Task 14)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose:  Fire one projectile per angle offset in `spreadAnglesForFrame()`.
+  //           Default = [0] (single straight shot); SPREAD pickup = [-0.26, 0,
+  //           0.26] (3-way spread at ±15°).
+  // Setup:    Called from update(input) when `input.fire && this.ship.canFire()`.
+  //           Reads `this.ship.state.aim` as the base direction and rotates it
+  //           by each angleOffset before spawning a projectile.
+  // Issues:   None.
+  // Fix:      Phase 7 Task 14. Wraps the original single-shot body in a `for`
+  //           loop over the offsets returned by spreadAnglesForFrame(). The
+  //           unchanged-when-no-SPREAD case is the [0] offset path, so the
+  //           default behavior is byte-identical to the pre-Task-14 build.
+  // Gotchas:  spreadAnglesForFrame is a pure function of `this.activeEffects` —
+  //           it does NOT mutate. The 0.9 nose offset must be applied to the
+  //           rotated direction (not the base aim) so spread bullets emerge
+  //           from the player's nose, not from a stack at the ship center.
+  //           resetCooldown() stays OUTSIDE the loop so a single key press
+  //           costs one cooldown tick no matter how many bullets fire.
+  //           The drone projectile path (fireDroneProjectile) intentionally
+  //           does NOT use spreadAnglesForFrame — drones fire straight shots
+  //           per their own per-target tracking logic.
+  // ═══════════════════════════════════════════════════════════════════════════
   private fireProjectile(): void {
     this.ship.resetCooldown();
-    const direction = this.ship.state.aim;
-    const noseOffset: Vector2 = {
-      x: direction.x * 0.9,
-      y: direction.y * 0.9,
-    };
-    const spawn: Vector2 = {
-      x: this.ship.state.position.x + noseOffset.x,
-      y: this.ship.state.position.y + noseOffset.y,
-    };
-    const state = createProjectile(spawn, direction);
-    const mesh = new Mesh(
-      new SphereGeometry(PROJECTILE_RADIUS, 8, 8),
-      new MeshBasicMaterial({ color: 0xaaddff }),
-    );
-    mesh.position.set(spawn.x, spawn.y, 0);
-    this.projectiles.push({ state, mesh });
-    this.scene.add(mesh);
+    const baseAim = this.ship.state.aim;
+    for (const angleOffset of this.spreadAnglesForFrame()) {
+      const cos = Math.cos(angleOffset);
+      const sin = Math.sin(angleOffset);
+      const dirX = baseAim.x * cos - baseAim.y * sin;
+      const dirY = baseAim.x * sin + baseAim.y * cos;
+      const dir: Vector2 = { x: dirX, y: dirY };
+      const noseOffset: Vector2 = {
+        x: dirX * 0.9,
+        y: dirY * 0.9,
+      };
+      const spawn: Vector2 = {
+        x: this.ship.state.position.x + noseOffset.x,
+        y: this.ship.state.position.y + noseOffset.y,
+      };
+      const state = createProjectile(spawn, dir);
+      const mesh = new Mesh(
+        new SphereGeometry(PROJECTILE_RADIUS, 8, 8),
+        new MeshBasicMaterial({ color: 0xaaddff }),
+      );
+      mesh.position.set(spawn.x, spawn.y, 0);
+      this.projectiles.push({ state, mesh });
+      this.scene.add(mesh);
+    }
   }
 
   private updateProjectiles(deltaTime: number): void {
@@ -795,6 +970,370 @@ export class Game {
       }
     }
     this.scrap = alive;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Pickup Lifecycle (Phase 7)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Per-frame tick for the pickup array: magnetize, age, collect, expire.
+  // Setup:   Game owns `this.pickups`. updatePickups is called from the main
+  //          update loop (Task 12 wires it). Collected pickups dispatch to
+  //          applyPickupToShip; expired ones are disposed.
+  // Issues:  None.
+  // Fix:     Phase 7. The shape mirrors updateShards — iterate, mutate,
+  //          prune-and-replace. This avoids the array-splice-during-iteration
+  //          trap that the original pickup code hit.
+  // Gotchas: createPickupState is the lifecycle constructor; createPickupMesh
+  //          is the visual factory. They are separate so pickup tests can
+  //          skip Three.js entirely. updatePickup mutates the PickupState in
+  //          place; the mesh is updated from `pickup.state.position`/`.spin`.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private updatePickups(deltaTime: number): void {
+    const alive: LivePickup[] = [];
+    for (const pickup of this.pickups) {
+      updatePickup(pickup.state, this.ship.state.position, deltaTime);
+      pickup.mesh.position.set(pickup.state.position.x, pickup.state.position.y, 0);
+      pickup.mesh.rotation.z = pickup.state.spin;
+      if (isPickupCollected(pickup.state, this.ship.state.position)) {
+        this.applyPickupToShip(pickup.state.kind);
+        this.disposePickup(pickup);
+        continue;
+      }
+      if (isPickupExpired(pickup.state)) {
+        this.disposePickup(pickup);
+        continue;
+      }
+      alive.push(pickup);
+    }
+    this.pickups = alive;
+  }
+
+  private updateActivePickupEffects(deltaTime: number): void {
+    const alive: ActivePickupEffect[] = [];
+    for (const effect of this.activeEffects) {
+      const remaining = effect.remaining - deltaTime;
+      if (remaining > 0) {
+        alive.push({ kind: effect.kind, remaining, total: effect.total });
+      }
+    }
+    this.activeEffects = alive;
+  }
+
+  private applyPickupToShip(kind: PickupKind): void {
+    // Active kinds increment the ammo map; passive kinds push a timer onto
+    // `activeEffects` so the HUD pill row can drain it.
+    if (
+      kind === PickupKind.BOMB_STRIKE ||
+      kind === PickupKind.ORBIT_DRONES ||
+      kind === PickupKind.HOMING_MISSILES
+    ) {
+      applyActivePickupEffect(kind, this.activeAmmo);
+    } else {
+      // Pass a mutable snapshot of the shield so applyPickupEffect can heal
+      // it (the SHIELD branch). Mirror the new energy back to the live
+      // state afterward so the HUD reflects the heal.
+      const shieldSnapshot = { energy: this.shield.energy, maxEnergy: SHIELD_MAX_ENERGY };
+      const effect = applyPickupEffect(kind, { fireCooldown: 0 }, shieldSnapshot);
+      this.shield.energy = shieldSnapshot.energy;
+      this.activeEffects.push(effect);
+    }
+    this.spawnFloatingTextAt(
+      `+${ACTIVE_KIND_SPECS[kind].displayName}`,
+      { x: this.ship.state.position.x, y: this.ship.state.position.y + 0.5 },
+      0,
+      '#00ffaa',
+      0,
+      0,
+      14,
+      1.5,
+    );
+  }
+
+  private disposePickup(pickup: LivePickup): void {
+    this.scene.remove(pickup.mesh);
+    disposePickupMesh(pickup.mesh);
+  }
+
+  private spawnPickup(kind: PickupKind, position: Vector2): void {
+    const state = createPickupState(kind, position);
+    const mesh = createPickupMesh(kind);
+    mesh.position.set(position.x, position.y, 0);
+    this.scene.add(mesh);
+    this.pickups.push({ state, mesh });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Active Item Dispatch (Phase 7 Task 12)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Wire Digit1/2/3 → consumeActiveCharge → per-kind deploy or impact.
+  //          Single dispatch table keyed by ACTIVE_KIND_SPECS[kind].displayName
+  //          so adding a new active kind later only needs a new branch.
+  // Setup:   Called once per frame from update(input). Reads `input.useActive1/2/3`
+  //          (set by InputManager from Digit1/2/3). Mutates `this.activeAmmo`,
+  //          `this.activeDeployments`, and `this.homingMissiles`.
+  // Issues:  None.
+  // Fix:     Phase 7 Task 12. canFireActive + consumeActiveCharge are the
+  //          single source of truth for charge/cooldown gating — Game does
+  //          NOT re-check charges itself, that would invite drift between
+  //          the table and the firing code.
+  // Gotchas: Drone re-press is blocked at deployment-time by the `length > 0`
+  //          guard in useActiveItem — prevents the player from stacking two
+  //          drone flights during the 6s active window. The plan's note that
+  //          "DRONES cooldown starts AFTER the 6s window expires" is enforced
+  //          by (a) consumeActiveCharge skipping cooldownRemaining set for
+  //          deployable kinds, and (b) updateActiveDeployments setting it
+  //          when the deployment is culled. The re-press refund path here
+  //          restores the consumed charge so the press doesn't silently eat
+  //          one — setting `cooldownRemaining = 0` is a defensive no-op
+  //          for deployable kinds since consumeActiveCharge never set it.
+  // I1 deviation: dispatch is via ACTIVE_KIND_SPECS[kind].displayName
+  //          (string compare) rather than a PickupKind switch. Trade-off
+  //          accepted: a new active kind needs only a new branch here
+  //          (no enum switch to update), at the cost of one string compare
+  //          per frame per active slot. Worth it for extensibility.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private useActiveItem(kind: PickupKind): void {
+    if (!canFireActive(this.activeAmmo[kind])) return;
+    if (!consumeActiveCharge(this.activeAmmo[kind], kind)) return;
+    const spec = ACTIVE_KIND_SPECS[kind];
+    const shipPos = this.ship.state.position;
+    // I1 dispatch: routed through displayName so adding a new active kind
+    // requires only a new `else if` branch below — no PickupKind switch
+    // table to keep in sync.
+    if (spec.displayName === 'BOMB') {
+      this.fireBombStrike(shipPos);
+    } else if (spec.displayName === 'DRONES') {
+      // Block re-press while a deployment is live or fading.
+      if (this.activeDeployments.length > 0) {
+        // Refund the charge so the press doesn't silently consume a charge.
+        this.activeAmmo[kind].charges += 1;
+        this.activeAmmo[kind].cooldownRemaining = 0;
+        return;
+      }
+      this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene));
+    } else if (spec.displayName === 'MISSILES') {
+      const newMissiles = spawnMissileVolley(shipPos, this.ship.state.aim, this.scene);
+      for (const m of newMissiles) this.homingMissiles.push(m);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Bomb Strike (Phase 7 Task 12)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Radial AOE damage at the ship position. Iterates all live
+  //          asteroids, decrements health for those within BOMB_STRIKE_RADIUS,
+  //          and destroys any whose health hits 0. Also spawns a Shockwave
+  //          ring + "BOMB!" floating text for visual feedback.
+  // Setup:   Called from useActiveItem when Digit1 is pressed. Charge has
+  //          already been consumed by the caller. Iterates `this.asteroids`
+  //          (LiveAsteroid[]) — matches the existing `handleCollisions` loop.
+  // Issues:  The original `handleCollisions` loop builds a fresh `aliveAsteroids`
+  //          array. Bomb Strike does the same so a destroyed asteroid is
+  //          dropped from the array in the same frame.
+  // Fix:     Phase 7 Task 12. Mirrors the projectile damage path from
+  //          handleCollisions: iron always dies on hit; crystal decrements
+  //          health and lets the existing fracture/destroy cascade handle
+  //          the kill.
+  // Gotchas: `destroyAsteroid` removes the mesh from the scene and disposes
+  //          its GPU resources, so we must NOT also call scene.remove +
+  //          disposeAsteroidMesh here. The post-destroy `aliveAsteroids`
+  //          skip is the only "tombstone" we need. crystal.kind: shockwaves
+  //          and floating text are independent of which kind was killed, so
+  //          a single shared Shockwave + text emission is enough.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private fireBombStrike(position: Vector2): void {
+    const alive: LiveAsteroid[] = [];
+    for (const asteroid of this.asteroids) {
+      const d = Math.hypot(
+        asteroid.state.position.x - position.x,
+        asteroid.state.position.y - position.y,
+      );
+      if (d <= BOMB_STRIKE_RADIUS) {
+        asteroid.state.health = Math.max(0, asteroid.state.health - BOMB_STRIKE_DAMAGE);
+        if (asteroid.state.health <= 0) {
+          this.destroyAsteroid(asteroid);
+          continue;
+        }
+      }
+      alive.push(asteroid);
+    }
+    this.asteroids = alive;
+    // Visual feedback: a single shockwave + "BOMB!" text. Mirrors the
+    // pattern in destroyCrystal's intensity / spawnFloatingTextAt calls.
+    this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0));
+    this.spawnFloatingTextAt('BOMB!', position, 0, '#ff8800', 0, 0, 18, 1.0);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Active Ammo Cooldown Tick (Phase 7 Task 12)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Per-frame decrement of activeAmmo[k].cooldownRemaining for the
+  //          non-deployable active kinds (BOMB_STRIKE, HOMING_MISSILES).
+  //          Deployable kinds (ORBIT_DRONES) are skipped here ONLY WHILE a
+  //          deployment is currently active — their cooldown is set by the
+  //          Game when the deployment is culled in updateActiveDeployments,
+  //          so the cooldown tick must resume once that happens.
+  // Setup:   Called once per frame from update(input) BEFORE
+  //          updateActiveDeployments so the cull-detection in the next
+  //          method sees the post-tick cooldown value (which is a no-op for
+  //          DRONES anyway since we skip it).
+  // Issues:  None.
+  // Fix:     Round 2 (Task 12 follow-up). The original guard unconditionally
+  //          skipped deployable kinds, so the cooldown set on deployment
+  //          fade-out would NEVER tick down — the player could never fire
+  //          DRONES a second time. The guard is now conditional on
+  //          activeDeployments.length > 0, so the cooldown ticks normally
+  //          after the deployment has been pruned by tickDroneDeployments.
+  // Gotchas: ACTIVE_KIND_SPECS[kind].isDeployable is the single source of
+  //          truth for "should the cooldown tick here?" — keep this guard
+  //          in sync with the same flag used in consumeActiveCharge.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private updateActiveAmmoCooldowns(deltaTime: number): void {
+    for (const k of Object.values(PickupKind)) {
+      // Round 2 fix: only skip deployable kinds WHILE a deployment is
+      // active. After tickDroneDeployments prunes the deployment array,
+      // this.activeDeployments.length is 0 and the cooldown set by
+      // updateActiveDeployments will tick down normally.
+      if (ACTIVE_KIND_SPECS[k].isDeployable && this.activeDeployments.length > 0) continue;
+      tickActiveAmmo(this.activeAmmo[k], deltaTime);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Active Deployment Tickers (Phase 7 Task 12)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Per-frame tickers for the 2 deployable active pickup kinds.
+  //          Both functions return a pruned list — caller reassigns the
+  //          field. The drone callback spawns a regular projectile at the
+  //          nearest target; the missile callback applies damage and
+  //          triggers destruction.
+  // Setup:   Called once per frame from update(input). The drone ticker
+  //          culls fully-faded deployments from this.activeDeployments;
+  //          this method then sets the DRONES cooldown (the spec's 4s
+  //          post-fade-out wait) only when a deployment was actually
+  //          removed this frame. If the returned list is the same length
+  //          as the input, no deployment ended and no cooldown is set.
+  // Issues:  None.
+  // Fix:     Phase 7 Task 12 (C1 fix). Earlier draft left the DRONES
+  //          cooldown set inside consumeActiveCharge at press time, which
+  //          violated the spec rule "cooldown starts AFTER the 6s active
+  //          window expires". The fix: consumeActiveCharge no longer sets
+  //          cooldownRemaining for deployable kinds; the Game sets it
+  //          here, after tickDroneDeployments has confirmed the deployment
+  //          has fully faded out.
+  // Gotchas: `previousCount` is captured BEFORE the call, then compared
+  //          with the post-call array length. A length drop of N means N
+  //          deployments ended this frame — only set the cooldown when
+  //          N > 0 (otherwise repeated calls with empty inputs would
+  //          keep resetting the cooldown to 0 — a no-op but noisy).
+  //          The "ORBIT_DRONES_COOLDOWN_SECONDS" set here is the SAME
+  //          value ACTIVE_KIND_SPECS[ORBIT_DRONES].cooldownSeconds
+  //          references; using the constant directly keeps the import
+  //          visible at the call site for grep-ability.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private updateActiveDeployments(deltaTime: number): void {
+    const previousDroneCount = this.activeDeployments.length;
+    this.activeDeployments = tickDroneDeployments(
+      this.activeDeployments,
+      this.ship.state.position,
+      this.asteroids.map((a) => a.state),
+      deltaTime,
+      this.scene,
+      (origin, target) => this.fireDroneProjectile(origin, target),
+    );
+    // Spec: DRONES cooldown starts AFTER the 6s active window + 0.3s fade.
+    // We detect "deployment ended" by a length drop in the returned array.
+    if (this.activeDeployments.length < previousDroneCount) {
+      this.activeAmmo[PickupKind.ORBIT_DRONES].cooldownRemaining = ORBIT_DRONES_COOLDOWN_SECONDS;
+    }
+    this.homingMissiles = tickHomingMissiles(
+      this.homingMissiles,
+      this.asteroids.map((a) => a.state),
+      deltaTime,
+      this.scene,
+      (asteroid) => this.onMissileImpact(asteroid),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Drone Projectile Spawn Callback (Phase 7 Task 12)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Callback for `tickDroneDeployments`. Spawns a normal
+  //          projectile at the drone's position aimed at the target
+  //          asteroid. Mirrors the fireProjectile body so a future
+  //          refactor to spreadAnglesForFrame (Task 14) is a one-line
+  //          change — keep the signature identical to fireProjectile
+  //          (origin → state + mesh) so the refactor can swap both call
+  //          sites together.
+  // Setup:   Called from tickDroneDeployments via the onDroneFire callback
+  //          (signature: (origin: Vector2, target: AsteroidState)). The
+  //          target argument is only used for its position; this method
+  //          does NOT apply damage — that lives in handleCollisions where
+  //          the projectile collides with the asteroid naturally.
+  // Issues:  None.
+  // Fix:     Phase 7 Task 12. The drone's projectile is visually cyan
+  //          (0x66ddff, matches the drone body color) and uses the same
+  //          radius as the player's projectile (PROJECTILE_RADIUS) so a
+  //          shield-collision from a drone feels identical to one from
+  //          the ship.
+  // Gotchas: `length < 0.01` early-out covers the degenerate case where
+  //          a drone is exactly on the target's center — projecting that
+  //          would divide by zero. The returned dirX/dirY are passed
+  //          straight into createProjectile, which assumes a unit vector.
+  //          The cyan MeshBasicMaterial is NOT shared — every drone shot
+  //          gets its own (cheap) material so disposeProjectile can drop
+  //          it without affecting anything else.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private fireDroneProjectile(origin: Vector2, target: { position: Vector2 }): void {
+    const dx = target.position.x - origin.x;
+    const dy = target.position.y - origin.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 0.01) return;
+    const dirX = dx / length;
+    const dirY = dy / length;
+    const dir: Vector2 = { x: dirX, y: dirY };
+    const state = createProjectile(origin, dir);
+    const mesh = new Mesh(
+      new SphereGeometry(PROJECTILE_RADIUS, 6, 6),
+      new MeshBasicMaterial({ color: 0x66ddff }),
+    );
+    mesh.position.set(origin.x, origin.y, 0);
+    this.projectiles.push({ state, mesh });
+    this.scene.add(mesh);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Homing Missile Impact (Phase 7 Task 12)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Apply missile damage when a HomingMissileState reports an impact.
+  //          The hit-test (hypot < 0.3) lives in `tickHomingMissiles`; this
+  //          method only handles damage + destruction. Damage matches the
+  //          existing projectile collision path in `handleCollisions`.
+  // Setup:   Called from tickHomingMissiles via the onMissileImpact callback.
+  //          The `asteroid` argument is an `AsteroidState` (the same object
+  //          stored in LiveAsteroid.state) — we look up the wrapping
+  //          LiveAsteroid to call destroyAsteroid (which handles iron vs
+  //          crystal dispatch + scoring + VFX).
+  // Issues:  None.
+  // Fix:     Phase 7 Task 12. Iron always dies on a missile hit; crystal
+  //          decrements health, then runs the existing fracture check +
+  //          destroy cascade so a multi-hit crystal behaves identically
+  //          to a multi-hit from a player projectile.
+  // Gotchas: do NOT mutate `this.asteroids` directly here — build a
+  //          replacement list inside the callback. `destroyAsteroid` does
+  //          not splice the asteroid out of the array, so the wrapping
+  //          loop in updateActiveDeployments still holds a reference. The
+  //          outer update() never re-enters during the callback because
+  //          tickHomingMissiles returns synchronously before the next
+  //          ticker runs.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private onMissileImpact(asteroid: AsteroidState): void {
+    const live = this.asteroids.find((a) => a.state === asteroid);
+    if (!live) return;
+    live.state.health = Math.max(0, live.state.health - HOMING_MISSILES_DAMAGE);
+    if (live.state.health <= 0) {
+      this.destroyAsteroid(live);
+    }
   }
 
   private updateSpawning(deltaTime: number): void {
@@ -1316,6 +1855,11 @@ export class Game {
       : 1.0;
     awardBreak(this.wave, target.state.size, multiplier);
     this.spawnScrapFromAsteroid(target);
+    // Phase 7 — pickup drop. Iron LARGE has a 10% chance; other iron sizes
+    // never drop. maybeDropPickup already encapsulates the roll so this call
+    // is the entire hook.
+    const dropKind = maybeDropPickup(target.state);
+    if (dropKind !== null) this.spawnPickup(dropKind, target.state.position);
     this.scene.remove(target.mesh);
     disposeAsteroidMesh(target.mesh);
     const children = splitAsteroid(target.state);
@@ -1418,6 +1962,12 @@ export class Game {
       );
       textIndex++;
     }
+
+    // Phase 7 — pickup drop. Crystals always drop a pickup (1 of 6 kinds
+    // uniform random). Spawn BEFORE the death tween + cleanup so the pickup
+    // is anchored to the crystal's position, not the expanding tween mesh.
+    const pickupKind = maybeDropPickup(target.state);
+    if (pickupKind !== null) this.spawnPickup(pickupKind, target.state.position);
 
     // Death explosion: 1 shockwave ring + scale-up + fade tween (the new
     // CrystalDeathTween reuses the cracked material so the death flash is
@@ -1824,6 +2374,87 @@ export class Game {
     this.resumeElement.style.pointerEvents = 'none';
     this.resumeElement.style.display = 'none';
     document.body.appendChild(this.resumeElement);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // My Rules — Phase 7 HUD Regions (Passive Pill Row + Active Icon Row)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Purpose:  Mount two new DOM HUD regions at game start: a bottom-center
+    //           pill row that surfaces currently-active passive effects (one
+    //           pill per kind, with a colored border + drain bar), and a
+    //           bottom-right 3-icon row that surfaces active ammo (count, bar,
+    //           state label). Both are anchored absolute on document.body and
+    //           carry pointerEvents='none' so they never block gameplay clicks.
+    // Setup:    Called once from the Game constructor (line ~409). Pill rows
+    //           are reconciled PER-FRAME by updateHud; icons are reconciled
+    //           similarly. Both regions are removed by stop().
+    // Issues:   None — both regions match the existing HUD style
+    //           (position:absolute, monospace, textShadow, no new fonts).
+    // Fix:      Phase 7 Task 13. The 3 active icons are created eagerly in
+    //           createHud because the row is always visible (the icon opacity
+    //           distinguishes EMPTY from READY). The 3 passive pills are
+    //           created LAZILY in updateHud because we don't know which kinds
+    //           the player has collected yet — pills appear/disappear as
+    //           passive effects come and go.
+    // Gotchas:  spec.color is a numeric hex (e.g. 0xff8800) — must be
+    //           converted via `.toString(16).padStart(6, '0')` and prefixed
+    //           with `#` to be a valid CSS color. Forgetting the prefix or
+    //           the zero-padding silently renders as black/transparent.
+    //           `dataset` is the cheapest way to stash a per-pill lookup id
+    //           for querySelector — alternatives (closure over the pill
+    //           reference, id attributes) all work but are noisier.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Bottom-center passive pill row.
+    this.pickupHudElement = document.createElement('div');
+    this.pickupHudElement.style.position = 'absolute';
+    this.pickupHudElement.style.bottom = '16px';
+    this.pickupHudElement.style.left = '50%';
+    this.pickupHudElement.style.transform = 'translateX(-50%)';
+    this.pickupHudElement.style.display = 'flex';
+    this.pickupHudElement.style.gap = '8px';
+    this.pickupHudElement.style.pointerEvents = 'none';
+    document.body.appendChild(this.pickupHudElement);
+
+    // Bottom-right active icon row.
+    this.activeHudElement = document.createElement('div');
+    this.activeHudElement.style.position = 'absolute';
+    this.activeHudElement.style.bottom = '16px';
+    this.activeHudElement.style.right = '16px';
+    this.activeHudElement.style.display = 'flex';
+    this.activeHudElement.style.gap = '8px';
+    this.activeHudElement.style.pointerEvents = 'none';
+    document.body.appendChild(this.activeHudElement);
+
+    for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES]) {
+      const spec = ACTIVE_KIND_SPECS[kind];
+      const container = document.createElement('div');
+      container.style.width = '56px';
+      container.style.height = '56px';
+      container.style.border = `2px solid #${spec.color.toString(16).padStart(6, '0')}`;
+      container.style.padding = '4px';
+      container.style.fontFamily = 'monospace';
+      container.style.fontSize = '12px';
+      container.style.color = '#ffffff';
+      container.style.background = 'rgba(0,0,0,0.4)';
+      container.style.textAlign = 'center';
+      container.style.opacity = '0.3';
+      const countLabel = document.createElement('div');
+      countLabel.textContent = '0';
+      countLabel.style.fontWeight = 'bold';
+      const bar = document.createElement('div');
+      bar.style.height = '4px';
+      bar.style.background = `#${spec.color.toString(16).padStart(6, '0')}`;
+      bar.style.marginTop = '4px';
+      bar.style.width = '0%';
+      const stateLabel = document.createElement('div');
+      stateLabel.textContent = 'EMPTY';
+      stateLabel.style.fontSize = '10px';
+      container.appendChild(countLabel);
+      container.appendChild(bar);
+      container.appendChild(stateLabel);
+      this.activeHudElement.appendChild(container);
+      this.activeHudIcons.set(kind, { container, countLabel, bar, stateLabel });
+    }
   }
 
   private spawnFloatingText(text: string, delaySeconds: number): void {
@@ -1912,6 +2543,114 @@ export class Game {
       this.spawnFloatingText('2x Score Booster', 2.4);
     }
     this.breatherWasActive = this.breather.active;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // My Rules — HUD Reconciliation (Phase 7 Task 13)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Purpose:  Each frame, reconcile the 2 HUD regions to the current game
+    //           state — passive pills to activeEffects, active icons to
+    //           activeAmmo + activeDeployments. Passive pills are spawned
+    //           lazily on first appearance and removed when the effect
+    //           expires; active icons are always present (they just change
+    //           opacity / text / bar fill).
+    // Setup:    Called every frame from update(deltaTime) at line ~585 (and
+    //           from updateRespawn at line ~635 so the HUD continues to
+    //           refresh during the 3-second respawn countdown). Reads
+    //           this.activeEffects, this.activeAmmo, this.activeDeployments.
+    // Issues:   None.
+    // Fix:      Phase 7 Task 13. The reconcile pattern (snapshot present
+    //           kinds, prune entries no longer in the snapshot, spawn new
+    //           entries, update existing entries) is the same shape used
+    //           for activeShockwaves / activeShards — keeping it consistent
+    //           makes the codebase easier to reason about.
+    // Gotchas:  Pill labels use ACTIVE_KIND_SPECS[effect.kind].displayName,
+    //           NOT PICKUP_COLOR-derived text — both work but displayName
+    //           is the single source of truth for what the player reads.
+    //           The dataset querySelector is used because the pill child
+    //           elements are not cached on the LivePickup record — querySelector
+    //           per frame is cheap (3 pills max) and avoids an extra Map.
+    //           bar width math: non-deployable kinds use cooldown ratio
+    //           (1 - remaining/total) so the bar FILLS as cooldown completes
+    //           (matches the "loading bar" intuition). Deployable kinds
+    //           use remaining/total so the bar DRAINS as the deployment
+    //           fades — opposite direction, matches the depletion timeline.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Reconcile passive pill row to activeEffects.
+    const presentPassiveKinds = new Set(this.activeEffects.map((e) => e.kind));
+    for (const [kind, pill] of this.pickupHudPills) {
+      if (!presentPassiveKinds.has(kind)) {
+        pill.remove();
+        this.pickupHudPills.delete(kind);
+      }
+    }
+    for (const effect of this.activeEffects) {
+      let pill = this.pickupHudPills.get(effect.kind);
+      if (!pill) {
+        pill = document.createElement('div');
+        const color = `#${PICKUP_COLOR[effect.kind].toString(16).padStart(6, '0')}`;
+        pill.style.border = `2px solid ${color}`;
+        pill.style.padding = '4px 8px';
+        pill.style.minWidth = '80px';
+        pill.style.fontFamily = 'monospace';
+        pill.style.fontSize = '12px';
+        pill.style.color = '#ffffff';
+        pill.style.background = 'rgba(0,0,0,0.4)';
+        const label = document.createElement('div');
+        label.textContent = ACTIVE_KIND_SPECS[effect.kind].displayName;
+        label.style.fontWeight = 'bold';
+        const timeLabel = document.createElement('div');
+        timeLabel.style.fontSize = '10px';
+        const bar = document.createElement('div');
+        bar.style.height = '4px';
+        bar.style.background = color;
+        bar.style.marginTop = '2px';
+        pill.appendChild(label);
+        pill.appendChild(timeLabel);
+        pill.appendChild(bar);
+        this.pickupHudElement?.appendChild(pill);
+        this.pickupHudPills.set(effect.kind, pill);
+        pill.dataset.labelId = `label-${effect.kind}`;
+        pill.dataset.timeId = `time-${effect.kind}`;
+        pill.dataset.barId = `bar-${effect.kind}`;
+      }
+      const label = pill.querySelector(`[data-label-id="label-${effect.kind}"]`) as HTMLDivElement;
+      const timeLabel = pill.querySelector(`[data-time-id="time-${effect.kind}"]`) as HTMLDivElement;
+      const bar = pill.querySelector(`[data-bar-id="bar-${effect.kind}"]`) as HTMLDivElement;
+      timeLabel.textContent = `${effect.remaining.toFixed(1)}s`;
+      bar.style.width = `${(effect.remaining / effect.total) * 100}%`;
+    }
+
+    // Reconcile active icon row to activeAmmo.
+    for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES]) {
+      const icon = this.activeHudIcons.get(kind);
+      if (!icon) continue;
+      const ammo = this.activeAmmo[kind];
+      const spec = ACTIVE_KIND_SPECS[kind];
+      icon.countLabel.textContent = `${ammo.charges}`;
+      const onCooldown = ammo.cooldownRemaining > 0;
+      const deployed = kind === PickupKind.ORBIT_DRONES && this.activeDeployments.length > 0;
+      if (ammo.charges === 0 && !onCooldown) {
+        icon.container.style.opacity = '0.3';
+        icon.stateLabel.textContent = 'EMPTY';
+        icon.bar.style.width = '0%';
+      } else if (deployed) {
+        icon.container.style.opacity = '1';
+        icon.stateLabel.textContent = 'DEPLOYED';
+        const dep = this.activeDeployments[0];
+        const ratio = dep.remaining / ORBIT_DRONES_DURATION_SECONDS;
+        icon.bar.style.width = `${ratio * 100}%`;
+      } else if (onCooldown) {
+        icon.container.style.opacity = '0.5';
+        icon.stateLabel.textContent = 'COOLDOWN';
+        const ratio = 1 - ammo.cooldownRemaining / spec.cooldownSeconds;
+        icon.bar.style.width = `${ratio * 100}%`;
+      } else {
+        icon.container.style.opacity = '1';
+        icon.stateLabel.textContent = 'READY';
+        icon.bar.style.width = '100%';
+      }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════

@@ -29,6 +29,9 @@ const zeroInput: InputState = {
   aim: { x: 0, y: 0 },
   fire: false,
   deployBreather: false,
+  useActive1: false,
+  useActive2: false,
+  useActive3: false,
 };
 
 describe('ArenaMovementController', () => {
@@ -39,6 +42,9 @@ describe('ArenaMovementController', () => {
       aim: { x: 1, y: 0 },
       fire: false,
       deployBreather: false,
+      useActive1: false,
+      useActive2: false,
+      useActive3: false,
     };
     const controller = new ArenaMovementController();
 
@@ -56,6 +62,9 @@ describe('ArenaMovementController', () => {
       aim: { x: 1, y: 0 },
       fire: false,
       deployBreather: false,
+      useActive1: false,
+      useActive2: false,
+      useActive3: false,
     };
     const controller = new ArenaMovementController();
 
@@ -71,6 +80,9 @@ describe('ArenaMovementController', () => {
       aim: { x: 1, y: 0 },
       fire: false,
       deployBreather: false,
+      useActive1: false,
+      useActive2: false,
+      useActive3: false,
     };
     const controller = new ArenaMovementController();
 

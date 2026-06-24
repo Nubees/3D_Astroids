@@ -23,6 +23,9 @@ export interface InputState {
   readonly aim: Vector2;
   readonly fire: boolean;
   readonly deployBreather: boolean;
+  readonly useActive1: boolean;   // bound to '1' (Digit1)
+  readonly useActive2: boolean;   // bound to '2' (Digit2)
+  readonly useActive3: boolean;   // bound to '3' (Digit3)
 }
 
 export class InputManager {
@@ -42,16 +45,31 @@ export class InputManager {
   constructor() {
     this.onKeyDown = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
-      if (MOVEMENT_KEYS.has(key) || key === ' ' || key === 'x') {
+      if (
+        MOVEMENT_KEYS.has(key) ||
+        key === ' ' ||
+        key === 'x' ||
+        event.code === 'Digit1' ||
+        event.code === 'Digit2' ||
+        event.code === 'Digit3'
+      ) {
         event.preventDefault();
       }
       this.keys.add(key);
+      // Also track the raw code for digit-row keys (KeyboardEvent.key is
+      // locale-dependent, event.code is layout-independent).
+      if (event.code === 'Digit1' || event.code === 'Digit2' || event.code === 'Digit3') {
+        this.keys.add(event.code);
+      }
       this.anyKeyHit = true;
     };
 
     this.onKeyUp = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
       this.keys.delete(key);
+      if (event.code === 'Digit1' || event.code === 'Digit2' || event.code === 'Digit3') {
+        this.keys.delete(event.code);
+      }
     };
 
     this.onMouseMove = (event: MouseEvent): void => {
@@ -111,6 +129,9 @@ export class InputManager {
       aim: { x: this.mouseX, y: this.mouseY },
       fire: this.keys.has(' ') || this.leftMouseDown,
       deployBreather: this.keys.has('x'),
+      useActive1: this.keys.has('Digit1'),
+      useActive2: this.keys.has('Digit2'),
+      useActive3: this.keys.has('Digit3'),
     };
   }
 

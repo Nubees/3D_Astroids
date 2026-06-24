@@ -20,6 +20,9 @@ function createInput(overrides: Partial<InputState> = {}): InputState {
     aim: { x: 0, y: 0 },
     fire: false,
     deployBreather: false,
+    useActive1: false,
+    useActive2: false,
+    useActive3: false,
     ...overrides,
   };
 }
@@ -91,5 +94,39 @@ describe('Ship', () => {
     expect(ship.state.aim).toEqual({ x: 1, y: 0 });
     expect(ship.fireCooldown).toBe(0);
     expect(ship.canFire()).toBe(true);
+  });
+});
+
+describe('Ship — fireRateMultiplier (Phase 7 pickup)', () => {
+  it('with fireRateMultiplier=3, fireCooldown decrements 3x as fast', () => {
+    const ship = new Ship();
+    ship.fireCooldown = 0.9;
+    const input: InputState = {
+      move: { x: 0, y: 0 },
+      aim: { x: 0, y: 0 },
+      fire: false,
+      deployBreather: false,
+      useActive1: false,
+      useActive2: false,
+      useActive3: false,
+    };
+    ship.update(input, 0.1, 3);
+    expect(ship.fireCooldown).toBeCloseTo(0.6, 5);
+  });
+
+  it('with no multiplier (default), behavior is unchanged', () => {
+    const ship = new Ship();
+    ship.fireCooldown = 0.9;
+    const input: InputState = {
+      move: { x: 0, y: 0 },
+      aim: { x: 0, y: 0 },
+      fire: false,
+      deployBreather: false,
+      useActive1: false,
+      useActive2: false,
+      useActive3: false,
+    };
+    ship.update(input, 0.1);
+    expect(ship.fireCooldown).toBeCloseTo(0.8, 5);
   });
 });
