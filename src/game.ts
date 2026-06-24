@@ -239,6 +239,36 @@ interface ActiveHudIcon {
   stateLabel: HTMLDivElement; // "READY" / "COOLDOWN" / "DEPLOYED" / "EMPTY"
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — PassivePill Interface (Phase 7 Bug Fix 2026-06-24)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose:  Cache the pill's child DOM refs at creation time so the per-frame
+//           HUD reconcile loop can update label/time/bar WITHOUT re-querying
+//           the DOM with `pill.querySelector(...)`. The previous version set
+//           `pill.dataset.labelId` on the pill itself but then queried for it
+//           as a *child* selector — the children never received those dataset
+//           attributes, so `querySelector` returned null and the next
+//           `timeLabel.textContent = ...` threw a TypeError that froze the
+//           game loop the first time a passive pickup was collected.
+// Setup:    Created in the same place the pill DOM was built (updateHud,
+//           inner-loop creation branch). Consumed by the update branch of
+//           the same loop, which used to read child refs via querySelector.
+// Issues:   Pre-fix bug was a TypeScript type-assertion lie: `as HTMLDivElement`
+//           hid the null at compile time. Replacing it with a real cached ref
+//           makes the runtime failure impossible.
+// Fix:      2026-06-24 — replace `querySelector` + `as` cast with a typed
+//           ref captured at creation. Mirrors the ActiveHudIcon pattern
+//           already in this file (container/countLabel/bar/stateLabel).
+// Gotchas:  Keep `pill` in this struct even though it is unused at update time
+//           — tests or future features may need it for positioning.
+// ═══════════════════════════════════════════════════════════════════════════
+interface PassivePill {
+  pill: HTMLDivElement;
+  label: HTMLDivElement;
+  timeLabel: HTMLDivElement;
+  bar: HTMLDivElement;
+}
+
 interface FloatingText {
   element: HTMLDivElement;
   age: number;
@@ -308,7 +338,7 @@ export class Game {
   private activeDeployments: DroneDeploymentState[] = [];
   private homingMissiles: HomingMissileState[] = [];
   private pickupHudElement: HTMLDivElement | null = null;
-  private pickupHudPills: Map<PickupKind, HTMLDivElement> = new Map();
+  private pickupHudPills: Map<PickupKind, PassivePill> = new Map();
   private activeHudElement: HTMLDivElement | null = null;
   private activeHudIcons: Map<PickupKind, ActiveHudIcon> = new Map();
   private pendingTelegraphs: PendingTelegraph[] = [];
@@ -2566,9 +2596,14 @@ export class Game {
     // Gotchas:  Pill labels use ACTIVE_KIND_SPECS[effect.kind].displayName,
     //           NOT PICKUP_COLOR-derived text — both work but displayName
     //           is the single source of truth for what the player reads.
-    //           The dataset querySelector is used because the pill child
-    //           elements are not cached on the LivePickup record — querySelector
-    //           per frame is cheap (3 pills max) and avoids an extra Map.
+    //           Child refs (label, timeLabel, bar) are cached on the
+    //           PassivePill struct at creation time so the per-frame
+    //           reconcile can read them with O(1) property access. (Earlier
+    //           versions used `pill.querySelector` + a `dataset` round-trip
+    //           and hit a null-deref when a passive pickup was first
+    //           collected — the dataset was set on the parent but the
+    //           children were never tagged, so the query returned null.
+    //           See PassivePill interface for the fix history.)
     //           bar width math: non-deployable kinds use cooldown ratio
     //           (1 - remaining/total) so the bar FILLS as cooldown completes
     //           (matches the "loading bar" intuition). Deployable kinds
@@ -2578,16 +2613,16 @@ export class Game {
 
     // Reconcile passive pill row to activeEffects.
     const presentPassiveKinds = new Set(this.activeEffects.map((e) => e.kind));
-    for (const [kind, pill] of this.pickupHudPills) {
+    for (const [kind, entry] of this.pickupHudPills) {
       if (!presentPassiveKinds.has(kind)) {
-        pill.remove();
+        entry.pill.remove();
         this.pickupHudPills.delete(kind);
       }
     }
     for (const effect of this.activeEffects) {
-      let pill = this.pickupHudPills.get(effect.kind);
-      if (!pill) {
-        pill = document.createElement('div');
+      let entry = this.pickupHudPills.get(effect.kind);
+      if (!entry) {
+        const pill = document.createElement('div');
         const color = `#${PICKUP_COLOR[effect.kind].toString(16).padStart(6, '0')}`;
         pill.style.border = `2px solid ${color}`;
         pill.style.padding = '4px 8px';
@@ -2609,16 +2644,11 @@ export class Game {
         pill.appendChild(timeLabel);
         pill.appendChild(bar);
         this.pickupHudElement?.appendChild(pill);
-        this.pickupHudPills.set(effect.kind, pill);
-        pill.dataset.labelId = `label-${effect.kind}`;
-        pill.dataset.timeId = `time-${effect.kind}`;
-        pill.dataset.barId = `bar-${effect.kind}`;
+        entry = { pill, label, timeLabel, bar };
+        this.pickupHudPills.set(effect.kind, entry);
       }
-      const label = pill.querySelector(`[data-label-id="label-${effect.kind}"]`) as HTMLDivElement;
-      const timeLabel = pill.querySelector(`[data-time-id="time-${effect.kind}"]`) as HTMLDivElement;
-      const bar = pill.querySelector(`[data-bar-id="bar-${effect.kind}"]`) as HTMLDivElement;
-      timeLabel.textContent = `${effect.remaining.toFixed(1)}s`;
-      bar.style.width = `${(effect.remaining / effect.total) * 100}%`;
+      entry.timeLabel.textContent = `${effect.remaining.toFixed(1)}s`;
+      entry.bar.style.width = `${(effect.remaining / effect.total) * 100}%`;
     }
 
     // Reconcile active icon row to activeAmmo.
