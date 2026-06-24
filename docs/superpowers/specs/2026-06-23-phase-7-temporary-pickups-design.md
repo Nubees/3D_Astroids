@@ -322,6 +322,9 @@ export interface ActiveAmmoState {
 export type ActiveAmmoMap = Record<PickupKind, ActiveAmmoState>;
 
 // Extend the apply function to also grant ammo for active kinds.
+// (DIAL-UP update: caps now come from ACTIVE_KIND_SPECS[kind].chargeCap,
+// not the per-kind BOMB_STRIKE_CHARGE_CAP constant, so this function is
+// forward-compatible with Orbit Drones and Homing Missiles.)
 export function applyPickupEffect(
   kind: PickupKind,
   ship: { fireCooldown: number },
@@ -330,8 +333,9 @@ export function applyPickupEffect(
 ): { kind: PickupKind; remaining: number; total: number } | { kind: PickupKind; ammo: ActiveAmmoState } {
   // ... existing passive branches unchanged ...
   case PickupKind.BOMB_STRIKE: {
+    const spec = ACTIVE_KIND_SPECS[PickupKind.BOMB_STRIKE];
     activeAmmo[PickupKind.BOMB_STRIKE].charges = Math.min(
-      BOMB_STRIKE_CHARGE_CAP,
+      spec.chargeCap,
       activeAmmo[PickupKind.BOMB_STRIKE].charges + 1,
     );
     // No timer (active pickups have no duration; the ammo IS the resource).
@@ -513,3 +517,376 @@ The existing `tests/pickups.test.ts` (passive pickup tests from the original spe
 - The bomb's damage pass order vs. `handleCollisions` — needs an implementation spike to confirm it doesn't double-count damage to a crystal that was just hit by a projectile the same frame.
 - Should the Bomb Strike also damage the player's own ship fragments / shield? (Default: no — friendly fire off. The spec says "no" but the implementer should confirm the player has no other self-damage sources in the scene.)
 - Visual: should the bomb's shockwave color be `0xff8800` (orange, matches the pickup mesh) or `0xffffff` (white, more "explosion"-like)? Spec assumes orange to match the pickup color and avoid white-out per the Phase 6c/6d additive-blending lesson.
+
+---
+
+# Phase 7 DIAL-UP — Two More Active Kinds (Orbit Drones + Homing Missiles)
+
+**Status:** Design approved 2026-06-24
+**Extends:** "Phase 7 EXPANSION — Active Activation Subset" above.
+**Goal:** Ship 3 active pickup kinds total (Bomb Strike + Orbit Drones + Homing Missiles) in the same Phase 7 commit, not 1. Each kind occupies one slot in the bottom-right HUD and is bound to `1`/`2`/`3`.
+
+## Why 3 actives, not 1
+
+The single Bomb Strike in the EXPANSION spec proves the model but doesn't *use* it. With 3 distinct kinds:
+- **Slot 1** (Bomb Strike) = burst AOE — single key press, radial damage, instant payoff.
+- **Slot 2** (Orbit Drones) = deployable turret — key press summons a 6s autonomous helper.
+- **Slot 3** (Homing Missiles) = tracking projectile — key press fires a 4-missile volley.
+
+Three distinct activation paradigms (instant, deploy, volley) give the player real choice in their loadout. They also fill the slot row the EXPANSION spec reserved (`2` and `3`), so the architecture investment pays off in the same commit.
+
+## The 3 active kinds (full roster)
+
+| Kind | Key | Charges | Cooldown | Duration | Visual |
+|------|-----|---------|----------|----------|--------|
+| `BOMB_STRIKE` | `1` | cap 3 | 3.0 s | (instant) | Shockwave ring (existing class) + floating "BOMB!" text |
+| `ORBIT_DRONES` | `2` | cap 2 | 4.0 s | 6.0 s after press | 2 cyan satellite meshes orbiting ship at radius 1.5, auto-firing at nearest asteroid |
+| `HOMING_MISSILES` | `3` | cap 3 | 4.0 s | (instant) | 4 magenta tracking projectiles, 1.5s tracking, 1 HP each |
+
+### Why these 3 (and not Mega Laser + Nuke)
+
+User choice from the research-backed menu. The chosen trio:
+- **Slot variety**: 1 burst / 2 deploy / 3 volley — three paradigms, not three variations of the same idea.
+- **Reuse-heavy**: Shockwave (existing) for bomb, MeshStandardMaterial (existing) for drones, the existing projectile system (existing) for missiles. Zero new shader / mesh class.
+- **No boss required**: all 3 are useful in normal play against the existing crystal/iron field. The "ultimate weapon for boss battles" deferral remains a separate phase per the GDD.
+
+## New active #2 — Orbit Drones (rank #5 in research)
+
+A press-to-deploy turret that:
+- Spawns 2 satellite meshes that orbit the ship at radius `ORBIT_DRONES_ORBIT_RADIUS = 1.5`, angular speed `ORBIT_DRONES_ORBIT_SPEED = 2π / 1.5` rad/s (one full orbit per 1.5s).
+- Each drone auto-fires at the *nearest* asteroid in `ORBIT_DRONES_TARGET_RADIUS = 4.0` every `ORBIT_DRONES_FIRE_INTERVAL = 0.4` seconds.
+- Drone projectiles use the existing `fireProjectile` path — 1 HP, normal cull.
+- Drones expire after 6.0s; on expiry the meshes fade out over 0.3s and are disposed.
+
+### Why "press to deploy" (not passive pickup)
+
+Orbit Drones live in an *active slot* because they're a *deployable resource* (charges + cooldown) not a *timer-augmenting power-up*. Two reasons:
+1. **Balance**: a passive 6s drone that auto-deploys on pickup is too strong — the player would just stockpile drones from rapid crystal kills and become invincible. Charge-gating limits the total airborne time per minute.
+2. **HUD consistency**: slot 2 shows "charges remaining + cooldown sweep," the same affordance as slots 1 and 3. The player learns one row to read three weapons.
+
+### Cooldown semantics — block re-press while active
+
+After the player presses `2`:
+- Cooldown starts *after* the 6s active window expires (not at press time).
+- Re-pressing `2` during the active window is silently ignored (no stacking, no timer refresh).
+- Visual feedback: the slot 2 icon shows "DEPLOYED" text + a draining bar instead of charges+cooldown during the active window.
+- Result: max 4 drones on screen at once (cap 2 charges × 2 drones per deploy).
+
+## New active #3 — Homing Missiles (rank #3 in research)
+
+A press-to-fire tracking volley that:
+- Spawns 4 missile meshes from the ship's position.
+- Each missile tracks the *nearest* asteroid within `HOMING_MISSILES_TRACKING_RADIUS = 8.0` for `HOMING_MISSILES_TRACKING_DURATION = 1.5s` (or until impact).
+- If no asteroid is in range at spawn, missiles fly straight in the player's current aim direction for 1.5s then self-destruct.
+- Each missile deals `HOMING_MISSILES_DAMAGE = 1` on impact (existing `AsteroidState.health -= 1` path).
+- Missile speed: `HOMING_MISSILES_SPEED = 6.0` units/s (faster than normal projectiles' ~4.0 for arcade feel).
+
+### Why "4-missile volley" (not 2-heavy or held-fire)
+
+4-missile volley is the Doom Eternal Rocket model — fast, lethal, screen-filling. Two reasons:
+1. **Visual signature**: 4 distinct magenta trails read instantly as "tracking weapon." A 2-missile volley reads as "two projectiles," not "homing salvo."
+2. **Damage per pickup**: 4 missiles × 1 HP = 4 HP per pickup. Matches the Bomb Strike's "clears a cluster" payoff. With cap 3, the player can have 12 missiles queued for a boss phase.
+
+### Tracking math (simple, deterministic)
+
+Each frame for each missile:
+1. Find the nearest `LiveAsteroid` within `HOMING_MISSILES_TRACKING_RADIUS`. If none, hold current heading.
+2. Compute the steering vector: `(target.position - missile.position).normalize() * HOMING_MISSILES_TURN_RATE`. `HOMING_MISSILES_TURN_RATE = 8.0` rad/s of arc.
+3. Apply steering to the missile's velocity (don't snap — let the missile *curve* toward target for visible tracking).
+
+The curve is the "tracking" signature — straight-line missiles wouldn't read as homing.
+
+## Architecture additions to the EXPANSION spec
+
+### `src/pickups.ts` — extend `PickupKind` and constants
+
+```ts
+export enum PickupKind {
+  FIRE_RATE = 'fireRate',           // passive — 6s
+  SHIELD = 'shield',                // passive — 8s
+  SPREAD = 'spread',                // passive — 10s
+  BOMB_STRIKE = 'bombStrike',       // active — slot 1 — instant AOE
+  ORBIT_DRONES = 'orbitDrones',     // active — slot 2 — 6s deploy
+  HOMING_MISSILES = 'homingMissiles', // active — slot 3 — 4-missile volley
+}
+
+// Bomb Strike constants (unchanged from EXPANSION spec)
+export const BOMB_STRIKE_RADIUS = 5.0;
+export const BOMB_STRIKE_COOLDOWN_SECONDS = 3.0;
+export const BOMB_STRIKE_CHARGE_CAP = 3;
+export const BOMB_STRIKE_DAMAGE = 1;
+
+// Orbit Drones constants (NEW)
+export const ORBIT_DRONES_COOLDOWN_SECONDS = 4.0;
+export const ORBIT_DRONES_CHARGE_CAP = 2;
+export const ORBIT_DRONES_DURATION_SECONDS = 6.0;
+export const ORBIT_DRONES_ORBIT_RADIUS = 1.5;
+export const ORBIT_DRONES_ORBIT_PERIOD_SECONDS = 1.5;  // one orbit per 1.5s
+export const ORBIT_DRONES_TARGET_RADIUS = 4.0;
+export const ORBIT_DRONES_FIRE_INTERVAL_SECONDS = 0.4;
+export const ORBIT_DRONES_DAMAGE = 1;
+export const ORBIT_DRONES_DRONE_COUNT = 2;
+export const ORBIT_DRONES_FADE_OUT_SECONDS = 0.3;
+
+// Homing Missiles constants (NEW)
+export const HOMING_MISSILES_COOLDOWN_SECONDS = 4.0;
+export const HOMING_MISSILES_CHARGE_CAP = 3;
+export const HOMING_MISSILES_VOLLEY_COUNT = 4;
+export const HOMING_MISSILES_DAMAGE = 1;
+export const HOMING_MISSILES_SPEED = 6.0;
+export const HOMING_MISSILES_TRACKING_RADIUS = 8.0;
+export const HOMING_MISSILES_TRACKING_DURATION = 1.5;
+export const HOMING_MISSILES_TURN_RATE = 8.0;  // rad/s of arc
+
+// Drone timers are per-deploy (charges cap × drones per deploy).
+// Each deploy creates a new DronsTimer instance; on expiry it disposes the meshes.
+export interface DroneDeploymentState {
+  remaining: number;     // seconds until all drones expire
+  droneMeshes: Mesh[];   // the 2 satellite meshes
+  shipPosition: Vector2; // for orbit center; refresh each frame from ship state
+  phase: number;         // orbital phase, advances each frame
+}
+
+// Same for missiles — a volley fires 4 missiles, each tracked until expiry or impact.
+export interface HomingMissileState {
+  position: Vector2;
+  velocity: Vector2;
+  remaining: number;     // tracking duration left
+  mesh: Mesh;
+  targetId: string | null;  // optional: nearest asteroid id at lock-on
+}
+```
+
+### Extend `ActiveAmmoState` — keep it the same, the *dispatch* is what changes
+
+The `ActiveAmmoState` interface stays `{ charges, cooldownRemaining }` — what changes is the per-kind *behavior table* the Game reads on pickup collect. New helper:
+
+```ts
+// Pure helper: what constants apply to each active kind?
+// (DIAL-UP: this table is the single source of truth for active kind
+// behavior. The EXPANSION's applyPickupEffect body reads from this table
+// instead of hard-coding BOMB_STRIKE_CHARGE_CAP, so the same code path
+// handles all 3 active kinds.)
+export interface ActiveKindSpec {
+  readonly chargeCap: number;
+  readonly cooldownSeconds: number;
+  readonly displayName: string;   // for HUD label ("BOMB" / "DRONES" / "MISSILES")
+  readonly color: number;         // 0xff8800 / 0x66ddff / 0xff66ff
+  readonly isDeployable: boolean; // true for ORBIT_DRONES (timer-based), false for BOMB / MISSILES (instant)
+  readonly durationSeconds: number; // 0 for instant kinds, 6.0 for drones
+}
+
+export const ACTIVE_KIND_SPECS: Record<PickupKind, ActiveKindSpec> = {
+  [PickupKind.BOMB_STRIKE]: {
+    chargeCap: 3,
+    cooldownSeconds: 3.0,
+    displayName: 'BOMB',
+    color: 0xff8800,
+    isDeployable: false,
+    durationSeconds: 0,
+  },
+  [PickupKind.ORBIT_DRONES]: {
+    chargeCap: 2,
+    cooldownSeconds: 4.0,
+    displayName: 'DRONES',
+    color: 0x66ddff,
+    isDeployable: true,
+    durationSeconds: 6.0,
+  },
+  [PickupKind.HOMING_MISSILES]: {
+    chargeCap: 3,
+    cooldownSeconds: 4.0,
+    displayName: 'MISSILES',
+    color: 0xff66ff,
+    isDeployable: false,
+    durationSeconds: 0,
+  },
+};
+```
+
+This single table replaces the 3 hand-written `if/else` branches the EXPANSION spec had for BOMB_STRIKE. The Game reads `ACTIVE_KIND_SPECS[kind].chargeCap` on pickup collect instead of hard-coding 3.
+
+### `src/input.ts` — bind `2` and `3` to `useActive2` / `useActive3`
+
+```ts
+// In the keydown listener:
+if (e.code === 'Digit1') input.useActive1 = true;
+if (e.code === 'Digit2') input.useActive2 = true;
+if (e.code === 'Digit3') input.useActive3 = true;
+
+// And in keyup: same, set false.
+```
+
+### `src/game.ts` — additions
+
+| Hook | Change |
+|------|--------|
+| New field | `private activeDeployments: DroneDeploymentState[] = []` — one entry per live drone deploy (1-2 simultaneous max) |
+| New field | `private homingMissiles: HomingMissileState[] = []` — live missiles (up to 12 with 3 charges × 4 volley) |
+| New field | `private droneMeshGroup: Group | null` — parent for all drone meshes (clean disposal) |
+| New field | `private missileMeshGroup: Group | null` — parent for all missile meshes |
+| `applyPickupEffect` call sites | Now reads `ACTIVE_KIND_SPECS[kind]` to set charge cap. For active kinds, increments charges. For passive kinds, unchanged. |
+| `update(deltaTime)` | After `tickActiveAmmo`, add:<br>1. `tickDroneDeployments(deltaTime)` — decrements remaining, updates orbital phase, repositions drone meshes, fires projectiles at nearest target.<br>2. `tickHomingMissiles(deltaTime)` — updates position by velocity, applies tracking steering, decrements remaining, checks asteroid collision, disposes on impact/expiry.<br>3. `input.useActive1 && canFireActive(activeAmmo[BOMB_STRIKE])` → `fireActivePickup(BOMB_STRIKE)`<br>4. `input.useActive2 && canFireActive(activeAmmo[ORBIT_DRONES]) && activeDeployments.length === 0` → `fireActivePickup(ORBIT_DRONES)` (the `length === 0` is the "block re-press while active" guard)<br>5. `input.useActive3 && canFireActive(activeAmmo[HOMING_MISSILES])` → `fireActivePickup(HOMING_MISSILES)` |
+| `fireActivePickup(kind)` | Dispatch on kind:<br>• BOMB_STRIKE → existing EXPANSION behavior (Shockwave + radial damage + floating text)<br>• ORBIT_DRONES → spawn 2 drone meshes, push new `DroneDeploymentState` with `remaining: 6.0`<br>• HOMING_MISSILES → spawn 4 missile meshes aimed at the player's current aim direction, push 4 `HomingMissileState` |
+| `updateActiveHud(deltaTime)` | For each of 3 slots, render: small icon (square with kind color), charge count (`"3"`), and either a cooldown sweep (when on cooldown) OR a drain bar (when deployed, for ORBIT_DRONES only) OR "READY" text (when charges > 0 and not on cooldown and not deployed). |
+| `stop()` | Dispose drone mesh group, missile mesh group, clear `activeDeployments` and `homingMissiles`, remove `activeHudElement` children. |
+
+### `src/asteroid.ts` — no changes
+
+Drone and missile projectiles use the existing `fireProjectile(angleOffsets)` path. Drone auto-fire passes `[0]` (single shot); missile volley passes 4 aim-relative offsets.
+
+### `src/post-processing.ts` — no changes
+
+All 3 active visuals are within the existing bloom budget (the existing 0.6 strength handles 1 shockwave + 2 drone meshes + 4 missile trails without white-out, per the Phase 6c/6d tuning).
+
+## Data flow — orbit drones
+
+```
+[On pickup collect, kind === ORBIT_DRONES]
+  applyPickupEffect(ORBIT_DRONES, ship, shield, activeAmmo)
+    activeAmmo[ORBIT_DRONES].charges = min(2, current + 1)
+  spawn "+DRONES" floating text
+
+[On press '2']
+  if (activeAmmo[ORBIT_DRONES].charges > 0
+      && activeAmmo[ORBIT_DRONES].cooldownRemaining <= 0
+      && activeDeployments.length === 0):        ← the "block re-press" guard
+    consumeActiveCharge(activeAmmo[ORBIT_DRONES])
+    spawnDroneDeployment(shipPos)
+      creates 2 cyan Mesh (IcosahedronGeometry, MeshStandardMaterial 0x66ddff, scale 0.12)
+      pushes { remaining: 6.0, droneMeshes: [m1, m2], shipPosition, phase: 0 }
+
+[Per frame in tickDroneDeployments(deltaTime)]
+  for each deployment:
+    remaining -= deltaTime
+    phase += (2π / 1.5) * deltaTime
+    // Place 2 drones at phase + 0 and phase + π (opposite sides of orbit)
+    m1.position = shipPos + (cos(phase), sin(phase)) * 1.5
+    m2.position = shipPos + (cos(phase + π), sin(phase + π)) * 1.5
+    fireTimer += deltaTime
+    if (fireTimer >= 0.4):
+      fireTimer = 0
+      nearest = findNearestAsteroid(shipPos, radius=4.0)
+      if (nearest):
+        angle = atan2(nearest.y - shipPos.y, nearest.x - shipPos.x)
+        fireProjectile([0]) with origin = drone position (NOT ship)
+  if (remaining <= 0):
+    start fade-out (scale *= 0.95 each frame for 0.3s)
+    after 0.3s: dispose meshes, splice from array
+
+[Cooldown starts when remaining hits 0]
+  activeAmmo[ORBIT_DRONES].cooldownRemaining = ORBIT_DRONES_COOLDOWN_SECONDS  // 4.0
+```
+
+## Data flow — homing missiles
+
+```
+[On press '3']
+  if (canFireActive(activeAmmo[HOMING_MISSILES])):
+    consumeActiveCharge(activeAmmo[HOMING_MISSILES])
+    spawnMissileVolley(shipPos, aimDir)
+      for i in 0..3:
+        spread = (i - 1.5) * 0.15   // ±0.225 rad spread, gives a fan pattern at spawn
+        velocity = rotate(aimDir, spread) * 6.0
+        push { position: shipPos, velocity, remaining: 1.5, mesh: <new magenta Mesh> }
+
+[Per frame in tickHomingMissiles(deltaTime)]
+  for each missile:
+    remaining -= deltaTime
+    nearest = findNearestAsteroid(missile.position, radius=8.0)
+    if (nearest && remaining > 0):
+      desired = (nearest.position - missile.position).normalize()
+      current = missile.velocity.normalize()
+      // SLERP-like: lerp current toward desired by turn rate
+      newDir = lerpAngle(current, desired, HOMING_MISSILES_TURN_RATE * deltaTime)
+      missile.velocity = newDir * HOMING_MISSILES_SPEED
+    missile.position += missile.velocity * deltaTime
+    // Check asteroid collision (simple: hypot < 0.3 = hit)
+    if (collidesWithAnyAsteroid(missile.position)):
+      asteroid.health -= 1
+      destroy missile (dispose mesh, splice)
+      if (asteroid.health <= 0): destroyAsteroid(asteroid)
+    else if (remaining <= 0):
+      destroy missile (dispose mesh, splice)
+```
+
+## HUD — 3 active slots
+
+The bottom-right HUD row grows from 1 icon (BOMB only) to 3 icons (BOMB / DRONES / MISSILES). Each icon is a 56×56px div with:
+
+```
+┌─────────────────┐
+│  [icon]  N      │   ← icon (square, kind color) + charge count
+│  ━━━━━━━━━━     │   ← thin horizontal bar (cooldown OR duration OR full = ready)
+└─────────────────┘
+```
+
+State mapping:
+- **READY** (charges > 0, no cooldown, no active deploy): icon full color, count shown, bar fully filled.
+- **COOLDOWN** (charges > 0, cooldownRemaining > 0): icon at 50% opacity, count shown, bar drains right-to-left as `1 - cooldownRemaining / cooldownSeconds`.
+- **DEPLOYED** (only for ORBIT_DRONES during the 6s active window): icon full color, count decremented (shows 1 if 2 charges spent, 0 if both), bar drains right-to-left as `remaining / durationSeconds`.
+- **EMPTY** (charges == 0, no cooldown): icon at 30% opacity, count greyed-out, bar empty.
+
+All 3 slots render side-by-side with 8px gap, anchored 16px from bottom-right corner.
+
+## Drop rates revisited
+
+- **Crystal destroyed** → guaranteed 1 pickup, kind uniformly random across all 6 kinds (3 passive + 3 active).
+- **Iron LARGE destroyed** → 10% chance, same uniform 6-kind roll.
+- **Iron SMALL/MEDIUM/TINY destroyed** → no pickup.
+
+With 6 kinds, the player gets one of each active kind per ~6 crystal kills on average. First-time encounter with each new active is within ~30 seconds of play.
+
+## Test plan additions (extend `tests/pickups-active.test.ts`)
+
+11. `ACTIVE_KIND_SPECS[BOMB_STRIKE].chargeCap === 3` and `cooldownSeconds === 3.0`.
+12. `ACTIVE_KIND_SPECS[ORBIT_DRONES].chargeCap === 2` and `isDeployable === true` and `durationSeconds === 6.0`.
+13. `ACTIVE_KIND_SPECS[HOMING_MISSILES].chargeCap === 3` and `isDeployable === false` and `durationSeconds === 0`.
+14. `applyPickupEffect(ORBIT_DRONES, ...)` increments charges to 1.
+15. `applyPickupEffect(HOMING_MISSILES, ...)` increments charges to 1.
+16. Drone deployment tick: after 0.5s, both drone meshes are positioned at radius 1.5 from ship (within tolerance).
+17. Drone deployment tick: after 6.0s, the deployment is removed from the array and meshes marked for disposal.
+18. Missile volley spawn: pressing MISSILES produces 4 `HomingMissileState` entries with distinct velocities.
+19. Missile tracking: with a target placed at 5 units, missile velocity converges toward target heading over 0.5s.
+20. Missile expiry: after `HOMING_MISSILES_TRACKING_DURATION` without impact, missile is removed.
+21. Missile impact: missile within `0.3` of any asteroid decrements `asteroid.health` by `HOMING_MISSILES_DAMAGE`.
+
+## Files NOT modified (re-asserted)
+
+- `src/asteroid.ts` — no crystal FX changes, no new methods. Drone auto-fire uses existing `fireProjectile` with origin override.
+- `src/scrap.ts` — magnet math duplicated (not imported), same as EXPANSION spec.
+- `src/crystal-fx.ts` — telegraph unchanged.
+- `src/post-processing.ts` — no bloom changes.
+- `src/shockwave.ts` — reused as-is for Bomb Strike visual.
+
+## Commit message (DIAL-UP replaces EXPANSION commit message)
+
+`feat(pickups): Phase 7 — 3 passive + 3 active (Bomb Strike / Orbit Drones / Homing Missiles)`
+
+## Verification (additions to EXPANSION)
+
+- Vitest: existing 203 tests + 15 passive pickup tests + 21 active pickup tests = 239 tests green.
+- Typecheck: clean.
+- Build: clean.
+- Playwright screenshot: collect all 3 active kinds in sequence, capture bottom-right HUD with 3 icons showing "READY" state.
+- Playwright screenshot: press `2`, capture a frame with 2 cyan drone meshes orbiting the ship + first drone projectile visible.
+- Playwright screenshot: press `3` with an asteroid in front of the player, capture 4 magenta missile trails curving toward the target.
+- Playwright screenshot: press `1`, capture the shockwave ring + a "DEPLOYED" / "COOLDOWN" indicator on slots 2 and 3 respectively.
+- Playwright screenshot: bottom-right HUD with one slot in DEPLOYED state (drain bar), one in COOLDOWN (radial sweep), one in READY (full bar).
+
+## Anti-patterns avoided (dial-up-specific)
+
+- **No new shader** — drones use `MeshStandardMaterial` (existing); missiles use `MeshBasicMaterial` (existing, no PBR cost). Zero new GLSL.
+- **No new global state** — `activeDeployments` and `homingMissiles` are owned by `Game`, same pattern as `activeShards`.
+- **No refactor of existing projectile system** — missiles reuse `fireProjectile` with origin override; drones fire from their own position using the same call. No new projectile class.
+- **No new HUD regions** — the bottom-right ammo row just grows from 1 icon to 3 icons. No new screen real estate.
+- **No breaking changes to passive pickups** — `fireRateMultiplier` / shield+ / spread logic is unchanged. The 3 active kinds sit alongside the 3 passive kinds in the same `PickupKind` enum.
+- **No bloom white-out** — 3 simultaneous active visuals (1 shockwave + 2 drones + 4 missiles) sit within the existing 0.6 bloom strength budget. The Phase 6c/6d tuning saga is the reference here; we are not adding new AdditiveBlending sources.
+
+## Open questions deferred to writing-plans
+
+- Should orbit drones prioritize *asteroid type* (always target crystal first if one is in range) or just *nearest*? Spec assumes nearest for simplicity; crystal-priority is a 1-line filter if desired.
+- Should homing missiles target *shards* too, or only full asteroids? Spec assumes asteroids-only (shards are sub-targets; missiles skipping them preserves the existing shard-vs-asteroid visual hierarchy).
+- Drone projectile speed: same as player projectiles (~4.0 units/s) or faster (6.0 to feel "turret-like")? Spec assumes same as player for visual consistency.
+- Should the drone's auto-fire be audible? (Default: no — drones are visual-only, no new sound asset in Phase 7.)
+- Should pressing `2` mid-deployment (within the 0.3s fade-out) be blocked or allowed? Spec assumes blocked (cleaner state machine).
