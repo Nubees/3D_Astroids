@@ -13,6 +13,7 @@ import { AsteroidState, Vector2 } from './types';
 import {
   HOMING_MISSILES_DAMAGE,
   HOMING_MISSILES_MISSILE_IMPACT_RADIUS,
+  HOMING_MISSILES_NEAR_TIER_COUNT,
   HOMING_MISSILES_SPEED,
   HOMING_MISSILES_TRACKING_DURATION,
   HOMING_MISSILES_TRACKING_RADIUS,
@@ -72,9 +73,12 @@ export interface HomingMissileState {
   velocity: Vector2;
   remaining: number;
   mesh: Mesh;          // sphere body core (opaque)
-  assembly: Group;     // core + halo + flame cone, rotated to face velocity
+  assembly: Group;     // core + halo + noseTip + 4 fins + flame, rotated to face velocity
   flame: Mesh;         // thruster flame cone (additive)
   halo: Mesh;          // halo mesh — disposed alongside mesh + flame
+  noseTip: Mesh;       // forward-pointing cone (+X) — disposed by disposeMissileState
+  fins: Mesh[];        // 4 flat magenta triangles at -X — disposed by disposeMissileState
+  volleyIndex: number; // 0..VOLLEY_COUNT-1; first NEAR_TIER_COUNT seek NEAREST, rest FARTHEST
   spawnTime: number;   // for firePulse oscillation
   firePulse: number;   // accumulates elapsed time for flicker
 }
@@ -82,11 +86,12 @@ export interface HomingMissileState {
 export interface PendingMissile {
   delayRemaining: number;
   spread: number; // angular offset from aim direction (radians)
+  volleyIndex: number; // 0..VOLLEY_COUNT-1; first NEAR_TIER_COUNT seek NEAREST, rest FARTHEST
 }
 
 export interface VolleySchedule {
   remaining: number; // counts down to first launch (0 initially)
-  pending: PendingMissile[]; // 4 entries, in launch order
+  pending: PendingMissile[]; // 6 entries in Phase 7c-2, in launch order
 }
 
 const ORBIT_ANGULAR_SPEED = (2 * Math.PI) / ORBIT_DRONES_ORBIT_PERIOD_SECONDS;
@@ -111,6 +116,29 @@ export function findNearestAsteroid(
     }
   }
   return nearest;
+}
+
+/**
+ * Find the farthest asteroid from `position` within `maxRadius`. Returns
+ * null if none in range. Used by Phase 7c-2 "far tier" missiles (volleyIndex
+ * >= NEAR_TIER_COUNT) so the last 3 missiles in a 6-volley hit the back of
+ * the arena instead of clustering on the near target.
+ */
+export function findFarthestAsteroid(
+  position: Vector2,
+  asteroids: AsteroidState[],
+  maxRadius: number,
+): AsteroidState | null {
+  let farthest: AsteroidState | null = null;
+  let farthestDistance = -1;
+  for (const a of asteroids) {
+    const d = Math.hypot(a.position.x - position.x, a.position.y - position.y);
+    if (d <= maxRadius && d > farthestDistance) {
+      farthest = a;
+      farthestDistance = d;
+    }
+  }
+  return farthest;
 }
 
 export function spawnDroneDeployment(
@@ -225,7 +253,7 @@ const FLAME_LENGTH = 0.40;
 const FLAME_BASE_RADIUS = 0.16;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Homing Missiles (Phase 7b / Phase 7c)
+// My Rules — Homing Missiles (Phase 7b / Phase 7c / Phase 7c-2)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: scheduleMissileVolley + tickMissileVolleySchedules +
 //          tickHomingMissiles implement the per-frame behavior of the
@@ -248,6 +276,11 @@ const FLAME_BASE_RADIUS = 0.16;
 //          (see createMissileAssembly in src/missile-vfx.ts); smoke spawns at
 //          the rear nozzle (emitMissileSmokeRear) so the trail is visually
 //          distinct from the body silhouette.
+//          Phase 7c-2 — body assembly now has 7 children (core + halo +
+//          noseTip cone + 4 rear fins); 6-missile volley with tier targeting:
+//          first NEAR_TIER_COUNT (3) seek NEAREST, last (3) seek FARTHEST
+//          within TRACKING_RADIUS. Disposal consolidated into disposeMissileState
+//          helper called from BOTH the expiry path and the impact path.
 // Gotchas: Vector2 is readonly in this codebase — must construct new objects
 //          rather than mutating `.x`/`.y`. The spread formula is now
 //          narrower (VOLLEY_HALF_SPREAD=0.06 / 1.5) because the schedule's
@@ -256,16 +289,23 @@ const FLAME_BASE_RADIUS = 0.16;
 //          imported for documentation only — actual decrement lives in Game
 //          (Task 12). `scheduleMissileVolley` is called once on fire and
 //          pushed into a schedules array; the array is culled each frame by
-//          tickMissileVolleySchedules once all 4 missiles have spawned.
-//          Disposal must remove the assembly Group from the scene AND dispose
-//          the body core, halo, and flame meshes (geometry + material).
+//          tickMissileVolleySchedules once all 6 missiles have spawned.
+//          disposeMissileState removes the assembly Group from the scene
+//          FIRST, then disposes mesh geometry/material for body, halo,
+//          flame, noseTip, and each of the 4 fins. The 4 fins share ONE
+//          material (createMissileFins in src/missile-vfx.ts); calling
+//          dispose() 4 times on the same material is safe — three.js dispose
+//          is idempotent on already-disposed materials. PendingMissile now
+//          carries `volleyIndex` so the schedule tick can pass it through to
+//          the live HomingMissileState (used for tier targeting).
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Build a staggered VolleySchedule for the next 4 missiles. Each PendingMissile
- * carries its own delayRemaining (seconds) and angular spread. Caller pushes
- * the schedule into its live schedules array; tickMissileVolleySchedules
- * drains it over the next 540ms.
+ * Build a staggered VolleySchedule for the next 6 missiles (Phase 7c-2).
+ * Each PendingMissile carries its own delayRemaining (seconds), angular
+ * spread, and volleyIndex (0..VOLLEY_COUNT-1, used for tier targeting in
+ * tickHomingMissiles). Caller pushes the schedule into its live schedules
+ * array; tickMissileVolleySchedules drains it over the next 900ms.
  */
 export function scheduleMissileVolley(shipPosition: Vector2, aimDir: Vector2): VolleySchedule {
   const pending: PendingMissile[] = [];
@@ -273,6 +313,7 @@ export function scheduleMissileVolley(shipPosition: Vector2, aimDir: Vector2): V
     pending.push({
       delayRemaining: (i * HOMING_MISSILES_VOLLEY_STAGGER_MS) / 1000,
       spread: (i - (HOMING_MISSILES_VOLLEY_COUNT - 1) / 2) * (VOLLEY_HALF_SPREAD / 1.5),
+      volleyIndex: i,
     });
   }
   return { remaining: 0, pending };
@@ -280,6 +321,7 @@ export function scheduleMissileVolley(shipPosition: Vector2, aimDir: Vector2): V
 
 function spawnMissileFromPending(
   pending: PendingMissile,
+  volleyIndex: number,
   shipPosition: Vector2,
   aimDir: Vector2,
   scene: Object3D,
@@ -291,8 +333,8 @@ function spawnMissileFromPending(
   const vx = aimDir.x * cos - aimDir.y * sin;
   const vy = aimDir.x * sin + aimDir.y * cos;
 
-  // Body assembly (opaque core + additive halo) — Phase 7c visibility fix
-  const { assembly, core: body, halo } = createMissileAssembly();
+  // Body assembly (opaque core + additive halo + noseTip cone + 4 fins) — Phase 7c-2
+  const { assembly, core: body, halo, noseTip, fins } = createMissileAssembly();
 
   // Flame cone (mirrors exhaust-gameplay.ts:244-270 pattern)
   const flameGeom = new ConeGeometry(FLAME_BASE_RADIUS, FLAME_LENGTH, 8);
@@ -323,6 +365,9 @@ function spawnMissileFromPending(
     assembly,
     flame,
     halo,
+    noseTip,
+    fins,
+    volleyIndex,
     spawnTime,
     firePulse: 0,
   };
@@ -344,7 +389,14 @@ export function tickMissileVolleySchedules(
       pending.delayRemaining -= deltaTime;
       if (pending.delayRemaining <= 0) {
         activeMissiles.push(
-          spawnMissileFromPending(pending, shipPosition, aimDir, scene, gameTime),
+          spawnMissileFromPending(
+            pending,
+            pending.volleyIndex,
+            shipPosition,
+            aimDir,
+            scene,
+            gameTime,
+          ),
         );
       } else {
         stillPending.push(pending);
@@ -356,6 +408,35 @@ export function tickMissileVolleySchedules(
     }
   }
   return alive;
+}
+
+/**
+ * Unmount a homing missile and dispose all its GPU resources. Removes the
+ * assembly Group from the scene FIRST (so its children are detached before
+ * we dispose their geometry/material), then disposes the body core, halo,
+ * flame, noseTip cone, and each of the 4 fin meshes in turn.
+ *
+ * Internal helper — not exported. Used by both the expiry path
+ * (missile.remaining <= 0) and the impact path (collision with asteroid).
+ *
+ * NOTE: the 4 fins share ONE material instance (see createMissileFins in
+ * src/missile-vfx.ts). Calling `dispose()` four times on the same material
+ * is safe — three.js dispose is idempotent on already-disposed materials.
+ */
+function disposeMissileState(missile: HomingMissileState, scene: Object3D): void {
+  scene.remove(missile.assembly);
+  missile.mesh.geometry.dispose();
+  (missile.mesh.material as MeshBasicMaterial).dispose();
+  missile.halo.geometry.dispose();
+  (missile.halo.material as MeshBasicMaterial).dispose();
+  missile.flame.geometry.dispose();
+  (missile.flame.material as MeshBasicMaterial).dispose();
+  missile.noseTip.geometry.dispose();
+  (missile.noseTip.material as MeshBasicMaterial).dispose();
+  for (const fin of missile.fins) {
+    fin.geometry.dispose();
+    (fin.material as MeshBasicMaterial).dispose();
+  }
 }
 
 /**
@@ -375,21 +456,25 @@ export function tickHomingMissiles(
   for (const missile of missiles) {
     missile.remaining -= deltaTime;
     if (missile.remaining <= 0) {
-      scene.remove(missile.assembly);
-      missile.mesh.geometry.dispose();
-      (missile.mesh.material as MeshBasicMaterial).dispose();
-      missile.halo.geometry.dispose();
-      (missile.halo.material as MeshBasicMaterial).dispose();
-      missile.flame.geometry.dispose();
-      (missile.flame.material as MeshBasicMaterial).dispose();
+      disposeMissileState(missile, scene);
       continue;
     }
-    // Apply tracking steering.
-    const target = findNearestAsteroid(
-      missile.position,
-      asteroids,
-      HOMING_MISSILES_TRACKING_RADIUS,
-    );
+    // Apply tracking steering — Phase 7c-2 tier targeting.
+    // First NEAR_TIER_COUNT missiles in the volley seek the NEAREST asteroid
+    // (close-in kill); the rest (volleyIndex >= NEAR_TIER_COUNT) seek the
+    // FARTHEST in radius so the back half of a 6-volley reaches the back of
+    // the arena instead of all clustering on the near target.
+    const target = missile.volleyIndex < HOMING_MISSILES_NEAR_TIER_COUNT
+      ? findNearestAsteroid(
+          missile.position,
+          asteroids,
+          HOMING_MISSILES_TRACKING_RADIUS,
+        )
+      : findFarthestAsteroid(
+          missile.position,
+          asteroids,
+          HOMING_MISSILES_TRACKING_RADIUS,
+        );
     if (target) {
       const desiredX = target.position.x - missile.position.x;
       const desiredY = target.position.y - missile.position.y;
@@ -434,13 +519,7 @@ export function tickHomingMissiles(
     const hit = findNearestAsteroid(missile.position, asteroids, HOMING_MISSILES_MISSILE_IMPACT_RADIUS);
     if (hit) {
       onMissileImpact(hit);
-      scene.remove(missile.assembly);
-      missile.mesh.geometry.dispose();
-      (missile.mesh.material as MeshBasicMaterial).dispose();
-      missile.halo.geometry.dispose();
-      (missile.halo.material as MeshBasicMaterial).dispose();
-      missile.flame.geometry.dispose();
-      (missile.flame.material as MeshBasicMaterial).dispose();
+      disposeMissileState(missile, scene);
       continue;
     }
     alive.push(missile);

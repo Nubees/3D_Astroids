@@ -337,6 +337,10 @@ export function applyPickupEffect(
 //        per missile × 4 missiles = 540ms total) gives the volley a visible
 //        ripple. Impact radius pulled from a magic number into a named
 //        constant so we can tune the hit window without grepping game.ts.
+//        Phase 7c-2 buff — VOLLEY_COUNT 4→6 (bigger instant clear),
+//        TRACKING_RADIUS 10→14 (reach far half of arena), TRACKING_DURATION
+//        2.5→3.5 (longer flight time), new NEAR_TIER_COUNT=3 so the first 3
+//        missiles hit the nearest target and the last 3 fan out farther.
 // Gotchas: BOMB_STRIKE_RADIUS change means fireBombStrike's damage pass now
 //          also catches crystals at 6-8 units (was 4-5). Existing tests
 //          assert the OLD values (BOMB_STRIKE_RADIUS===5.0 etc.) and need
@@ -398,17 +402,18 @@ export const ORBIT_DRONES_DAMAGE = 1;
 export const ORBIT_DRONES_DRONE_COUNT = 2;
 export const ORBIT_DRONES_FADE_OUT_SECONDS = 0.3;
 
-// Homing Missiles constants.
+// Homing Missiles constants — Phase 7c-2 buffed.
 export const HOMING_MISSILES_COOLDOWN_SECONDS = 4.0;
 export const HOMING_MISSILES_CHARGE_CAP = 3;
-export const HOMING_MISSILES_VOLLEY_COUNT = 4;
+export const HOMING_MISSILES_VOLLEY_COUNT = 6;            // was 4 — bigger instant clear
+export const HOMING_MISSILES_NEAR_TIER_COUNT = 3;         // NEW — first 3 hit nearest, last 3 hit farthest
 export const HOMING_MISSILES_DAMAGE = 10;
-export const HOMING_MISSILES_SPEED = 7.0; // was 6.0
-export const HOMING_MISSILES_TRACKING_RADIUS = 10.0; // was 8.0
-export const HOMING_MISSILES_TRACKING_DURATION = 2.5; // was 1.5
-export const HOMING_MISSILES_TURN_RATE = 14.0; // was 8.0
-export const HOMING_MISSILES_VOLLEY_STAGGER_MS = 180; // NEW — 0/180/360/540ms cadence
-export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.45; // NEW — was hard-coded 0.3
+export const HOMING_MISSILES_SPEED = 7.0;
+export const HOMING_MISSILES_TRACKING_RADIUS = 14.0;      // was 10.0 — reach far half of arena
+export const HOMING_MISSILES_TRACKING_DURATION = 3.5;     // was 2.5 — longer flight time
+export const HOMING_MISSILES_TURN_RATE = 14.0;
+export const HOMING_MISSILES_VOLLEY_STAGGER_MS = 180;     // 0/180/360/540/720/900ms cadence
+export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.45;
 
 export interface ActiveAmmoState {
   charges: number;

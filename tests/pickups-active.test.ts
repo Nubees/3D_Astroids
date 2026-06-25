@@ -169,11 +169,11 @@ describe('Per-kind constants match spec values', () => {
   it('Homing Missiles constants', () => {
     expect(HOMING_MISSILES_COOLDOWN_SECONDS).toBe(4.0);
     expect(HOMING_MISSILES_CHARGE_CAP).toBe(3);
-    expect(HOMING_MISSILES_VOLLEY_COUNT).toBe(4);
+    expect(HOMING_MISSILES_VOLLEY_COUNT).toBe(6); // Phase 7c-2: 4 → 6 (bigger instant clear)
     expect(HOMING_MISSILES_DAMAGE).toBe(10); // Phase 7c: 1 → 10 (one-shot any asteroid)
     expect(HOMING_MISSILES_SPEED).toBe(7.0); // Phase 7b: 6.0 → 7.0
-    expect(HOMING_MISSILES_TRACKING_RADIUS).toBe(10.0); // Phase 7b: 8.0 → 10.0
-    expect(HOMING_MISSILES_TRACKING_DURATION).toBe(2.5); // Phase 7b: 1.5 → 2.5
+    expect(HOMING_MISSILES_TRACKING_RADIUS).toBe(14.0); // Phase 7c-2: 10.0 → 14.0 (reach far arena)
+    expect(HOMING_MISSILES_TRACKING_DURATION).toBe(3.5); // Phase 7c-2: 2.5 → 3.5 (longer flight)
     expect(HOMING_MISSILES_TURN_RATE).toBe(14.0); // Phase 7b: 8.0 → 14.0
   });
 });
@@ -276,15 +276,17 @@ afterEach(() => {
 });
 
 describe('Homing Missiles — volley + tracking', () => {
-  it('scheduleMissileVolley returns 4 PendingMissile entries with distinct spreads and 180ms staggered delays', () => {
+  it('scheduleMissileVolley returns 6 PendingMissile entries with distinct spreads and 180ms staggered delays', () => {
     const schedule = scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 });
     expect(schedule.pending.length).toBe(HOMING_MISSILES_VOLLEY_COUNT);
-    // First missile launches immediately; subsequent ones at 180/360/540ms.
+    // First missile launches immediately; subsequent ones at 180/360/540/720/900ms.
     expect(schedule.pending[0].delayRemaining).toBeCloseTo(0, 5);
     expect(schedule.pending[1].delayRemaining).toBeCloseTo(0.18, 5);
     expect(schedule.pending[2].delayRemaining).toBeCloseTo(0.36, 5);
     expect(schedule.pending[3].delayRemaining).toBeCloseTo(0.54, 5);
-    // All 4 spreads should be distinct.
+    expect(schedule.pending[4].delayRemaining).toBeCloseTo(0.72, 5);
+    expect(schedule.pending[5].delayRemaining).toBeCloseTo(0.90, 5);
+    // All 6 spreads should be distinct.
     const sigs = new Set(schedule.pending.map((p) => p.spread.toFixed(5)));
     expect(sigs.size).toBe(HOMING_MISSILES_VOLLEY_COUNT);
   });
@@ -295,8 +297,8 @@ describe('Homing Missiles — volley + tracking', () => {
     let schedules: VolleySchedule[] = [
       scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }),
     ];
-    // Tick enough frames (>= 540ms + a frame) to drain all 4 pending missiles.
-    for (let i = 0; i < 40; i++) {
+    // Tick enough frames (>= 900ms + a frame) to drain all 6 pending missiles.
+    for (let i = 0; i < 70; i++) {
       schedules = tickMissileVolleySchedules(
         schedules,
         { x: 0, y: 0 },
