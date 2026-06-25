@@ -291,9 +291,9 @@ describe('Shockwave class', () => {
     expect(wave.age).toBeCloseTo(0.1);
   });
 
-  it('update(dt) returns true after the 0.5s duration elapses', () => {
+  it('update(dt) returns true after the 0.7s duration elapses', () => {
     const wave = new Shockwave({ x: 0, y: 0 }, 0xff0000, 1.0);
-    expect(wave.update(0.6)).toBe(true);
+    expect(wave.update(0.8)).toBe(true);
   });
 
   it('scales intensity by the multiplier passed in', () => {

@@ -1,4 +1,5 @@
 import {
+  AdditiveBlending,
   AmbientLight,
   BufferGeometry,
   Color,
@@ -16,6 +17,8 @@ import {
   RingGeometry,
   Scene,
   SphereGeometry,
+  Sprite,
+  SpriteMaterial,
   Vector3,
   WebGLRenderer,
 } from 'three';
@@ -145,7 +148,15 @@ import {
   HOMING_MISSILES_DAMAGE,
   ORBIT_DRONES_COOLDOWN_SECONDS,
   ORBIT_DRONES_DURATION_SECONDS,
+  PICKUP_BOB_AMPLITUDE,
+  PICKUP_BOB_FREQUENCY_HZ,
   PICKUP_COLOR,
+  PICKUP_EMISSIVE_PULSE_AMPLITUDE,
+  PICKUP_EMISSIVE_PULSE_FREQUENCY_HZ,
+  PICKUP_HALO_BASE_OPACITY,
+  PICKUP_HALO_PROXIMITY_BOOST,
+  PICKUP_SONAR_RING_PERIOD_SECONDS,
+  PICKUP_SPIN_AXIS,
   PickupKind,
   PickupState,
   applyActivePickupEffect,
@@ -165,11 +176,25 @@ import {
 import {
   DroneDeploymentState,
   HomingMissileState,
+  VolleySchedule,
+  scheduleMissileVolley,
   spawnDroneDeployment,
-  spawnMissileVolley,
   tickDroneDeployments,
   tickHomingMissiles,
+  tickMissileVolleySchedules,
 } from './active-deployments';
+import {
+  disposeShockwaveParticles,
+  emitShockwaveParticles,
+  updateShockwaveParticles,
+} from './shockwave-particles';
+import { disposeMissileVfx, updateMissileSmoke } from './missile-vfx';
+import {
+  setShieldBoostColor,
+  setShieldBoostPulse,
+  tickShieldFlare,
+  triggerShieldFlare,
+} from './shield-visuals';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -350,6 +375,24 @@ export class Game {
   // at the same y-pixel. Wraps at 4 (i.e. +0/+30/+60/+90px) which is enough
   // for the realistic max simultaneous kills.
   private crystalKillIndex = 0;
+  // Phase 7b — staggered missile schedules. Each press of Digit3 pushes a
+  // VolleySchedule onto this list; tickMissileVolleySchedules drains it over
+  // the next 540ms, promoting pending missiles into homingMissiles as their
+  // per-missile delay expires. Empty when no fire is in flight.
+  private missileVolleySchedules: VolleySchedule[] = [];
+  // Phase 7b — shockwave-particle InstancedMesh has been added to the scene
+  // (so the per-frame update path doesn't re-attach it). Tracks the boolean
+  // for the safety check inside emitShockwaveParticles.
+  private shockwaveParticlesAttached = false;
+  // Phase 7b — hot core flash meshes for the Bomb Strike's layer 1 visual.
+  // Each entry ages over `duration`; when the tween ends, the mesh is
+  // removed and its geometry/material disposed. Kept as an array so multiple
+  // queued bombs can flash concurrently (3 charges × 100ms ≈ 3 in flight).
+  private activeCoreFlashes: { mesh: Mesh; age: number; duration: number }[] = [];
+  // Phase 7b — singleton DOM element for the Bomb Strike's screen-edge flash.
+  // Created lazily on first bomb so the div does not appear in the DOM
+  // unless the player has used a bomb; removed by stop() during cleanup.
+  private bombEdgeFlashElement: HTMLDivElement | null = null;
   private nextAsteroidId = 1;
   private lastWaveNumber = 1;
   private readonly resizeHandler: () => void;
@@ -559,6 +602,24 @@ export class Game {
     this.homingMissiles = [];
     this.activeEffects = [];
     this.pickups = [];
+    // Phase 7b — Bomb Strike side effects. The missileVolleySchedules queue
+    // and any in-flight core flashes must be cleared; the bomb edge flash
+    // DOM element must be removed; the module-scope InstancedMesh pools for
+    // shockwave particles and missile smoke must be disposed so a fresh
+    // Game instance starts with a clean GPU state.
+    this.missileVolleySchedules = [];
+    this.activeCoreFlashes.forEach((f) => {
+      this.scene.remove(f.mesh);
+      f.mesh.geometry.dispose();
+      (f.mesh.material as MeshBasicMaterial).dispose();
+    });
+    this.activeCoreFlashes = [];
+    if (this.bombEdgeFlashElement) {
+      this.bombEdgeFlashElement.remove();
+      this.bombEdgeFlashElement = null;
+    }
+    disposeShockwaveParticles();
+    disposeMissileVfx();
   }
 
   private loop = (time: number): void => {
@@ -656,11 +717,34 @@ export class Game {
     this.updatePendingTelegraphs(this.gameTimeSeconds);
     this.updateCrystalDeathTweens(deltaTime);
     this.updateShockwaveList(deltaTime);
+    // Phase 7b — bomb core flash + shockwave particle pool. Both are
+    // ticker functions (no scene argument) that prune their own dead
+    // entries; the InstancedMesh stays attached to the scene for the
+    // lifetime of the Game.
+    this.updateCoreFlashes(deltaTime);
+    updateShockwaveParticles(deltaTime);
     this.updateCrystalVisuals(deltaTime, this.gameTimeSeconds);
     this.applyCameraShake(deltaTime);
     this.updateHud(deltaTime);
     this.updateFloatingTexts(deltaTime);
     updateShieldVisuals(this.shieldMesh, deltaTime);
+    // Phase 7b — shield boost tick. While a SHIELD active effect is live,
+    // tint the shield green and bump its pulse/grid strength. When no
+    // effect is active, the helpers are called with intensity=0 to leave
+    // the baseline cyan alone (the brief's "safe default"). tickShieldFlare
+    // advances the one-shot 0.6s flare started by applyPickupToShip.
+    const shieldBoost = this.activeEffects.find((e) => e.kind === PickupKind.SHIELD);
+    if (shieldBoost) {
+      const t = shieldBoost.remaining / shieldBoost.total;
+      setShieldBoostColor(this.shieldMesh, t);
+      setShieldBoostPulse(this.shieldMesh, t);
+    } else {
+      // Restore baseline cyan if no boost active. (setShieldBoostColor with
+      // intensity=0 leaves the baseline untouched; this is the safe default.)
+      setShieldBoostColor(this.shieldMesh, 0);
+      setShieldBoostPulse(this.shieldMesh, 0);
+    }
+    tickShieldFlare(this.shieldMesh, deltaTime);
     this.updateExplosions(deltaTime);
     this.updateDamageEffects(deltaTime);
     this.updateLowShieldEffects(deltaTime);
@@ -1022,8 +1106,48 @@ export class Game {
     const alive: LivePickup[] = [];
     for (const pickup of this.pickups) {
       updatePickup(pickup.state, this.ship.state.position, deltaTime);
-      pickup.mesh.position.set(pickup.state.position.x, pickup.state.position.y, 0);
-      pickup.mesh.rotation.z = pickup.state.spin;
+      // Per-kind axis rotation (Phase 7b).
+      const axis = PICKUP_SPIN_AXIS[pickup.state.kind];
+      pickup.mesh.rotation[axis] = pickup.state.spin;
+      // Vertical bobbing.
+      const bob = Math.sin(
+        pickup.state.age * Math.PI * 2 * PICKUP_BOB_FREQUENCY_HZ,
+      ) * PICKUP_BOB_AMPLITUDE;
+      pickup.mesh.position.set(
+        pickup.state.position.x,
+        pickup.state.position.y + bob,
+        0,
+      );
+      // Emissive pulse on the body mesh.
+      const ref = pickup.mesh as Group & { _body?: Mesh; _sonar?: Mesh; _halo?: Sprite };
+      if (ref._body) {
+        const mat = ref._body.material as MeshStandardMaterial;
+        mat.emissiveIntensity =
+          0.4 +
+          Math.sin(
+            pickup.state.age * Math.PI * 2 * PICKUP_EMISSIVE_PULSE_FREQUENCY_HZ,
+          ) * PICKUP_EMISSIVE_PULSE_AMPLITUDE;
+      }
+      // Sonar ring pulse (1.5s period).
+      const sonarRef = ref._sonar;
+      if (sonarRef) {
+        const sonarMat = sonarRef.material as MeshBasicMaterial;
+        const phase =
+          (pickup.state.age % PICKUP_SONAR_RING_PERIOD_SECONDS) / PICKUP_SONAR_RING_PERIOD_SECONDS;
+        sonarRef.scale.set(1.0 + phase * 1.5, 1.0 + phase * 1.5, 1);
+        sonarMat.opacity = 0.4 * (1.0 - phase);
+      }
+      // Proximity halo brightness.
+      const haloRef = ref._halo;
+      if (haloRef) {
+        const haloMat = haloRef.material as SpriteMaterial;
+        const dx = this.ship.state.position.x - pickup.state.position.x;
+        const dy = this.ship.state.position.y - pickup.state.position.y;
+        const distance = Math.hypot(dx, dy);
+        const prox = Math.max(0, 1 - distance / 2.5);
+        haloMat.opacity = PICKUP_HALO_BASE_OPACITY + PICKUP_HALO_PROXIMITY_BOOST * prox;
+        haloRef.scale.setScalar(0.6 + 0.5 * prox);
+      }
       if (isPickupCollected(pickup.state, this.ship.state.position)) {
         this.applyPickupToShip(pickup.state.kind);
         this.disposePickup(pickup);
@@ -1050,8 +1174,6 @@ export class Game {
   }
 
   private applyPickupToShip(kind: PickupKind): void {
-    // Active kinds increment the ammo map; passive kinds push a timer onto
-    // `activeEffects` so the HUD pill row can drain it.
     if (
       kind === PickupKind.BOMB_STRIKE ||
       kind === PickupKind.ORBIT_DRONES ||
@@ -1059,13 +1181,34 @@ export class Game {
     ) {
       applyActivePickupEffect(kind, this.activeAmmo);
     } else {
-      // Pass a mutable snapshot of the shield so applyPickupEffect can heal
-      // it (the SHIELD branch). Mirror the new energy back to the live
-      // state afterward so the HUD reflects the heal.
       const shieldSnapshot = { energy: this.shield.energy, maxEnergy: SHIELD_MAX_ENERGY };
       const effect = applyPickupEffect(kind, { fireCooldown: 0 }, shieldSnapshot);
       this.shield.energy = shieldSnapshot.energy;
       this.activeEffects.push(effect);
+      // Phase 7b — SHIELD pickup moment: trigger the 0.6s shield flare, push a
+      // blue Shockwave ring, and spawn a secondary "+50%" floating text so the
+      // player reads the heal amount AND sees the shield flare.
+      if (kind === PickupKind.SHIELD) {
+        triggerShieldFlare(this.shieldMesh, 0.6);
+        this.activeShockwaves.push(new Shockwave(
+          { x: this.ship.state.position.x, y: this.ship.state.position.y },
+          0x66aaff,
+          0.55,
+        ));
+        // Override the latest shockwave's opacity to enforce the additive cap.
+        const lastWave = this.activeShockwaves[this.activeShockwaves.length - 1];
+        (lastWave.mesh.material as MeshBasicMaterial).opacity = 0.55;
+        this.spawnFloatingTextAt(
+          '+50%',
+          { x: this.ship.state.position.x, y: this.ship.state.position.y + 0.5 },
+          0,
+          '#88ffaa',
+          0,
+          0,
+          12,
+          1.2,
+        );
+      }
     }
     this.spawnFloatingTextAt(
       `+${ACTIVE_KIND_SPECS[kind].displayName}`,
@@ -1093,19 +1236,33 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // My Rules — Active Item Dispatch (Phase 7 Task 12)
+  // My Rules — Active Item Dispatch (Phase 7 Task 12 → Phase 7b Task 8)
   // ═══════════════════════════════════════════════════════════════════════════
-  // Purpose: Wire Digit1/2/3 → consumeActiveCharge → per-kind deploy or impact.
-  //          Single dispatch table keyed by ACTIVE_KIND_SPECS[kind].displayName
-  //          so adding a new active kind later only needs a new branch.
-  // Setup:   Called once per frame from update(input). Reads `input.useActive1/2/3`
-  //          (set by InputManager from Digit1/2/3). Mutates `this.activeAmmo`,
-  //          `this.activeDeployments`, and `this.homingMissiles`.
-  // Issues:  None.
-  // Fix:     Phase 7 Task 12. canFireActive + consumeActiveCharge are the
-  //          single source of truth for charge/cooldown gating — Game does
-  //          NOT re-check charges itself, that would invite drift between
-  //          the table and the firing code.
+  // Purpose:  Wire Digit1/2/3 → consumeActiveCharge → per-kind deploy or impact.
+  //           Single dispatch table keyed by ACTIVE_KIND_SPECS[kind].displayName
+  //           so adding a new active kind later only needs a new branch.
+  // Setup:    Called once per frame from update(input). Reads
+  //           `input.useActive1/2/3` (set by InputManager from Digit1/2/3).
+  //           Mutates `this.activeAmmo`, `this.activeDeployments`,
+  //           `this.missileVolleySchedules`, and `this.activeShockwaves`.
+  // Issues:   None.
+  // Fix:      Phase 7 Task 12. canFireActive + consumeActiveCharge are the
+  //           single source of truth for charge/cooldown gating — Game does
+  //           NOT re-check charges itself, that would invite drift between
+  //           the table and the firing code.
+  //           Phase 7b Task 8. The MISSILES branch no longer spawns 4
+  //           missiles directly — it pushes a VolleySchedule onto
+  //           `this.missileVolleySchedules`; tickMissileVolleySchedules
+  //           (called from updateActiveDeployments) drains that schedule
+  //           over 540ms (0/180/360/540ms staggers) and promotes each
+  //           pending missile into `this.homingMissiles` as its delay
+  //           expires. The BOMB branch calls fireBombStrike (6-layer combo
+  //           from Task 8 — see "My Rules — Bomb Strike" below).
+  //           The SHIELD pickup moment lives in applyPickupToShip: a SHIELD
+  //           collect calls triggerShieldFlare for a 0.6s one-shot
+  //           color/pulse burst, and the sustained 8s boost tints the
+  //           shield green via setShieldBoostColor + setShieldBoostPulse,
+  //           ticked from the main update loop.
   // Gotchas: Drone re-press is blocked at deployment-time by the `length > 0`
   //          guard in useActiveItem — prevents the player from stacking two
   //          drone flights during the 6s active window. The plan's note that
@@ -1116,6 +1273,9 @@ export class Game {
   //          restores the consumed charge so the press doesn't silently eat
   //          one — setting `cooldownRemaining = 0` is a defensive no-op
   //          for deployable kinds since consumeActiveCharge never set it.
+  //          Missile schedules: pushing 3 schedules in a single frame (3
+  //          charges pressed in quick succession) is safe — each schedule
+  //          ticks independently and drains in 540ms.
   // I1 deviation: dispatch is via ACTIVE_KIND_SPECS[kind].displayName
   //          (string compare) rather than a PickupKind switch. Trade-off
   //          accepted: a new active kind needs only a new branch here
@@ -1142,8 +1302,12 @@ export class Game {
       }
       this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene));
     } else if (spec.displayName === 'MISSILES') {
-      const newMissiles = spawnMissileVolley(shipPos, this.ship.state.aim, this.scene);
-      for (const m of newMissiles) this.homingMissiles.push(m);
+      // Phase 7b — push a VolleySchedule; the schedule is drained each frame
+      // by tickMissileVolleySchedules inside updateActiveDeployments. The
+      // 4 missiles launch at 0/180/360/540ms with narrow angular spread.
+      this.missileVolleySchedules.push(
+        scheduleMissileVolley(shipPos, this.ship.state.aim),
+      );
     }
   }
 
@@ -1172,6 +1336,61 @@ export class Game {
   //          a single shared Shockwave + text emission is enough.
   // ═══════════════════════════════════════════════════════════════════════════
   private fireBombStrike(position: Vector2): void {
+    // Phase 7b — 6-layer combo. Replaces the single Shockwave from Task 12
+    // with a richer "exploding" sequence: hot core flash (layer 1), two
+    // staggered shock rings (layers 2+3), outward streamers + debris chunks
+    // (layers 4+5), and bumped camera shake (layer 6). The DOM edge flash
+    // and shards cleansing are added on top so the bomb has both a screen-
+    // level and gameplay-level effect.
+    // Layer 1: Hot core flash — single-frame additive sphere that expands to 1u.
+    const core = new Mesh(
+      new SphereGeometry(0.5, 16, 16),
+      new MeshBasicMaterial({
+        color: 0xffaa00,
+        transparent: true,
+        opacity: 0.7,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    core.position.set(position.x, position.y, -0.1);
+    this.scene.add(core);
+    this.activeCoreFlashes.push({ mesh: core, age: 0, duration: 0.1 });
+    // Layer 2: Primary shock ring (8u radius, orange).
+    this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0, 8.0));
+    // Layer 3: Secondary outer ring (10u radius, cooler red-orange) — pushed 80ms later.
+    setTimeout(() => {
+      this.activeShockwaves.push(new Shockwave(position, 0xff4400, 0.5, 10.0));
+    }, 80);
+    // Layer 4: Shock-front particles (30 outward streamers).
+    emitShockwaveParticles(this.scene, position.x, position.y, {
+      count: 30,
+      speed: 6,
+      color: 0xffcc66,
+      lifetime: 0.5,
+    });
+    // Layer 5: Debris chunks (8 faster, bigger).
+    emitShockwaveParticles(this.scene, position.x, position.y, {
+      count: 8,
+      speed: 10,
+      color: 0xffaa00,
+      lifetime: 0.6,
+      isDebris: true,
+    });
+    // Layer 6: Camera shake bumped to 0.6/0.4s.
+    this.cameraShakeAmplitude = Math.max(this.cameraShakeAmplitude, 0.6);
+    this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, 0.4);
+    // DOM edge flash.
+    this.triggerBombEdgeFlash();
+    // Shards cleansing — restores the EXPANSION spec's "I countered the Shard Swarm" payoff.
+    this.activeShards = this.activeShards.filter(
+      (s) =>
+        Math.hypot(
+          s.state.position.x - position.x,
+          s.state.position.y - position.y,
+        ) > BOMB_STRIKE_RADIUS,
+    );
+    // Damage pass (unchanged).
     const alive: LiveAsteroid[] = [];
     for (const asteroid of this.asteroids) {
       const d = Math.hypot(
@@ -1188,9 +1407,6 @@ export class Game {
       alive.push(asteroid);
     }
     this.asteroids = alive;
-    // Visual feedback: a single shockwave + "BOMB!" text. Mirrors the
-    // pattern in destroyCrystal's intensity / spawnFloatingTextAt calls.
-    this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0));
     this.spawnFloatingTextAt('BOMB!', position, 0, '#ff8800', 0, 0, 18, 1.0);
   }
 
@@ -1276,6 +1492,18 @@ export class Game {
     if (this.activeDeployments.length < previousDroneCount) {
       this.activeAmmo[PickupKind.ORBIT_DRONES].cooldownRemaining = ORBIT_DRONES_COOLDOWN_SECONDS;
     }
+    // Phase 7b — tick the missile schedule FIRST so scheduled missiles enter
+    // the live list in the same frame their stagger expires. The schedule
+    // drains itself over the 0/180/360/540ms stagger; once all 4 missiles
+    // have launched, the schedule is removed from the array.
+    this.missileVolleySchedules = tickMissileVolleySchedules(
+      this.missileVolleySchedules,
+      this.ship.state.position,
+      this.ship.state.aim,
+      deltaTime,
+      this.scene,
+      this.homingMissiles,
+    );
     this.homingMissiles = tickHomingMissiles(
       this.homingMissiles,
       this.asteroids.map((a) => a.state),
@@ -1283,6 +1511,8 @@ export class Game {
       this.scene,
       (asteroid) => this.onMissileImpact(asteroid),
     );
+    // Tick the smoke pool (one InstancedMesh for all in-flight missiles).
+    updateMissileSmoke(deltaTime);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1731,6 +1961,95 @@ export class Game {
       this.camera.position.x = 0;
       this.camera.position.y = 0;
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Bomb Core Flash (Phase 7b)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose:  Tick the layer-1 hot-core flash spawned by fireBombStrike. The
+  //           flash is a single additive sphere that scales 1.0→2.0× and
+  //           fades 0.7→0.0 over 0.1s; when the tween ends the mesh +
+  //           geometry + material are disposed. Multiple concurrent bombs
+  //           each get their own entry.
+  // Setup:    Called from update(deltaTime) alongside updateShockwaveList.
+  //           Reads this.activeCoreFlashes; mutates the array in place
+  //           (prune-and-replace pattern, same as updateShards / tweens).
+  // Issues:   None.
+  // Fix:      Phase 7b Task 8. The pre-Task-8 fireBombStrike had no
+  //           "focal point" — the player saw a ring expand but no white-hot
+  //           center. The core flash gives the bomb a clear origin so the
+  //           eye knows where the explosion began, then the rings expand
+  //           outward from that point.
+  // Gotchas:  flash.mesh.material is a MeshBasicMaterial — must cast to
+  //           call .dispose() cleanly. t ≥ 1.0 entries are disposed
+  //           BEFORE they're dropped from the array (otherwise their
+  //           GPU resources would leak). alive.push() comes AFTER dispose
+  //           for the pruning case but BEFORE for the keep case — the
+  //           `continue` in the prune branch prevents fall-through.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private updateCoreFlashes(deltaTime: number): void {
+    const alive: { mesh: Mesh; age: number; duration: number }[] = [];
+    for (const flash of this.activeCoreFlashes) {
+      flash.age += deltaTime;
+      const t = flash.age / flash.duration;
+      if (t >= 1.0) {
+        this.scene.remove(flash.mesh);
+        flash.mesh.geometry.dispose();
+        (flash.mesh.material as MeshBasicMaterial).dispose();
+        continue;
+      }
+      const scale = 1.0 + t * 1.0; // 0.5u → 1.0u
+      flash.mesh.scale.set(scale, scale, scale);
+      (flash.mesh.material as MeshBasicMaterial).opacity = 0.7 * (1.0 - t);
+      alive.push(flash);
+    }
+    this.activeCoreFlashes = alive;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Bomb Edge Flash (Phase 7b)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose:  Trigger the screen-edge DOM flash for the bomb. The
+  //           #bomb-edge-flash <div> is created lazily on first bomb (so it
+  //           never appears in the DOM unless the player actually uses a
+  //           bomb) and the opacity is reset to 1 then forced to 0 via a
+  //           reflow so the CSS transition fires.
+  // Setup:    Called from fireBombStrike. Writes to
+  //           this.bombEdgeFlashElement and to document.body (only on the
+  //           first call). The CSS transition is `opacity 120ms ease-out`
+  //           from index.html.
+  // Issues:   The first attempted version set `el.style.opacity = '0'`
+  //           immediately after `el.style.opacity = '1'` and the browser
+  //           coalesced the two writes into a single frame — no transition
+  //           fired and the screen never flashed. The `void el.offsetHeight`
+  //           line is a deliberate reflow trigger to force the browser to
+  //           paint the opacity:1 frame before scheduling the opacity:0
+  //           transition.
+  // Fix:      Phase 7b Task 8. The original Task-12 bomb had no screen
+  //           flash — the rings stayed near the ship and the rest of the
+  //           screen was unaffected, making a 6u radius explosion read as
+  //           a 1u radius one. The edge flash gives the explosion a
+  //           peripherally-visible cue that survives even when the rings
+  //           are off-screen.
+  // Gotchas:  The element is `mix-blend-mode: screen` so the orange tint
+  //           only affects the dark areas of the background — the player's
+  //           ship and shield stay readable. Re-triggering a flash while
+  //           one is still in the 120ms fade resets the opacity to 1 and
+  //           starts a new transition; subsequent bombs therefore always
+  //           produce a visible flash, never a "missed" one because the
+  //           previous transition hadn't completed.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private triggerBombEdgeFlash(): void {
+    if (!this.bombEdgeFlashElement) {
+      this.bombEdgeFlashElement = document.createElement('div');
+      this.bombEdgeFlashElement.id = 'bomb-edge-flash';
+      document.body.appendChild(this.bombEdgeFlashElement);
+    }
+    const el = this.bombEdgeFlashElement;
+    el.style.opacity = '1';
+    // Force reflow so the transition triggers.
+    void el.offsetHeight;
+    el.style.opacity = '0';
   }
 
   private spawnRandomAsteroid(): void {
@@ -2631,8 +2950,17 @@ export class Game {
         pill.style.fontSize = '12px';
         pill.style.color = '#ffffff';
         pill.style.background = 'rgba(0,0,0,0.4)';
+        // Phase 7b — pill pop-in animation (200ms ease-out-back overshoot).
+        pill.style.transform = 'scale(0)';
+        pill.style.transition = 'transform 200ms cubic-bezier(.2,.9,.3,1.2)';
+        requestAnimationFrame(() => {
+          pill.style.transform = 'scale(1.15)';
+          setTimeout(() => {
+            pill.style.transform = 'scale(1.0)';
+            pill.style.transition = 'transform 120ms ease-out';
+          }, 120);
+        });
         const label = document.createElement('div');
-        label.textContent = ACTIVE_KIND_SPECS[effect.kind].displayName;
         label.style.fontWeight = 'bold';
         const timeLabel = document.createElement('div');
         timeLabel.style.fontSize = '10px';
@@ -2646,6 +2974,13 @@ export class Game {
         this.pickupHudElement?.appendChild(pill);
         entry = { pill, label, timeLabel, bar };
         this.pickupHudPills.set(effect.kind, entry);
+      }
+      // Phase 7b — SHIELD pill: brighter border + secondary text while boost active.
+      if (effect.kind === PickupKind.SHIELD) {
+        entry.label.textContent = `SHIELD +BOOST ${effect.remaining.toFixed(1)}s`;
+        entry.pill.style.border = `2px solid #88ddff`;
+      } else {
+        entry.label.textContent = ACTIVE_KIND_SPECS[effect.kind].displayName;
       }
       entry.timeLabel.textContent = `${effect.remaining.toFixed(1)}s`;
       entry.bar.style.width = `${(effect.remaining / effect.total) * 100}%`;

@@ -1,4 +1,8 @@
 import {
+  AdditiveBlending,
+  ConeGeometry,
+  DoubleSide,
+  Group,
   IcosahedronGeometry,
   Mesh,
   MeshBasicMaterial,
@@ -9,11 +13,13 @@ import {
 import { AsteroidState, Vector2 } from './types';
 import {
   HOMING_MISSILES_DAMAGE,
+  HOMING_MISSILES_MISSILE_IMPACT_RADIUS,
   HOMING_MISSILES_SPEED,
   HOMING_MISSILES_TRACKING_DURATION,
   HOMING_MISSILES_TRACKING_RADIUS,
   HOMING_MISSILES_TURN_RATE,
   HOMING_MISSILES_VOLLEY_COUNT,
+  HOMING_MISSILES_VOLLEY_STAGGER_MS,
   ORBIT_DRONES_DAMAGE,
   ORBIT_DRONES_DRONE_COUNT,
   ORBIT_DRONES_DURATION_SECONDS,
@@ -25,25 +31,33 @@ import {
   PICKUP_COLOR,
   PickupKind,
 } from './pickups';
+import { emitMissileSmoke } from './missile-vfx';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Active Deployments (Phase 7 DIAL-UP)
+// My Rules — Active Deployments (Phase 7 DIAL-UP / Phase 7b Power-Up VFX)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Owns the per-frame state for the 2 deployable active pickup
 //          kinds (Orbit Drones + Homing Missiles). Kept out of game.ts so
 //          that file does not grow past 2300 lines.
-// Setup:   Game owns `activeDeployments` and `homingMissiles` arrays. Each
-//          frame, Game calls tickDroneDeployments and tickHomingMissiles.
+// Setup:   Game owns `activeDeployments`, `missileSchedules`, and
+//          `homingMissiles` arrays. Each frame, Game calls
+//          tickDroneDeployments + tickMissileVolleySchedules + tickHomingMissiles.
 // Issues:  None.
 // Fix:     Phase 7 DIAL-UP. Drones and missiles both reuse the existing
 //          fireProjectile path; the only new meshes are the satellite
 //          drones (IcosahedronGeometry + emissive cyan MeshStandardMaterial)
 //          and missile trails (MeshBasicMaterial).
+//          Phase 7b: missiles now spawn via a staggered VolleySchedule
+//          (0/180/360/540ms) drained by tickMissileVolleySchedules; each
+//          missile is a Group (body + flame cone) with per-frame flame
+//          pulse and an InstancedMesh smoke trail (see src/missile-vfx.ts).
 // Gotchas: Drone cooldown starts AFTER the 6s active window expires, not
 //          at press time — the Game enforces this by setting the cooldown
 //          when the deployment is culled, not when it is spawned.
 //          Missiles track the NEAREST asteroid in HOMING_MISSILES_TRACKING_RADIUS
 //          each frame; if none in range, they fly straight.
+//          Missile impact radius is now HOMING_MISSILES_MISSILE_IMPACT_RADIUS
+//          (0.45), not the old hard-coded 0.3.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface DroneDeploymentState {
@@ -58,7 +72,21 @@ export interface HomingMissileState {
   position: Vector2;
   velocity: Vector2;
   remaining: number;
-  mesh: Mesh;
+  mesh: Mesh;          // sphere body
+  assembly: Group;     // body + flame cone, rotated to face velocity
+  flame: Mesh;         // thruster flame cone (additive)
+  spawnTime: number;   // for firePulse oscillation
+  firePulse: number;   // accumulates elapsed time for flicker
+}
+
+export interface PendingMissile {
+  delayRemaining: number;
+  spread: number; // angular offset from aim direction (radians)
+}
+
+export interface VolleySchedule {
+  remaining: number; // counts down to first launch (0 initially)
+  pending: PendingMissile[]; // 4 entries, in launch order
 }
 
 const ORBIT_ANGULAR_SPEED = (2 * Math.PI) / ORBIT_DRONES_ORBIT_PERIOD_SECONDS;
@@ -192,69 +220,152 @@ export function tickDroneDeployments(
   return alive;
 }
 
-const VOLLEY_HALF_SPREAD = 0.225; // ~13° — matches spec's `±0.225 rad fan pattern`
-const MISSILE_RADIUS = 0.12;
+const VOLLEY_HALF_SPREAD = 0.06; // was 0.225 — narrower fan reads as a stream, not a shotgun
+const MISSILE_RADIUS = 0.10;     // was 0.12 — slightly smaller body, flame balances it
+const FLAME_LENGTH = 0.40;
+const FLAME_BASE_RADIUS = 0.16;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Homing Missiles (Task 7)
+// My Rules — Homing Missiles (Phase 7b)
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: spawnMissileVolley + tickHomingMissiles implement the per-frame
-//          behavior of the HOMING_MISSILES active pickup. Fan-spread volley
-//          + nearest-asteroid tracking + 0.3-unit impact radius.
-// Setup:   Game owns `homingMissiles: HomingMissileState[]`; calls
-//          spawnMissileVolley on fire and tickHomingMissiles each frame.
+// Purpose: scheduleMissileVolley + tickMissileVolleySchedules +
+//          tickHomingMissiles implement the per-frame behavior of the
+//          HOMING_MISSILES active pickup. Staggered stream-of-missiles
+//          volley + per-missile flame cone + InstancedMesh smoke trail.
+// Setup:   Game owns `missileSchedules: VolleySchedule[]` and
+//          `homingMissiles: HomingMissileState[]`; calls scheduleMissileVolley
+//          on fire, tickMissileVolleySchedules + tickHomingMissiles each frame.
 // Issues:  None.
-// Fix:     Phase 7 Task 7. Volley spread formula
-//          `(i - (N-1)/2) * (VOLLEY_HALF_SPREAD / 1.5)` yields ±0.225 rad
-//          outer edge for N=4. Tracking lerp is unit-velocity → unit-velocity
-//          by min(1, TURN_RATE * dt), then renormalized * SPEED — preserves
-//          speed across turns.
+// Fix:     Phase 7b. Replaces single-frame 4-missile fan with a 0/180/360/540ms
+//          staggered schedule so the stream reads as a controllable burst, not
+//          a shotgun. Each missile is now a Group (body sphere + flame cone)
+//          rotated to face velocity each frame — flame reads as thruster
+//          exhaust. Smoke trails come from a module-scope InstancedMesh pool
+//          (see src/missile-vfx.ts) — one draw call regardless of missile
+//          count. Impact radius bumped to 0.45 (was hard-coded 0.3) so the
+//          bigger flame cone doesn't visually "miss" the asteroid it's
+//          touching.
 // Gotchas: Vector2 is readonly in this codebase — must construct new objects
-//          rather than mutating `.x`/`.y`. Impact radius is hard-coded at 0.3
-//          (the plan's value, deliberately small so missiles pass through
-//          small gaps between asteroids). `HOMING_MISSILES_DAMAGE` is
-//          imported for documentation only — actual decrement lives in
-//          Game (Task 12).
+//          rather than mutating `.x`/`.y`. The spread formula is now
+//          narrower (VOLLEY_HALF_SPREAD=0.06 / 1.5) because the schedule's
+//          natural time-spreading already provides lateral coverage; the fan
+//          only needs to handle tiny inaccuracy. `HOMING_MISSILES_DAMAGE` is
+//          imported for documentation only — actual decrement lives in Game
+//          (Task 12). `scheduleMissileVolley` is called once on fire and
+//          pushed into a schedules array; the array is culled each frame by
+//          tickMissileVolleySchedules once all 4 missiles have spawned.
+//          Disposal must remove the assembly Group from the scene AND dispose
+//          BOTH the body mesh and the flame mesh (geometry + material).
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Spawn a fan of missiles from ship position, aimed at `aimDir` (unit vector).
- * Returns the array of HomingMissileState (caller pushes into its live list).
+ * Build a staggered VolleySchedule for the next 4 missiles. Each PendingMissile
+ * carries its own delayRemaining (seconds) and angular spread. Caller pushes
+ * the schedule into its live schedules array; tickMissileVolleySchedules
+ * drains it over the next 540ms.
  */
-export function spawnMissileVolley(
+export function scheduleMissileVolley(shipPosition: Vector2, aimDir: Vector2): VolleySchedule {
+  const pending: PendingMissile[] = [];
+  for (let i = 0; i < HOMING_MISSILES_VOLLEY_COUNT; i++) {
+    pending.push({
+      delayRemaining: (i * HOMING_MISSILES_VOLLEY_STAGGER_MS) / 1000,
+      spread: (i - (HOMING_MISSILES_VOLLEY_COUNT - 1) / 2) * (VOLLEY_HALF_SPREAD / 1.5),
+    });
+  }
+  return { remaining: 0, pending };
+}
+
+function spawnMissileFromPending(
+  pending: PendingMissile,
   shipPosition: Vector2,
   aimDir: Vector2,
   scene: Object3D,
-): HomingMissileState[] {
-  const missiles: HomingMissileState[] = [];
+  spawnTime: number,
+): HomingMissileState {
+  // Rotate aimDir by pending.spread.
+  const cos = Math.cos(pending.spread);
+  const sin = Math.sin(pending.spread);
+  const vx = aimDir.x * cos - aimDir.y * sin;
+  const vy = aimDir.x * sin + aimDir.y * cos;
+
   const magentaColor = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
-  for (let i = 0; i < HOMING_MISSILES_VOLLEY_COUNT; i++) {
-    const spread = (i - (HOMING_MISSILES_VOLLEY_COUNT - 1) / 2) * (VOLLEY_HALF_SPREAD / 1.5);
-    // Rotate aimDir by `spread` radians.
-    const cos = Math.cos(spread);
-    const sin = Math.sin(spread);
-    const vx = aimDir.x * cos - aimDir.y * sin;
-    const vy = aimDir.x * sin + aimDir.y * cos;
-    const geometry = new SphereGeometry(MISSILE_RADIUS, 6, 6);
-    const material = new MeshBasicMaterial({ color: magentaColor });
-    const mesh = new Mesh(geometry, material);
-    mesh.position.set(shipPosition.x, shipPosition.y, 0);
-    scene.add(mesh);
-    missiles.push({
-      position: { x: shipPosition.x, y: shipPosition.y },
-      velocity: { x: vx * HOMING_MISSILES_SPEED, y: vy * HOMING_MISSILES_SPEED },
-      remaining: HOMING_MISSILES_TRACKING_DURATION,
-      mesh,
-    });
+
+  // Body sphere
+  const body = new Mesh(
+    new SphereGeometry(MISSILE_RADIUS, 6, 6),
+    new MeshBasicMaterial({ color: magentaColor, transparent: true, opacity: 0.95 }),
+  );
+
+  // Flame cone (mirrors exhaust-gameplay.ts:244-270 pattern)
+  const flameGeom = new ConeGeometry(FLAME_BASE_RADIUS, FLAME_LENGTH, 8);
+  flameGeom.scale(1, -1, 1);
+  flameGeom.rotateZ(-Math.PI / 2);
+  flameGeom.translate(-MISSILE_RADIUS - FLAME_LENGTH * 0.5, 0, 0);
+  const flameMat = new MeshBasicMaterial({
+    color: 0xffaa44, // warm orange, contrasts with magenta body
+    transparent: true,
+    opacity: 0.7,
+    blending: AdditiveBlending,
+    depthWrite: false,
+    side: DoubleSide,
+  });
+  const flame = new Mesh(flameGeom, flameMat);
+
+  const assembly = new Group();
+  assembly.add(body);
+  assembly.add(flame);
+  assembly.position.set(shipPosition.x, shipPosition.y, 0);
+  // Initial rotation to face velocity
+  assembly.rotation.z = Math.atan2(vy, vx);
+  scene.add(assembly);
+
+  return {
+    position: { x: shipPosition.x, y: shipPosition.y },
+    velocity: { x: vx * HOMING_MISSILES_SPEED, y: vy * HOMING_MISSILES_SPEED },
+    remaining: HOMING_MISSILES_TRACKING_DURATION,
+    mesh: body,
+    assembly,
+    flame,
+    spawnTime,
+    firePulse: 0,
+  };
+}
+
+export function tickMissileVolleySchedules(
+  schedules: VolleySchedule[],
+  shipPosition: Vector2,
+  aimDir: Vector2,
+  deltaTime: number,
+  scene: Object3D,
+  activeMissiles: HomingMissileState[],
+): VolleySchedule[] {
+  const alive: VolleySchedule[] = [];
+  const gameTime = performance.now() / 1000;
+  for (const schedule of schedules) {
+    const stillPending: PendingMissile[] = [];
+    for (const pending of schedule.pending) {
+      pending.delayRemaining -= deltaTime;
+      if (pending.delayRemaining <= 0) {
+        activeMissiles.push(
+          spawnMissileFromPending(pending, shipPosition, aimDir, scene, gameTime),
+        );
+      } else {
+        stillPending.push(pending);
+      }
+    }
+    schedule.pending = stillPending;
+    if (schedule.pending.length > 0) {
+      alive.push(schedule);
+    }
   }
-  return missiles;
+  return alive;
 }
 
 /**
- * Tick all live missiles. Applies tracking steering, integrates position,
- * checks asteroid collision (simple hypot < 0.3), and removes expired or
- * impacted missiles. Calls `onMissileImpact(asteroid)` on hit so the caller
- * can decrement the asteroid's health and trigger destruction.
+ * Tick all live missiles. Applies tracking steering, rotates the assembly to
+ * face velocity, pulses the flame cone, emits smoke, integrates position,
+ * and checks asteroid collision. Calls `onMissileImpact(asteroid)` on hit so
+ * the caller can decrement the asteroid's health and trigger destruction.
  */
 export function tickHomingMissiles(
   missiles: HomingMissileState[],
@@ -267,10 +378,11 @@ export function tickHomingMissiles(
   for (const missile of missiles) {
     missile.remaining -= deltaTime;
     if (missile.remaining <= 0) {
-      scene.remove(missile.mesh);
+      scene.remove(missile.assembly);
       missile.mesh.geometry.dispose();
-      const mat = missile.mesh.material;
-      if (mat instanceof MeshBasicMaterial) mat.dispose();
+      (missile.mesh.material as MeshBasicMaterial).dispose();
+      missile.flame.geometry.dispose();
+      (missile.flame.material as MeshBasicMaterial).dispose();
       continue;
     }
     // Apply tracking steering.
@@ -309,15 +421,24 @@ export function tickHomingMissiles(
       x: missile.position.x + missile.velocity.x * deltaTime,
       y: missile.position.y + missile.velocity.y * deltaTime,
     };
-    missile.mesh.position.set(missile.position.x, missile.position.y, 0);
-    // Check asteroid collision.
-    const hit = findNearestAsteroid(missile.position, asteroids, 0.3);
+    missile.assembly.position.set(missile.position.x, missile.position.y, 0);
+    missile.assembly.rotation.z = Math.atan2(missile.velocity.y, missile.velocity.x);
+    // Flame pulse: opacity flickers at ~5 Hz, scale flickers at ~6 Hz
+    missile.firePulse += deltaTime;
+    (missile.flame.material as MeshBasicMaterial).opacity = 0.65 + 0.1 * Math.sin(missile.firePulse * 30);
+    const flameScale = 0.9 + 0.2 * Math.sin(missile.firePulse * 40);
+    missile.flame.scale.set(flameScale, 1, 1);
+    // Emit smoke at current position.
+    emitMissileSmoke(scene, missile.position.x, missile.position.y);
+    // Check asteroid collision using the new constant.
+    const hit = findNearestAsteroid(missile.position, asteroids, HOMING_MISSILES_MISSILE_IMPACT_RADIUS);
     if (hit) {
       onMissileImpact(hit);
-      scene.remove(missile.mesh);
+      scene.remove(missile.assembly);
       missile.mesh.geometry.dispose();
-      const mat = missile.mesh.material;
-      if (mat instanceof MeshBasicMaterial) mat.dispose();
+      (missile.mesh.material as MeshBasicMaterial).dispose();
+      missile.flame.geometry.dispose();
+      (missile.flame.material as MeshBasicMaterial).dispose();
       continue;
     }
     alive.push(missile);

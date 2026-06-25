@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   ACTIVE_KIND_SPECS,
   BOMB_STRIKE_CHARGE_CAP,
@@ -31,6 +31,7 @@ import {
   createEmptyActiveAmmo,
   tickActiveAmmo,
 } from '../src/pickups';
+import type { HomingMissileState, VolleySchedule } from '../src/active-deployments';
 
 describe('ActiveKindSpec table — defensive consistency', () => {
   it('BOMB_STRIKE matches its per-kind constants', () => {
@@ -147,7 +148,7 @@ describe('Active ammo state machine', () => {
 describe('Per-kind constants match spec values', () => {
   it('Bomb Strike constants', () => {
     expect(BOMB_STRIKE_COOLDOWN_SECONDS).toBe(3.0);
-    expect(BOMB_STRIKE_RADIUS).toBe(5.0);
+    expect(BOMB_STRIKE_RADIUS).toBe(8.0); // Phase 7b: 5.0 → 8.0
     expect(BOMB_STRIKE_CHARGE_CAP).toBe(3);
     expect(BOMB_STRIKE_DAMAGE).toBe(1);
   });
@@ -170,10 +171,10 @@ describe('Per-kind constants match spec values', () => {
     expect(HOMING_MISSILES_CHARGE_CAP).toBe(3);
     expect(HOMING_MISSILES_VOLLEY_COUNT).toBe(4);
     expect(HOMING_MISSILES_DAMAGE).toBe(1);
-    expect(HOMING_MISSILES_SPEED).toBe(6.0);
-    expect(HOMING_MISSILES_TRACKING_RADIUS).toBe(8.0);
-    expect(HOMING_MISSILES_TRACKING_DURATION).toBe(1.5);
-    expect(HOMING_MISSILES_TURN_RATE).toBe(8.0);
+    expect(HOMING_MISSILES_SPEED).toBe(7.0); // Phase 7b: 6.0 → 7.0
+    expect(HOMING_MISSILES_TRACKING_RADIUS).toBe(10.0); // Phase 7b: 8.0 → 10.0
+    expect(HOMING_MISSILES_TRACKING_DURATION).toBe(2.5); // Phase 7b: 1.5 → 2.5
+    expect(HOMING_MISSILES_TURN_RATE).toBe(14.0); // Phase 7b: 8.0 → 14.0
   });
 });
 
@@ -261,16 +262,51 @@ describe('findNearestAsteroid', () => {
 });
 
 import {
-  spawnMissileVolley,
+  scheduleMissileVolley,
   tickHomingMissiles,
+  tickMissileVolleySchedules,
 } from '../src/active-deployments';
+import { disposeMissileVfx } from '../src/missile-vfx';
+
+// Missile smoke pool has module-scope state (InstancedMesh + material + texture)
+// that persists across tests. Dispose after each test to avoid contaminating
+// sibling tests with a stale pool bound to a previous test's scene.
+afterEach(() => {
+  disposeMissileVfx();
+});
 
 describe('Homing Missiles — volley + tracking', () => {
-  it('spawnMissileVolley produces VOLLEY_COUNT missiles with distinct velocities', () => {
+  it('scheduleMissileVolley returns 4 PendingMissile entries with distinct spreads and 180ms staggered delays', () => {
+    const schedule = scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 });
+    expect(schedule.pending.length).toBe(HOMING_MISSILES_VOLLEY_COUNT);
+    // First missile launches immediately; subsequent ones at 180/360/540ms.
+    expect(schedule.pending[0].delayRemaining).toBeCloseTo(0, 5);
+    expect(schedule.pending[1].delayRemaining).toBeCloseTo(0.18, 5);
+    expect(schedule.pending[2].delayRemaining).toBeCloseTo(0.36, 5);
+    expect(schedule.pending[3].delayRemaining).toBeCloseTo(0.54, 5);
+    // All 4 spreads should be distinct.
+    const sigs = new Set(schedule.pending.map((p) => p.spread.toFixed(5)));
+    expect(sigs.size).toBe(HOMING_MISSILES_VOLLEY_COUNT);
+  });
+
+  it('draining the schedule produces VOLLEY_COUNT missiles with distinct velocities', () => {
     const scene = makeScene();
-    const missiles = spawnMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }, scene);
+    const missiles: HomingMissileState[] = [];
+    let schedules: VolleySchedule[] = [
+      scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }),
+    ];
+    // Tick enough frames (>= 540ms + a frame) to drain all 4 pending missiles.
+    for (let i = 0; i < 40; i++) {
+      schedules = tickMissileVolleySchedules(
+        schedules,
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        1 / 60,
+        scene,
+        missiles,
+      );
+    }
     expect(missiles.length).toBe(HOMING_MISSILES_VOLLEY_COUNT);
-    // All 4 velocities should be distinct (fan spread).
     const sigs = new Set(
       missiles.map((m) => `${m.velocity.x.toFixed(3)},${m.velocity.y.toFixed(3)}`),
     );
@@ -279,7 +315,21 @@ describe('Homing Missiles — volley + tracking', () => {
 
   it('missile velocity converges toward target heading over 0.5s', () => {
     const scene = makeScene();
-    const missiles = spawnMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }, scene);
+    const missiles: HomingMissileState[] = [];
+    let schedules: VolleySchedule[] = [
+      scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }),
+    ];
+    // Drain the schedule over a few frames so all 4 missiles are live.
+    for (let i = 0; i < 40; i++) {
+      schedules = tickMissileVolleySchedules(
+        schedules,
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        1 / 60,
+        scene,
+        missiles,
+      );
+    }
     // Place a target directly to the right of the ship.
     const target = makeAsteroid(5, 0);
     // 0.5s of ticks; missile should turn toward (5,0).
@@ -287,7 +337,7 @@ describe('Homing Missiles — volley + tracking', () => {
       tickHomingMissiles(missiles, [target], 1 / 60, scene, () => undefined);
     }
     // Velocity should now have a strong +x component (the initial spread
-    // included ±0.225 rad so some started with -y component, but the
+    // included ±0.06 rad so some started with a tiny -y component, but the
     // closest-to-target missile should be pointing right).
     const closest = missiles.reduce((best, m) => {
       const d = Math.hypot(
@@ -305,7 +355,20 @@ describe('Homing Missiles — volley + tracking', () => {
 
   it('missile removed after TRACKING_DURATION without impact', () => {
     const scene = makeScene();
-    const missiles = spawnMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }, scene);
+    const missiles: HomingMissileState[] = [];
+    let schedules: VolleySchedule[] = [
+      scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }),
+    ];
+    for (let i = 0; i < 40; i++) {
+      schedules = tickMissileVolleySchedules(
+        schedules,
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        1 / 60,
+        scene,
+        missiles,
+      );
+    }
     // No asteroids — missiles fly straight and expire.
     const frames = Math.ceil((HOMING_MISSILES_TRACKING_DURATION + 0.1) * 60);
     let alive = missiles;
@@ -317,15 +380,29 @@ describe('Homing Missiles — volley + tracking', () => {
 
   it('missile impact decrements asteroid.health by DAMAGE', () => {
     const scene = makeScene();
-    const missiles = spawnMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }, scene);
+    const missiles: HomingMissileState[] = [];
+    let schedules: VolleySchedule[] = [
+      scheduleMissileVolley({ x: 0, y: 0 }, { x: 1, y: 0 }),
+    ];
+    for (let i = 0; i < 40; i++) {
+      schedules = tickMissileVolleySchedules(
+        schedules,
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        1 / 60,
+        scene,
+        missiles,
+      );
+    }
     // Place target adjacent so impact happens within a few ticks.
     const target = makeAsteroid(0.1, 0);
     let hitCount = 0;
+    const initialCount = missiles.length;
     for (let i = 0; i < 30; i++) {
       const remaining = tickHomingMissiles(missiles, [target], 1 / 60, scene, () => {
         hitCount++;
       });
-      if (remaining.length < missiles.length) break;
+      if (remaining.length < initialCount) break;
     }
     expect(hitCount).toBeGreaterThan(0);
   });

@@ -7,6 +7,19 @@
   <style>
     body { margin: 0; overflow: hidden; background: #050510; }
     canvas { display: block; width: 100vw; height: 100vh; }
+    #bomb-edge-flash {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      background: radial-gradient(ellipse at center, transparent 45%, rgba(255, 136, 0, 0.25) 100%);
+      opacity: 0;
+      transition: opacity 120ms ease-out;
+      z-index: 5;
+      mix-blend-mode: screen;
+    }
   </style>
 </head>
 <body>

@@ -27,6 +27,15 @@ import { Vector2 } from './types';
 
 const MAX_IMPACTS = 8;
 
+// Phase 7b — shield boost + flare constants.
+const SHIELD_BOOST_GREEN: [number, number, number] = [0.20, 1.00, 0.50]; // uBaseColor target during 8s boost
+const SHIELD_FLARE_HOT_COLOR: [number, number, number] = [0.80, 0.95, 1.00]; // uBaseColor peak during 0.6s flare
+const SHIELD_BASELINE_COLOR: [number, number, number] = [0.45, 0.82, 1.00]; // default cyan (must match createShieldMesh)
+const SHIELD_BOOST_PULSE_PEAK = 1.5;
+const SHIELD_BOOST_GRID_PEAK = 0.25;
+const SHIELD_FLARE_PULSE_PEAK = 2.2;
+const SHIELD_FLARE_FRESNEL_PEAK = 1.0;
+
 interface ShieldUniforms {
   [key: string]: { value: unknown };
   uTime: { value: number };
@@ -319,4 +328,109 @@ export function setShieldEnergy(mesh: Mesh, percent: number): void {
   uniforms.uFresnelStrength.value = 0.4 + normalized * 0.75;
   // Flicker kicks in once the shield drops below 40% and intensifies toward 0.
   uniforms.uDamagePercent.value = clamped < 40 ? (1.0 - clamped / 40) : 0.0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Shield Boost + Flare (Phase 7b)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Drive the shield mesh's uBaseColor / uPulseSpeed / uFresnelStrength
+//          uniforms to convey the 3 SHIELD-pickup feedback layers:
+//          1) triggerShieldFlare — 0.6s one-shot burst on collect
+//          2) setShieldBoostColor — sustained GREEN tint for 8s
+//          3) setShieldBoostPulse — sustained faster pulse + brighter grid
+//          All three are read every frame by Game's updateShieldVisuals
+//          call site. The flare is one-shot (driven by a per-mesh timer
+//          stored in userData); the boost helpers are stable-state setters
+//          called every frame while active.
+// Setup:   Called from src/game.ts applyPickupToShip (flare + boost init)
+//          and src/game.ts updateShieldVisuals call site (boost tick).
+// Issues:  None.
+// Fix:     Phase 7b. The shield pickup previously had no visual identity
+//          beyond a floating text — the player couldn't tell when the boost
+//          was active or how much time was left. The GREEN color is the
+//          user's explicit override of the research-recommended "hot cyan"
+//          lerp; it provides a strong peripheral cue that survives color-
+//          blind accessibility.
+// Gotchas: All three functions READ the existing uBaseColor / uPulseSpeed /
+//          uFresnelStrength values (which setShieldEnergy may have just
+//          overwritten), so Game.ts must call these AFTER setShieldEnergy
+//          in the per-frame update order. The flare's userData state is
+//          keyed off the mesh identity — multiple shields would each need
+//          their own timer. Currently the game has only one shield mesh,
+//          so this is safe.
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface ShieldFlareState {
+  age: number;
+  duration: number;
+}
+
+const FLARE_USERDATA_KEY = 'phase7bFlareState';
+
+function getOrCreateFlareState(mesh: Mesh): ShieldFlareState {
+  const userData = mesh.userData as Record<string, unknown>;
+  if (!userData[FLARE_USERDATA_KEY]) {
+    userData[FLARE_USERDATA_KEY] = { age: 0, duration: 0 } as ShieldFlareState;
+  }
+  return userData[FLARE_USERDATA_KEY] as ShieldFlareState;
+}
+
+export function triggerShieldFlare(mesh: Mesh, durationSeconds: number): void {
+  const state = getOrCreateFlareState(mesh);
+  state.age = 0;
+  state.duration = durationSeconds;
+}
+
+export function setShieldBoostColor(mesh: Mesh, intensity: number): void {
+  // intensity in [0, 1] — 1 = full green boost, 0 = baseline cyan.
+  const uniforms = getUniforms(mesh);
+  const t = Math.max(0, Math.min(1, intensity));
+  const base = uniforms.uBaseColor.value as [number, number, number];
+  // Lerp baseline → green by t. Preserve blue channel under 1.0 to avoid
+  // additive white-out (the Phase 6c/6d lesson — see feedback_additive_blending_whiteout.md).
+  uniforms.uBaseColor.value = [
+    SHIELD_BASELINE_COLOR[0] + (SHIELD_BOOST_GREEN[0] - SHIELD_BASELINE_COLOR[0]) * t,
+    SHIELD_BASELINE_COLOR[1] + (SHIELD_BOOST_GREEN[1] - SHIELD_BASELINE_COLOR[1]) * t,
+    SHIELD_BASELINE_COLOR[2] + (SHIELD_BOOST_GREEN[2] - SHIELD_BASELINE_COLOR[2]) * t,
+  ];
+  // Suppress the inline `base` lint by reading it.
+  void base;
+}
+
+export function setShieldBoostPulse(mesh: Mesh, intensity: number): void {
+  const uniforms = getUniforms(mesh);
+  const t = Math.max(0, Math.min(1, intensity));
+  uniforms.uPulseSpeed.value = 0.45 + (SHIELD_BOOST_PULSE_PEAK - 0.45) * t;
+  uniforms.uGridStrength.value = 0.12 + (SHIELD_BOOST_GRID_PEAK - 0.12) * t;
+}
+
+/**
+ * Tick the one-shot flare. Returns true if the flare is still active (caller
+ * may want to keep rendering), false if it has expired. Must be called every
+ * frame from updateShieldVisuals.
+ */
+export function tickShieldFlare(mesh: Mesh, deltaTime: number): boolean {
+  const state = getOrCreateFlareState(mesh);
+  if (state.duration <= 0 || state.age >= state.duration) return false;
+  state.age += deltaTime;
+  const t = Math.max(0, Math.min(1, state.age / state.duration));
+  // 25% ramp, 75% decay (ease-out quadratic on decay).
+  const uniforms = getUniforms(mesh);
+  let k: number;
+  if (t < 0.25) {
+    k = t / 0.25;
+  } else {
+    const decayT = (t - 0.25) / 0.75;
+    k = 1 - decayT;
+    k = k * k;
+  }
+  uniforms.uFresnelStrength.value = 0.4 + (SHIELD_FLARE_FRESNEL_PEAK - 0.4) * k;
+  uniforms.uPulseSpeed.value = 0.45 + (SHIELD_FLARE_PULSE_PEAK - 0.45) * k;
+  const base = uniforms.uBaseColor.value as [number, number, number];
+  uniforms.uBaseColor.value = [
+    base[0] + (SHIELD_FLARE_HOT_COLOR[0] - base[0]) * k,
+    base[1] + (SHIELD_FLARE_HOT_COLOR[1] - base[1]) * k,
+    base[2] + (SHIELD_FLARE_HOT_COLOR[2] - base[2]) * k,
+  ];
+  return state.age < state.duration;
 }
