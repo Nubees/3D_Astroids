@@ -1,7 +1,10 @@
 import {
   AdditiveBlending,
+  Color,
+  InstancedBufferAttribute,
   InstancedMesh,
   MathUtils,
+  Matrix4,
   MeshBasicMaterial,
   Object3D,
   PlaneGeometry,
@@ -17,16 +20,29 @@ import {
 //          is created lazily on the first emit call (when the parent scene
 //          is passed in) so the module can be imported in any test env
 //          without needing a WebGL context.
-// Issues:  None.
-// Fix:     Phase 7b. The 6-layer bomb combo needs cheap "stuff flying outward"
-//          effects without per-frame allocations; an InstancedMesh with a
-//          pre-allocated pool is the canonical Three.js pattern.
+// Issues:  Phase 7b ship (6d0f0f0) used `require('three').Matrix4` /
+//          `.Color` / `.InstancedBufferAttribute` inline to dodge a
+//          `noUnusedLocals` warning on the top-level three import. Vitest
+//          ran the unit tests in Node, where `require` is a global — the
+//          tests passed. Vite's browser build does NOT expose `require`,
+//          so the FIRST CALL TO `useActiveItem(BOMB_STRIKE)` threw
+//          `ReferenceError: require is not defined` from inside
+//          `ensureInstanced`, killing the rAF loop and freezing the game.
+//          User-reported 2026-06-25. See feedback_require_three_freeze.md.
+// Fix:     Moved `Matrix4`, `Color`, `InstancedBufferAttribute` to the
+//          top-level three import block — they ARE used (lazily inside
+//          ensureInstanced + the two update helpers) so the import is no
+//          longer "unused" anyway. The inline `require` calls are gone.
 // Gotchas: Pool size is the absolute worst case (3 charges queued, all 3
 //          blasts mid-flight, 38 particles per blast) = 114. We allocate
 //          128 to leave headroom. Disposal removes the InstancedMesh from
 //          the scene AND disposes the geometry + material — the parent
 //          scene must be passed to emitShockwaveParticles on first call
 //          so the module knows where to add the InstancedMesh.
+//          DO NOT use `require('three')` anywhere — the codebase runs in
+//          both Vitest (Node) and the browser (Vite), and only Node has
+//          `require` as a global. ES module imports are the only safe
+//          pattern.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const POOL_SIZE = 128;
@@ -79,7 +95,7 @@ function ensureInstanced(parentScene: Object3D): InstancedMesh {
       color: 0xffffff,
     });
     // Hide every instance offscreen until first emit.
-    instanced.setMatrixAt(i, new (require('three').Matrix4)().makeTranslation(0, 0, -10000));
+    instanced.setMatrixAt(i, new Matrix4().makeTranslation(0, 0, -10000));
   }
   instanced.instanceMatrix.needsUpdate = true;
   return instanced;
@@ -118,8 +134,8 @@ export function emitShockwaveParticles(parentScene: Object3D, x: number, y: numb
 
 export function updateShockwaveParticles(deltaTime: number): void {
   if (!instanced) return;
-  const tempMatrix = new (require('three').Matrix4)();
-  const tempColor = new (require('three').Color)();
+  const tempMatrix = new Matrix4();
+  const tempColor = new Color();
   for (let i = 0; i < POOL_SIZE; i++) {
     const slot = slots[i];
     if (!slot.alive) {
@@ -147,7 +163,7 @@ export function updateShockwaveParticles(deltaTime: number): void {
     // Assign to a local so TS narrows the type for the setXYZ call below.
     let colorAttr = instanced.instanceColor;
     if (!colorAttr) {
-      colorAttr = new (require('three').InstancedBufferAttribute)(
+      colorAttr = new InstancedBufferAttribute(
         new Float32Array(POOL_SIZE * 3), 3,
       );
       instanced.instanceColor = colorAttr;

@@ -429,7 +429,7 @@ export const ACTIVE_KIND_SPECS: Record<PickupKind, ActiveKindSpec> = {
     chargeCap: BOMB_STRIKE_CHARGE_CAP,
     cooldownSeconds: BOMB_STRIKE_COOLDOWN_SECONDS,
     displayName: 'BOMB',
-    color: 0xff8800,
+    color: 0xffaa00,
     isDeployable: false,
     durationSeconds: 0,
   },

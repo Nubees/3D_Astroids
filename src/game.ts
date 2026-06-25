@@ -259,6 +259,7 @@ interface LivePickup {
 
 interface ActiveHudIcon {
   container: HTMLDivElement;
+  nameLabel: HTMLDivElement;   // small-font addon name header ("BOMB" / "DRONES" / "MISSILES")
   countLabel: HTMLDivElement;
   bar: HTMLDivElement;
   stateLabel: HTMLDivElement; // "READY" / "COOLDOWN" / "DEPLOYED" / "EMPTY"
@@ -2776,6 +2777,49 @@ export class Game {
 
     for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES]) {
       const spec = ACTIVE_KIND_SPECS[kind];
+      // ═════════════════════════════════════════════════════════════════════
+      // My Rules — Active HUD Icon Row (Phase 7b addon names)
+      // ═════════════════════════════════════════════════════════════════════
+      // Purpose:  Render the 3 active addon slots (BOMB / DRONES / MISSILES)
+      //           as small bordered boxes in the bottom-right. Each slot also
+      //           carries a small-font name header above the box so the
+      //           player can identify which addon a count/bar/state belongs
+      //           to without trial-and-error.
+      // Setup:    Called once during createActiveHud() (which runs inside
+      //           the Game constructor after the HUD elements are appended).
+      //           The 3 specs come from ACTIVE_KIND_SPECS; their displayName
+      //           field is the single source of truth for the header text.
+      // Issues:   None.
+      // Fix:      Phase 7b user-request: "Add the addon NAME to the GUI, in
+      //           small font". Layout decision: small-font name above the
+      //           box (not inside) so the box's 3 stacked children
+      //           (count / bar / state) keep their breathing room. An outer
+      //           flex-column wrapper holds the header + box; each child's
+      //           ref (nameLabel, countLabel, bar, stateLabel, container)
+      //           is cached on the ActiveHudIcon struct for O(1) reconcile
+      //           access — same lesson as the PassivePill cached-refs fix.
+      // Gotchas:  The name label uses 9px (smaller than the 10px stateLabel)
+      //           and is color-matched to the spec border so the name reads
+      //           as a tinted caption rather than competing with the white
+      //           count digits. letter-spacing 1px gives the short caps
+      //           ("BOMB" / "DRONES" / "MISSILES") enough room to breathe.
+      //           Do not reuse this slot for SHIELD/SPREAD/FIRE_RATE — those
+      //           are passive and already get a pill via updateHud.
+      // ═════════════════════════════════════════════════════════════════════
+      // Outer wrapper holds the small-font addon name (header) above the 56×56
+      // box, so the name does not crowd count/bar/state inside the box itself.
+      const wrapper = document.createElement('div');
+      wrapper.style.display = 'flex';
+      wrapper.style.flexDirection = 'column';
+      wrapper.style.alignItems = 'center';
+      const nameLabel = document.createElement('div');
+      nameLabel.textContent = spec.displayName;
+      nameLabel.style.fontFamily = 'monospace';
+      nameLabel.style.fontSize = '9px';
+      nameLabel.style.color = `#${spec.color.toString(16).padStart(6, '0')}`;
+      nameLabel.style.letterSpacing = '1px';
+      nameLabel.style.marginBottom = '2px';
+      wrapper.appendChild(nameLabel);
       const container = document.createElement('div');
       container.style.width = '56px';
       container.style.height = '56px';
@@ -2801,8 +2845,9 @@ export class Game {
       container.appendChild(countLabel);
       container.appendChild(bar);
       container.appendChild(stateLabel);
-      this.activeHudElement.appendChild(container);
-      this.activeHudIcons.set(kind, { container, countLabel, bar, stateLabel });
+      wrapper.appendChild(container);
+      this.activeHudElement.appendChild(wrapper);
+      this.activeHudIcons.set(kind, { container, nameLabel, countLabel, bar, stateLabel });
     }
   }
 

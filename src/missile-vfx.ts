@@ -1,7 +1,9 @@
 import {
   AdditiveBlending,
   CanvasTexture,
+  InstancedBufferAttribute,
   InstancedMesh,
+  Matrix4,
   MeshBasicMaterial,
   Object3D,
   PlaneGeometry,
@@ -17,11 +19,13 @@ import {
 // Setup:   Imported by src/active-deployments.ts tickHomingMissiles.
 //          Module-scope texture + InstancedMesh created lazily on first
 //          emit (parent scene required to add the InstancedMesh).
-// Issues:  None.
-// Fix:     Phase 7b. Without a pool, 12 missiles × 16 emits/sec = 192 sprite
-//          allocations per second, plus material duplicates — would GC
-//          thrash and leak GPU resources. The InstancedMesh pool is the
-//          canonical Three.js pattern for this scale.
+// Issues:  Phase 7b ship (6d0f0f0) used `require('three').Matrix4` /
+//          `.InstancedBufferAttribute` inline. The same anti-pattern that
+//          froze the bomb at first fire (see shockwave-particles.ts My
+//          Rules) would freeze any missile volley here — `require` is a
+//          Node global, not a browser one. User-reported 2026-06-25.
+// Fix:     Moved `Matrix4` + `InstancedBufferAttribute` to the top-level
+//          three import block. Inline `require` calls are gone.
 // Gotchas: The 16×16 radial-alpha texture is generated ONCE at module load
 //          (not lazily) because CanvasTexture.fromCanvas is cheap and
 //          deterministic — no WebGL dependency. Pool size = 288 matches
@@ -31,6 +35,8 @@ import {
 //          Disposal must remove the InstancedMesh from the scene BEFORE
 //          disposing the texture (texture dispose is a no-op here, but
 //          the pattern is to clean in reverse-add order).
+//          DO NOT use `require('three')` anywhere — see
+//          feedback_require_three_freeze.md for the full story.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const POOL_SIZE = 288;
@@ -120,7 +126,7 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 
 export function updateMissileSmoke(deltaTime: number): void {
   if (!instanced) return;
-  const tempMatrix = new (require('three').Matrix4)();
+  const tempMatrix = new Matrix4();
   for (let i = 0; i < POOL_SIZE; i++) {
     const slot = slots[i];
     if (!slot.alive) {
@@ -145,7 +151,7 @@ export function updateMissileSmoke(deltaTime: number): void {
     // (same pattern as src/shockwave-particles.ts:160-169 — fixed in Task 3).
     let colorAttr = instanced.instanceColor;
     if (!colorAttr) {
-      colorAttr = new (require('three').InstancedBufferAttribute)(
+      colorAttr = new InstancedBufferAttribute(
         new Float32Array(POOL_SIZE * 3), 3,
       );
       instanced.instanceColor = colorAttr;

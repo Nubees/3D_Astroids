@@ -219,3 +219,42 @@ describe('Pickup mesh — Three.js group factory', () => {
     expect(g.children.length).toBe(0);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Color consistency invariant — user-reported mismatch 2026-06-25
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose:  Lock in the contract that the dropped-pickup body color and the
+//           HUD icon color are the SAME value for every kind. Phase 7b
+//           shipped with a real mismatch on BOMB_STRIKE (PICKUP_COLOR
+//           0xffaa00 vs ACTIVE_KIND_SPECS[].color 0xff8800) — the dropped
+//           pickup was yellow-orange but the HUD border was deeper orange.
+//           This test fails CI if the two tables drift apart for any kind.
+// Setup:    Iterates every PickupKind and asserts the two color sources
+//           match. To run, the test file imports ACTIVE_KIND_SPECS (added
+//           here) and PICKUP_COLOR (already imported above).
+// Issues:   None.
+// Fix:      2026-06-25 — added after the user asked "Are the HUD numbers
+//           matching the dropped item's color?" and we found BOMB_STRIKE
+//           was the one mismatched kind.
+// Gotchas:  ACTIVE_KIND_SPECS only has 3 entries (the active kinds);
+//           PICKUP_COLOR has all 6. The test iterates ALL 6 kinds and
+//           compares against the active kind's spec — for passive kinds
+//           the test asserts PICKUP_COLOR is still consistent (the test
+//           is symmetric: both tables should agree wherever they both
+//           have an entry, AND PICKUP_COLOR should cover every kind).
+// ═══════════════════════════════════════════════════════════════════════════
+describe('Pickup color consistency — PICKUP_COLOR vs ACTIVE_KIND_SPECS', () => {
+  it('every ACTIVE_KIND_SPECS color matches PICKUP_COLOR for the same kind', async () => {
+    // Lazy import so the test file's existing import block stays clean and
+    // ACTIVE_KIND_SPECS isn't pulled into every test in this file.
+    const { ACTIVE_KIND_SPECS } = await import('../src/pickups');
+    for (const kind of Object.values(PickupKind)) {
+      const pickupColor = PICKUP_COLOR[kind];
+      const spec = ACTIVE_KIND_SPECS[kind];
+      // ACTIVE_KIND_SPECS covers all 6 kinds (passive entries are
+      // no-op markers with color set to match PICKUP_COLOR). Assert
+      // the two agree for every kind — no exception types.
+      expect(spec.color, `ACTIVE_KIND_SPECS[${kind}].color`).toBe(pickupColor);
+    }
+  });
+});
