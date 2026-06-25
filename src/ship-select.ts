@@ -13,6 +13,7 @@ import {
   ShipCatalogEntry,
   loadCatalogMesh,
 } from './ships/catalog';
+import { preloadMissileTexture } from './missile-vfx';
 
 import './ship-select.css';
 
@@ -94,6 +95,7 @@ export class ShipSelectScreen {
     this.showLoading(true);
 
     this.loadedShips = await this.loadAllShips();
+    await preloadMissileTexture();
     this.showLoading(false);
     this.buildGrid();
     this.updatePreview();

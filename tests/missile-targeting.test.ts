@@ -5,7 +5,7 @@ import {
   HomingMissileState,
   tickHomingMissiles,
 } from '../src/active-deployments';
-import { Object3D } from 'three';
+import { Group, Mesh, Object3D } from 'three';
 import { createAsteroidState } from '../src/asteroid';
 import { AsteroidKind, AsteroidSize, AsteroidState, Vector2 } from '../src/types';
 import {
@@ -19,18 +19,19 @@ function makeScene(): Object3D {
 }
 
 /**
- * Build a minimal HomingMissileState. The fields not relevant to targeting
- * (mesh, assembly, flame) are null because the test never lets the missile
- * reach the disposal paths.
+ * Build a minimal HomingMissileState. The mesh/assembly/flame fields are
+ * real (empty) Group/Mesh instances so the per-frame
+ * `missile.assembly.position.set(...)` call added in Phase 7d-3 doesn't
+ * crash; targeting-only tests never exercise the disposal path.
  */
 function makeMissile(volleyIndex: number, position: Vector2 = { x: 0, y: 0 }): HomingMissileState {
   return {
     position,
     velocity: { x: 7, y: 0 },
     remaining: 10,
-    mesh: null as unknown as HomingMissileState['mesh'],
-    assembly: null as unknown as HomingMissileState['assembly'],
-    flame: null as unknown as HomingMissileState['flame'],
+    mesh: new Mesh(),
+    assembly: new Group(),
+    flame: new Mesh(),
     volleyIndex,
     target: null,
     spawnTime: 0,
