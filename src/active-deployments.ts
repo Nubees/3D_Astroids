@@ -8,7 +8,6 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
-  SphereGeometry,
 } from 'three';
 import { AsteroidState, Vector2 } from './types';
 import {
@@ -31,7 +30,7 @@ import {
   PICKUP_COLOR,
   PickupKind,
 } from './pickups';
-import { emitMissileSmoke } from './missile-vfx';
+import { createMissileAssembly, emitMissileSmokeRear } from './missile-vfx';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Active Deployments (Phase 7 DIAL-UP / Phase 7b Power-Up VFX)
@@ -72,9 +71,10 @@ export interface HomingMissileState {
   position: Vector2;
   velocity: Vector2;
   remaining: number;
-  mesh: Mesh;          // sphere body
-  assembly: Group;     // body + flame cone, rotated to face velocity
+  mesh: Mesh;          // sphere body core (opaque)
+  assembly: Group;     // core + halo + flame cone, rotated to face velocity
   flame: Mesh;         // thruster flame cone (additive)
+  halo: Mesh;          // halo mesh — disposed alongside mesh + flame
   spawnTime: number;   // for firePulse oscillation
   firePulse: number;   // accumulates elapsed time for flicker
 }
@@ -221,12 +221,11 @@ export function tickDroneDeployments(
 }
 
 const VOLLEY_HALF_SPREAD = 0.06; // was 0.225 — narrower fan reads as a stream, not a shotgun
-const MISSILE_RADIUS = 0.10;     // was 0.12 — slightly smaller body, flame balances it
 const FLAME_LENGTH = 0.40;
 const FLAME_BASE_RADIUS = 0.16;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Homing Missiles (Phase 7b)
+// My Rules — Homing Missiles (Phase 7b / Phase 7c)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: scheduleMissileVolley + tickMissileVolleySchedules +
 //          tickHomingMissiles implement the per-frame behavior of the
@@ -245,6 +244,10 @@ const FLAME_BASE_RADIUS = 0.16;
 //          count. Impact radius bumped to 0.45 (was hard-coded 0.3) so the
 //          bigger flame cone doesn't visually "miss" the asteroid it's
 //          touching.
+//          Phase 7c — body is now a Group of opaque core + additive halo
+//          (see createMissileAssembly in src/missile-vfx.ts); smoke spawns at
+//          the rear nozzle (emitMissileSmokeRear) so the trail is visually
+//          distinct from the body silhouette.
 // Gotchas: Vector2 is readonly in this codebase — must construct new objects
 //          rather than mutating `.x`/`.y`. The spread formula is now
 //          narrower (VOLLEY_HALF_SPREAD=0.06 / 1.5) because the schedule's
@@ -255,7 +258,7 @@ const FLAME_BASE_RADIUS = 0.16;
 //          pushed into a schedules array; the array is culled each frame by
 //          tickMissileVolleySchedules once all 4 missiles have spawned.
 //          Disposal must remove the assembly Group from the scene AND dispose
-//          BOTH the body mesh and the flame mesh (geometry + material).
+//          the body core, halo, and flame meshes (geometry + material).
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -288,19 +291,14 @@ function spawnMissileFromPending(
   const vx = aimDir.x * cos - aimDir.y * sin;
   const vy = aimDir.x * sin + aimDir.y * cos;
 
-  const magentaColor = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
-
-  // Body sphere
-  const body = new Mesh(
-    new SphereGeometry(MISSILE_RADIUS, 6, 6),
-    new MeshBasicMaterial({ color: magentaColor, transparent: true, opacity: 0.95 }),
-  );
+  // Body assembly (opaque core + additive halo) — Phase 7c visibility fix
+  const { assembly, core: body, halo } = createMissileAssembly();
 
   // Flame cone (mirrors exhaust-gameplay.ts:244-270 pattern)
   const flameGeom = new ConeGeometry(FLAME_BASE_RADIUS, FLAME_LENGTH, 8);
   flameGeom.scale(1, -1, 1);
   flameGeom.rotateZ(-Math.PI / 2);
-  flameGeom.translate(-MISSILE_RADIUS - FLAME_LENGTH * 0.5, 0, 0);
+  flameGeom.translate(-0.10 - FLAME_LENGTH * 0.5, 0, 0); // body radius lives in missile-vfx.ts
   const flameMat = new MeshBasicMaterial({
     color: 0xffaa44, // warm orange, contrasts with magenta body
     transparent: true,
@@ -311,8 +309,6 @@ function spawnMissileFromPending(
   });
   const flame = new Mesh(flameGeom, flameMat);
 
-  const assembly = new Group();
-  assembly.add(body);
   assembly.add(flame);
   assembly.position.set(shipPosition.x, shipPosition.y, 0);
   // Initial rotation to face velocity
@@ -326,6 +322,7 @@ function spawnMissileFromPending(
     mesh: body,
     assembly,
     flame,
+    halo,
     spawnTime,
     firePulse: 0,
   };
@@ -381,6 +378,8 @@ export function tickHomingMissiles(
       scene.remove(missile.assembly);
       missile.mesh.geometry.dispose();
       (missile.mesh.material as MeshBasicMaterial).dispose();
+      missile.halo.geometry.dispose();
+      (missile.halo.material as MeshBasicMaterial).dispose();
       missile.flame.geometry.dispose();
       (missile.flame.material as MeshBasicMaterial).dispose();
       continue;
@@ -428,8 +427,9 @@ export function tickHomingMissiles(
     (missile.flame.material as MeshBasicMaterial).opacity = 0.65 + 0.1 * Math.sin(missile.firePulse * 30);
     const flameScale = 0.9 + 0.2 * Math.sin(missile.firePulse * 40);
     missile.flame.scale.set(flameScale, 1, 1);
-    // Emit smoke at current position.
-    emitMissileSmoke(scene, missile.position.x, missile.position.y);
+    // Emit smoke at the rear nozzle (behind body along velocity direction).
+    emitMissileSmokeRear(scene, missile.position.x, missile.position.y,
+      missile.velocity.x, missile.velocity.y);
     // Check asteroid collision using the new constant.
     const hit = findNearestAsteroid(missile.position, asteroids, HOMING_MISSILES_MISSILE_IMPACT_RADIUS);
     if (hit) {
@@ -437,6 +437,8 @@ export function tickHomingMissiles(
       scene.remove(missile.assembly);
       missile.mesh.geometry.dispose();
       (missile.mesh.material as MeshBasicMaterial).dispose();
+      missile.halo.geometry.dispose();
+      (missile.halo.material as MeshBasicMaterial).dispose();
       missile.flame.geometry.dispose();
       (missile.flame.material as MeshBasicMaterial).dispose();
       continue;

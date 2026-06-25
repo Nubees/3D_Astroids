@@ -1,13 +1,18 @@
 import {
   AdditiveBlending,
+  BackSide,
   CanvasTexture,
+  Group,
   InstancedBufferAttribute,
   InstancedMesh,
   Matrix4,
+  Mesh,
   MeshBasicMaterial,
   Object3D,
   PlaneGeometry,
+  SphereGeometry,
 } from 'three';
+import { PICKUP_COLOR, PickupKind } from './pickups';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Missile VFX Smoke Pool (Phase 7b)
@@ -122,6 +127,88 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
   slots[slotIdx].x = x;
   slots[slotIdx].y = y;
   inst.count = POOL_SIZE; // ensure all instances drawn
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Missile Body Assembly + Rear-Nozzle Smoke (Phase 7c)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Phase 7c — make the homing missile body visible. The original
+//          Phase 7b body was a 0.10u semi-transparent sphere in the same
+//          color family as the smoke trail, so the player saw only the smoke
+//          cloud. The new body is a Group of two meshes:
+//            - core: opaque MeshBasicMaterial (solid magenta) — the eye locks
+//              on this solid shape first, then reads the smoke as a separate
+//              trail element
+//            - halo: BackSide AdditiveBlending sphere at 2× radius — a soft
+//              glow that bleeds outward from the solid body
+//          Smoke now spawns at the rear nozzle (behind the body, along
+//          velocity direction) instead of at the body center, so the smoke
+//          trails behind the missile silhouette rather than engulfing it.
+// Setup:   createMissileAssembly is called by src/active-deployments.ts
+//          spawnMissileFromPending (replaces the inline body construction).
+//          emitMissileSmokeRear is called by tickHomingMissiles (replaces
+//          the current center-spawn emitMissileSmoke call).
+// Issues:  Phase 7b visual: 0.10u body + 0.4u smoke puff = smoke was 4× the
+//          body's volume; the body vanished under the smoke cloud.
+// Fix:     Hades/ETG "opaque core + BackSide additive halo" pattern. The
+//          halo radius is 2× the core so the glow visibly bleeds out; the
+//          BackSide makes the halo appear as a soft outer ring rather than
+//          a second solid sphere. Smoke now spawns 0.12u behind the body
+//          center (MISSILE_RADIUS + 0.02 padding) along the velocity vector.
+// Gotchas: 2 draws per missile instead of 1. With max 4 missiles in flight
+//          at any time, +4 draws total — well under budget. The halo's
+//          opacity 0.5 stays under the 0.7 additive cap. emitMissileSmokeRear
+//          falls back to center-spawn when speed < 0.01 (so a near-stationary
+//          turning missile doesn't reverse its smoke position). Uses
+//          PICKUP_COLOR[PickupKind.HOMING_MISSILES] so the body color stays
+//          in lockstep with the rest of the pickup system — single source
+//          of truth.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MISSILE_BODY_RADIUS = 0.10;
+const MISSILE_HALO_RADIUS = 0.20; // 2× body radius
+const MISSILE_SMOKE_REAR_OFFSET = MISSILE_BODY_RADIUS + 0.02; // 0.12u
+
+export function createMissileAssembly(): { assembly: Group; core: Mesh; halo: Mesh } {
+  const color = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
+  const core = new Mesh(
+    new SphereGeometry(MISSILE_BODY_RADIUS, 8, 8),
+    new MeshBasicMaterial({ color }),
+  );
+  const halo = new Mesh(
+    new SphereGeometry(MISSILE_HALO_RADIUS, 12, 12),
+    new MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.5,
+      blending: AdditiveBlending,
+      side: BackSide,
+      depthWrite: false,
+    }),
+  );
+  const assembly = new Group();
+  assembly.add(core);
+  assembly.add(halo);
+  return { assembly, core, halo };
+}
+
+export function emitMissileSmokeRear(
+  scene: Object3D,
+  x: number,
+  y: number,
+  velX: number,
+  velY: number,
+): void {
+  const speed = Math.hypot(velX, velY);
+  if (speed < 0.01) {
+    // Near-stationary missile — fall back to center-spawn.
+    emitMissileSmoke(scene, x, y);
+    return;
+  }
+  // Place smoke MISSILE_SMOKE_REAR_OFFSET units BEHIND the body along velocity.
+  const rearX = x - (velX / speed) * MISSILE_SMOKE_REAR_OFFSET;
+  const rearY = y - (velY / speed) * MISSILE_SMOKE_REAR_OFFSET;
+  emitMissileSmoke(scene, rearX, rearY);
 }
 
 export function updateMissileSmoke(deltaTime: number): void {

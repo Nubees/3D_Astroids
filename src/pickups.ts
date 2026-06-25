@@ -344,13 +344,47 @@ export function applyPickupEffect(
 //          HOMING_MISSILES_MISSILE_IMPACT_RADIUS replaces a hard-coded 0.3
 //          in game.ts; Task 7's wiring must read this constant rather than
 //          re-introduce a literal.
+//          Phase 7c — damage constants bumped 1→10 (one-shot any asteroid),
+//          and SHIELD pickup now grants a bomb charge as a conversion bonus
+//          (see applyActivePickupEffect). The KillSource type is also
+//          exported from this file for the destroyAsteroid source param.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Bomb Strike constants.
 export const BOMB_STRIKE_RADIUS = 8.0; // was 5.0 — Phase 7b "wipes out the area" upgrade
 export const BOMB_STRIKE_COOLDOWN_SECONDS = 3.0;
 export const BOMB_STRIKE_CHARGE_CAP = 3;
-export const BOMB_STRIKE_DAMAGE = 1;
+export const BOMB_STRIKE_DAMAGE = 10;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — KillSource enum (Phase 7c)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Phase 7c — tag every asteroid kill with its source so the destroy
+//          path can decide whether to split (bullet/wall = split, bomb/
+//          missile = no split). The enum is a string union so it shows up
+//          grep-able in the call site (`destroyAsteroid(asteroid, 'BOMB')`)
+//          and so future kill sources (drones, future charge-up weapons)
+//          just add an entry without re-plumbing a parameter type.
+// Setup:   Imported by src/game.ts (destroyAsteroid + 2 call sites). Tests
+//          import the type and pass literal strings.
+// Issues:  Phase 7b bomb killed iron LARGE in 4 hits (BOMB_STRIKE_DAMAGE=1,
+//          SIZE_HEALTH[LARGE]=4) and ALWAYS spawned 2 MEDIUM children via
+//          splitAsteroid — so the bomb "screen-cleared" but immediately
+//          repopulated the arena. Phase 7c fixes both: damage 1→10, and
+//          BOMB/MISSILE source skips splitAsteroid.
+// Fix:     Bumping the damage constants + adding the source param. The
+//          'BULLET'/'WALL' values preserve existing behavior; the new
+//          'BOMB'/'MISSILE' values are the fix.
+// Gotchas: CRYSTAL_HEALTH_FOR_TEST is a re-export of CRYSTAL_HEALTH from
+//          src/asteroid.ts (not 6 hard-coded) so a future balance change
+//          in asteroid.ts is picked up automatically. Re-exports of other
+//          modules' types live in their natural home — pickups.ts is
+//          convenient because the test file already imports from here.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type KillSource = 'BULLET' | 'BOMB' | 'MISSILE' | 'WALL' | 'SHARD';
+
+export { CRYSTAL_HEALTH as CRYSTAL_HEALTH_FOR_TEST } from './asteroid';
 
 // Orbit Drones constants.
 export const ORBIT_DRONES_COOLDOWN_SECONDS = 4.0;
@@ -368,7 +402,7 @@ export const ORBIT_DRONES_FADE_OUT_SECONDS = 0.3;
 export const HOMING_MISSILES_COOLDOWN_SECONDS = 4.0;
 export const HOMING_MISSILES_CHARGE_CAP = 3;
 export const HOMING_MISSILES_VOLLEY_COUNT = 4;
-export const HOMING_MISSILES_DAMAGE = 1;
+export const HOMING_MISSILES_DAMAGE = 10;
 export const HOMING_MISSILES_SPEED = 7.0; // was 6.0
 export const HOMING_MISSILES_TRACKING_RADIUS = 10.0; // was 8.0
 export const HOMING_MISSILES_TRACKING_DURATION = 2.5; // was 1.5
@@ -464,6 +498,20 @@ export function applyActivePickupEffect(kind: PickupKind, activeAmmo: ActiveAmmo
   const ammo = activeAmmo[kind];
   ammo.charges = Math.min(spec.chargeCap, ammo.charges + 1);
   // Cooldown is NOT set here — only on fire (consumeActiveCharge).
+  // Phase 7c — SHIELD pickup grants a bomb charge as a conversion bonus, so
+  // the player can "spend" a SHIELD on a bomb when the moment calls for it.
+  // Without this, a SHIELD pickup in a tight spot only buys +50% shield
+  // energy, which the player may not need if shields are already full.
+  if (kind === PickupKind.SHIELD) {
+    const bombAmmo = activeAmmo[PickupKind.BOMB_STRIKE];
+    const bombSpec = ACTIVE_KIND_SPECS[PickupKind.BOMB_STRIKE];
+    bombAmmo.charges = Math.min(bombSpec.chargeCap, bombAmmo.charges + 1);
+  }
+  // Phase 7c — pickup-gated refills only. tickActiveAmmo no longer bumps
+  // charges (the function only decrements cooldownRemaining). Charges are
+  // gained ONLY through applyActivePickupEffect — no passive regen, no
+  // time-based recovery. The Game previously called applyActivePickupEffect
+  // from applyPickupToShip (lines 1177-1184); the path is unchanged.
 }
 
 export function canFireActive(ammo: ActiveAmmoState): boolean {

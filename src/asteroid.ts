@@ -62,7 +62,7 @@ const SIZE_HEALTH: Record<AsteroidSizeType, number> = {
   [AsteroidSizeType.LARGE]: 4,
 };
 
-const CRYSTAL_HEALTH = 6;
+export const CRYSTAL_HEALTH = 6;
 
 // Fracture trigger threshold. Bumped from 0.3 → 0.5 in Phase 6c so the player
 // has time to see the electricity discharge / sparks / scale-breathe visuals

@@ -150,7 +150,7 @@ describe('Per-kind constants match spec values', () => {
     expect(BOMB_STRIKE_COOLDOWN_SECONDS).toBe(3.0);
     expect(BOMB_STRIKE_RADIUS).toBe(8.0); // Phase 7b: 5.0 → 8.0
     expect(BOMB_STRIKE_CHARGE_CAP).toBe(3);
-    expect(BOMB_STRIKE_DAMAGE).toBe(1);
+    expect(BOMB_STRIKE_DAMAGE).toBe(10); // Phase 7c: 1 → 10 (one-shot any asteroid)
   });
 
   it('Orbit Drones constants', () => {
@@ -170,7 +170,7 @@ describe('Per-kind constants match spec values', () => {
     expect(HOMING_MISSILES_COOLDOWN_SECONDS).toBe(4.0);
     expect(HOMING_MISSILES_CHARGE_CAP).toBe(3);
     expect(HOMING_MISSILES_VOLLEY_COUNT).toBe(4);
-    expect(HOMING_MISSILES_DAMAGE).toBe(1);
+    expect(HOMING_MISSILES_DAMAGE).toBe(10); // Phase 7c: 1 → 10 (one-shot any asteroid)
     expect(HOMING_MISSILES_SPEED).toBe(7.0); // Phase 7b: 6.0 → 7.0
     expect(HOMING_MISSILES_TRACKING_RADIUS).toBe(10.0); // Phase 7b: 8.0 → 10.0
     expect(HOMING_MISSILES_TRACKING_DURATION).toBe(2.5); // Phase 7b: 1.5 → 2.5

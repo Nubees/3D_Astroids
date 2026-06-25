@@ -81,6 +81,12 @@ import {
   updateFracturedMaterialTelegraph,
 } from './crystal-fx';
 import { Shockwave, updateShockwaves } from './shockwave';
+import {
+  FREEZE_FRAME_TICKS,
+  PUNCH_ZOOM_DURATION_SECONDS,
+  SCREEN_FLASH_DURATION_SECONDS,
+  SCREEN_FLASH_OPACITY,
+} from './bomb-timing';
 import { ArenaMovementController } from './movement/arena-controller';
 import {
   ShieldState,
@@ -172,7 +178,9 @@ import {
   maybeDropPickup,
   tickActiveAmmo,
   updatePickup,
+  KillSource, // Phase 7c — tagged kill source for the split rule
 } from './pickups';
+import { shouldSplitForKillSource } from './game-helpers';
 import {
   DroneDeploymentState,
   HomingMissileState,
@@ -394,6 +402,15 @@ export class Game {
   // Created lazily on first bomb so the div does not appear in the DOM
   // unless the player has used a bomb; removed by stop() during cleanup.
   private bombEdgeFlashElement: HTMLDivElement | null = null;
+  // Phase 7c — Bomb Strike 3-phase time sequence: screen flash, freeze-frame,
+  // and CSS punch-zoom. Each is a countdown (seconds or ticks) decremented in
+  // updateBombVisuals; the DOM/CSS classes are added at fire time and removed
+  // when the countdown hits zero. The screen-flash div is created lazily on
+  // first bomb; the canvas wrapper is resolved from the canvas's parentNode.
+  private screenFlashElement: HTMLDivElement | null = null;
+  private screenFlashRemaining = 0;
+  private freezeFramesRemaining = 0;
+  private punchZoomRemaining = 0;
   private nextAsteroidId = 1;
   private lastWaveNumber = 1;
   private readonly resizeHandler: () => void;
@@ -619,6 +636,16 @@ export class Game {
       this.bombEdgeFlashElement.remove();
       this.bombEdgeFlashElement = null;
     }
+    // Phase 7c — screen-flash div cleanup.
+    if (this.screenFlashElement) {
+      this.screenFlashElement.classList.remove('active');
+      this.screenFlashElement = null;
+    }
+    // Phase 7c — punch-zoom cleanup (remove class from canvas).
+    this.renderer.domElement.classList.remove('punch-zoom');
+    this.screenFlashRemaining = 0;
+    this.punchZoomRemaining = 0;
+    this.freezeFramesRemaining = 0;
     disposeShockwaveParticles();
     disposeMissileVfx();
   }
@@ -651,6 +678,24 @@ export class Game {
   };
 
   private update(deltaTime: number): void {
+    // Phase 7c — freeze-frame skip. When a bomb has just fired, the first
+    // 2 ticks are skipped to give the player a "bullet time" beat. The
+    // 6-layer bomb visual still progresses because fireBombStrike was called
+    // synchronously at press time (before update was entered), so the
+    // tween counters in activeCoreFlashes / activeShockwaves continue to
+    // tick down. The freeze only skips the per-frame simulation (asteroid
+    // integration, missile tracking, etc.) so the player sees the rings
+    // expand against a frozen arena.
+    if (this.freezeFramesRemaining > 0) {
+      this.freezeFramesRemaining -= 1;
+      // Still tick the bomb visual tweens (DOM flash, punch-zoom, camera shake)
+      // so the moment reads as a real beat, not a stuck frame.
+      this.updateBombVisuals(deltaTime);
+      this.applyCameraShake(deltaTime);
+      this.updateFloatingTexts(deltaTime);
+      return;
+    }
+
     this.controller.update();
 
     const rawInput = this.input.currentState();
@@ -680,6 +725,8 @@ export class Game {
     updateBreather(this.breather, this.shield, this.ship.state.position, input.deployBreather, deltaTime);
 
     this.controller.apply(this.ship.state, input, deltaTime);
+    // Phase 7c — bomb visual tweens (DOM flash fade, punch-zoom decay).
+    this.updateBombVisuals(deltaTime);
     // Phase 7 Task 14 — FIRE_RATE passive pickup multiplies the per-frame
     // cooldown decrement by 3× for 6 seconds. The Ship.update signature
     // already accepts `fireRateMultiplier = 1` (Task 8), so passing 3 is
@@ -1282,6 +1329,11 @@ export class Game {
   //          accepted: a new active kind needs only a new branch here
   //          (no enum switch to update), at the cost of one string compare
   //          per frame per active slot. Worth it for extensibility.
+  //          Phase 7c — destroyAsteroid takes a `source: KillSource` param.
+  //          BOMB and MISSILE source skip splitAsteroid so a 10-damage
+  //          one-shot actually clears the screen. fireBombStrike and
+  //          onMissileImpact pass their source explicitly; all bullet kills
+  //          (default 'BULLET') keep the classic Asteroids split behavior.
   // ═══════════════════════════════════════════════════════════════════════════
   private useActiveItem(kind: PickupKind): void {
     if (!canFireActive(this.activeAmmo[kind])) return;
@@ -1337,12 +1389,29 @@ export class Game {
   //          a single shared Shockwave + text emission is enough.
   // ═══════════════════════════════════════════════════════════════════════════
   private fireBombStrike(position: Vector2): void {
-    // Phase 7b — 6-layer combo. Replaces the single Shockwave from Task 12
-    // with a richer "exploding" sequence: hot core flash (layer 1), two
-    // staggered shock rings (layers 2+3), outward streamers + debris chunks
-    // (layers 4+5), and bumped camera shake (layer 6). The DOM edge flash
-    // and shards cleansing are added on top so the bomb has both a screen-
-    // level and gameplay-level effect.
+    // Phase 7c — 3-phase time sequence. Replaces Phase 7b's 6-layer combo
+    // (which peaked all layers in the same frame, reading as additive soup).
+    // Phase 1 (T+0ms):   DOM white-flash + freeze-frame (2 ticks) + CSS punch-zoom + layer 1 core flash
+    // Phase 2 (T+50ms):  primary 12u shock ring + 30 streamers (layers 2, 4)
+    // Phase 3 (T+200ms): camera shake onset (0.8/0.5s, bumped from 0.6/0.4)
+    //                    + debris chunks (layer 5) at T+300ms
+    // Phase 4 (T+400ms): secondary 14u ring (was T+80ms with 10u radius)
+    // Tail    (T+800ms): residual glow sprite (existing via secondary ring's fade)
+    //
+    // The 3 phases feel distinct because of:
+    //   - DOM flash (high attention, 80ms ease-out)
+    //   - Freeze-frame (2 ticks skipped, ~60ms of frozen arena)
+    //   - Punch-zoom (canvas scale 1.02, 100ms ease-out)
+    //   - 50ms gap before the primary ring (so the flash reads as a beat
+    //     BEFORE the ring, not concurrently with it)
+
+    // T+0: DOM white-flash (zero-WebGL screen-level beat).
+    this.triggerScreenFlash();
+    // T+0: Freeze-frame (skip 2 update ticks).
+    this.freezeFramesRemaining = FREEZE_FRAME_TICKS;
+    // T+0: CSS punch-zoom.
+    this.triggerBombPunchZoom();
+
     // Layer 1: Hot core flash — single-frame additive sphere that expands to 1u.
     const core = new Mesh(
       new SphereGeometry(0.5, 16, 16),
@@ -1357,31 +1426,45 @@ export class Game {
     core.position.set(position.x, position.y, -0.1);
     this.scene.add(core);
     this.activeCoreFlashes.push({ mesh: core, age: 0, duration: 0.1 });
-    // Layer 2: Primary shock ring (8u radius, orange).
-    this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0, 8.0));
-    // Layer 3: Secondary outer ring (10u radius, cooler red-orange) — pushed 80ms later.
+
+    // T+50: Primary shock ring (12u radius, orange) — was 8u.
     setTimeout(() => {
-      this.activeShockwaves.push(new Shockwave(position, 0xff4400, 0.5, 10.0));
-    }, 80);
-    // Layer 4: Shock-front particles (30 outward streamers).
-    emitShockwaveParticles(this.scene, position.x, position.y, {
-      count: 30,
-      speed: 6,
-      color: 0xffcc66,
-      lifetime: 0.5,
-    });
-    // Layer 5: Debris chunks (8 faster, bigger).
-    emitShockwaveParticles(this.scene, position.x, position.y, {
-      count: 8,
-      speed: 10,
-      color: 0xffaa00,
-      lifetime: 0.6,
-      isDebris: true,
-    });
-    // Layer 6: Camera shake bumped to 0.6/0.4s.
-    this.cameraShakeAmplitude = Math.max(this.cameraShakeAmplitude, 0.6);
-    this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, 0.4);
-    // DOM edge flash.
+      this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0, 12.0));
+    }, 50);
+
+    // T+50: Shock-front particles (30 outward streamers).
+    setTimeout(() => {
+      emitShockwaveParticles(this.scene, position.x, position.y, {
+        count: 30,
+        speed: 6,
+        color: 0xffcc66,
+        lifetime: 0.5,
+      });
+    }, 50);
+
+    // T+200: Camera shake onset, bumped 0.6/0.4 → 0.8/0.5.
+    setTimeout(() => {
+      this.cameraShakeAmplitude = Math.max(this.cameraShakeAmplitude, 0.8);
+      this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, 0.5);
+    }, 200);
+
+    // T+300: Debris chunks (8 faster, bigger).
+    setTimeout(() => {
+      emitShockwaveParticles(this.scene, position.x, position.y, {
+        count: 8,
+        speed: 10,
+        color: 0xffaa00,
+        lifetime: 0.6,
+        isDebris: true,
+      });
+    }, 300);
+
+    // T+400: Secondary outer ring (14u radius, cooler red-orange) — was T+80ms with 10u.
+    setTimeout(() => {
+      this.activeShockwaves.push(new Shockwave(position, 0xff4400, 0.5, 14.0));
+    }, 400);
+
+    // DOM edge flash (Phase 7b — kept).
     this.triggerBombEdgeFlash();
     // Shards cleansing — restores the EXPANSION spec's "I countered the Shard Swarm" payoff.
     this.activeShards = this.activeShards.filter(
@@ -1401,7 +1484,7 @@ export class Game {
       if (d <= BOMB_STRIKE_RADIUS) {
         asteroid.state.health = Math.max(0, asteroid.state.health - BOMB_STRIKE_DAMAGE);
         if (asteroid.state.health <= 0) {
-          this.destroyAsteroid(asteroid);
+          this.destroyAsteroid(asteroid, 'BOMB');
           continue;
         }
       }
@@ -1593,7 +1676,7 @@ export class Game {
     if (!live) return;
     live.state.health = Math.max(0, live.state.health - HOMING_MISSILES_DAMAGE);
     if (live.state.health <= 0) {
-      this.destroyAsteroid(live);
+      this.destroyAsteroid(live, 'MISSILE');
     }
   }
 
@@ -2053,6 +2136,69 @@ export class Game {
     el.style.opacity = '0';
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Bomb Strike 3-Phase Time Sequence (Phase 7c)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Phase 7c — make the bomb moment a deliberate "I just changed
+  //          everything" beat instead of an additive-soup 6-layer peak. The
+  //          3 phases (screen flash → freeze → punch-zoom) all fire at T+0
+  //          and last 60-100ms; the existing 6 layers are time-staggered
+  //          inside fireBombStrike so their peaks spread across 1.2s.
+  // Setup:   triggerScreenFlash + triggerBombPunchZoom are called from
+  //          fireBombStrike. updateBombVisuals is called from update(dt) to
+  //          decrement the 3 counters and remove CSS classes at zero.
+  // Issues:  Phase 7b's 6 layers all peaked in the same frame — the eye saw
+  //          a momentary bright blob, not a controlled blast.
+  // Fix:     DOM white-flash (CSS class .active on #screen-flash, 80ms ease-
+  //          out) provides zero-WebGL screen-level punctuation. Freeze-frame
+  //          (2 ticks skipped) is the "bullet time" beat — the player sees
+  //          the rings expand while asteroids are frozen. CSS punch-zoom
+  //          (canvas scale 1.02, 100ms ease-out) is the "I just hit something"
+  //          feedback. None of these cost any new GPU resources.
+  // Gotchas:  screenFlashElement is created lazily on first bomb (same
+  //          pattern as bombEdgeFlashElement). The canvas wrapper is the
+  //          canvas's parentNode — the CSS transform applies to the canvas
+  //          directly because the canvas is what owns the 3D viewport. The
+  //          freeze-frame counter is checked FIRST in update(dt) and skips
+  //          the entire simulation pass; HUD effects (camera shake, floating
+  //          text) still tick so the world does not feel completely paused.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private triggerScreenFlash(): void {
+    if (!this.screenFlashElement) {
+      this.screenFlashElement = document.getElementById('screen-flash') as HTMLDivElement | null;
+      if (!this.screenFlashElement) {
+        // Fallback: create it manually if index.html hasn't loaded (e.g., in tests).
+        this.screenFlashElement = document.createElement('div');
+        this.screenFlashElement.id = 'screen-flash';
+        document.body.appendChild(this.screenFlashElement);
+      }
+    }
+    this.screenFlashElement.classList.add('active');
+    this.screenFlashRemaining = SCREEN_FLASH_DURATION_SECONDS;
+  }
+
+  private triggerBombPunchZoom(): void {
+    const canvas = this.renderer.domElement;
+    canvas.classList.add('punch-zoom');
+    this.punchZoomRemaining = PUNCH_ZOOM_DURATION_SECONDS;
+  }
+
+  private updateBombVisuals(deltaTime: number): void {
+    if (this.screenFlashRemaining > 0) {
+      this.screenFlashRemaining = Math.max(0, this.screenFlashRemaining - deltaTime);
+      if (this.screenFlashRemaining <= 0 && this.screenFlashElement) {
+        this.screenFlashElement.classList.remove('active');
+      }
+    }
+    if (this.punchZoomRemaining > 0) {
+      this.punchZoomRemaining = Math.max(0, this.punchZoomRemaining - deltaTime);
+      if (this.punchZoomRemaining <= 0) {
+        this.renderer.domElement.classList.remove('punch-zoom');
+      }
+    }
+  }
+
   private spawnRandomAsteroid(): void {
     // Crystal gating: at wave 3+, occasionally swap a normal LARGE spawn for a
     // crystal. Per-wave quota enforced by `crystalsSpawnedThisWave` so a single
@@ -2188,18 +2334,20 @@ export class Game {
     this.asteroids = aliveAsteroids;
   }
 
-  private destroyAsteroid(target: LiveAsteroid): void {
+  private destroyAsteroid(target: LiveAsteroid, source: KillSource = 'BULLET'): void {
     // Single dispatch on kind — the iron path stays exactly as it was before
     // Phase 6b; the crystal path lives in destroyCrystal (scoring + cascade
     // cleanup + death explosion VFX).
+    // Phase 7c — `source` is forwarded to destroyIronAsteroid so bomb/missile
+    // kills skip splitAsteroid (no children spawned, screen really clears).
     if (target.state.kind === AsteroidKind.CRYSTAL) {
       this.destroyCrystal(target);
       return;
     }
-    this.destroyIronAsteroid(target);
+    this.destroyIronAsteroid(target, source);
   }
 
-  private destroyIronAsteroid(target: LiveAsteroid): void {
+  private destroyIronAsteroid(target: LiveAsteroid, source: KillSource = 'BULLET'): void {
     const multiplier = isInsideBreatherZone(this.breather, this.ship.state.position)
       ? BREATHER_SCORE_MULTIPLIER
       : 1.0;
@@ -2212,9 +2360,16 @@ export class Game {
     if (dropKind !== null) this.spawnPickup(dropKind, target.state.position);
     this.scene.remove(target.mesh);
     disposeAsteroidMesh(target.mesh);
-    const children = splitAsteroid(target.state);
-    for (const child of children) {
-      this.spawnAsteroid(child.size, child.position, child.velocity);
+    // Phase 7c — bomb/missile kills skip splitAsteroid so a 10-damage one-shot
+    // actually clears the screen instead of replacing the killed asteroid with
+    // 2 MEDIUM children. Bullet/wall kills keep splitting (classic Asteroids
+    // behavior). SHARD splits via its own dispatcher (also a child-spawn path)
+    // so it falls under the BULLET-like default.
+    if (shouldSplitForKillSource(source)) {
+      const children = splitAsteroid(target.state);
+      for (const child of children) {
+        this.spawnAsteroid(child.size, child.position, child.velocity);
+      }
     }
   }
 

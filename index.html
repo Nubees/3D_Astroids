@@ -20,10 +20,28 @@
       z-index: 5;
       mix-blend-mode: screen;
     }
+    #screen-flash {
+      position: fixed;
+      inset: 0;
+      background: #ffffff;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 100;
+      transition: opacity 80ms ease-out;
+    }
+    #screen-flash.active {
+      opacity: 0.8;
+    }
+    #game-canvas.punch-zoom {
+      transform: scale(1.02);
+      transition: transform 100ms ease-out;
+      transform-origin: 50% 50%;
+    }
   </style>
 </head>
 <body>
   <canvas id="game-canvas"></canvas>
+  <div id="screen-flash"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
