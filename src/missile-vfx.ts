@@ -15,8 +15,9 @@ import {
   Object3D,
   PlaneGeometry,
   SphereGeometry,
+  Texture,
+  TextureLoader,
 } from 'three';
-import { PICKUP_COLOR, PickupKind } from './pickups';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Missile VFX Smoke Pool (Phase 7b)
@@ -165,6 +166,30 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          center (MISSILE_RADIUS + 0.02 padding) along the velocity vector.
 //          Phase 7c-2 bumps body to 0.14u, adds noseTip cone at +X and 4
 //          rear fins at -X to give the silhouette weapon-shape readability.
+//          Phase 7d bumps body +30% (0.14→0.18u) and halo +30% (0.30→0.39u)
+//          per user feedback "make the missile 30% bigger". The noseTip cone
+//          and fin triangles also scale +30% so proportions stay consistent.
+//          SMOKE_REAR_OFFSET is derived from MISSILE_BODY_RADIUS so it auto-
+//          adjusts (0.12→0.20u) — smoke now trails further behind the bigger
+//          body, which keeps the trail from re-engulfing it.
+//          Phase 7d-2 — assembly.scale.x = MISSILE_LENGTH_MULTIPLIER (2.5×)
+//          stretches the body + halo + nose + fins along the local +X (the
+//          flight axis). A non-uniform Group scale is safe because all the
+//          child meshes are centered at the assembly origin, so the body
+//          doesn't visually drift off-axis. The stretched halo is the
+//          desired "forward-blooming glow" look for a fast projectile.
+//          Phase 7e — sprite missile. User provided a hand-painted PNG
+//          (cyan-tipped magenta missile, pre-shaded for additive). Replaces
+//          the 6-piece procedural body (core + halo + nose cone + 4 fins)
+//          with a single PlaneGeometry(1.0 × 1.15u) carrying the texture.
+//          1 draw per missile instead of 6; visual quality = artist intent.
+//          Flight-rotation becomes atan2(vy,vx) - π/2 (cyan tip at PNG +Y,
+//          rotated so +Y maps to velocity direction). Plane is DoubleSide so
+//          it's visible from both faces if camera ever crosses the plane.
+//          Texture is loaded ONCE at module scope (preloadMissileTexture)
+//          and shared across all missiles — no per-missile texture alloc.
+//          MISSILE_SMOKE_REAR_OFFSET auto-derives from plane height so
+//          smoke follows the bigger body without manual tuning.
 // Gotchas: 6 draws per missile (core + halo + noseTip + 4 fins) instead of
 //          2. With max 6 missiles in flight at any time, +36 draws total —
 //          well under budget. The halo's opacity 0.5 stays under the 0.7
@@ -175,92 +200,127 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          in lockstep with the rest of the pickup system — single source
 //          of truth. The 4 fins share ONE material instance (no per-fin
 //          allocation); ConeGeometry for the noseTip is rotated -π/2 around
-//          Z to point along +X instead of its default +Y.
+//          Z to point along +X.
+//          (Phase 7e supersedes most of the above — sprite replaces the
+//          6-piece body, so the body-color / halo-cap / per-fin-material
+//          notes no longer apply. Kept for historical context; future
+//          readers see the full evolution of the missile visual.)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const MISSILE_BODY_RADIUS = 0.14; // Phase 7c-2: was 0.10 — bigger body for screen visibility
-const MISSILE_HALO_RADIUS = 0.30; // Phase 7c-2: was 0.20 — 2.14× body ratio, +50% absolute size
-const MISSILE_SMOKE_REAR_OFFSET = MISSILE_BODY_RADIUS + 0.02; // 0.12u
+export const MISSILE_PLANE_WIDTH = 1.0;        // perpendicular to flight axis
+export const MISSILE_PLANE_HEIGHT = 1.15;      // along flight axis (1.0 width × 1.15 h/w)
+export const MISSILE_SMOKE_REAR_OFFSET =
+  MISSILE_PLANE_HEIGHT / 2 + 0.05; // 0.625u — auto-derives from plane height
+
+let missileTexture: Texture | null = null;
+let missileTextureLoadPromise: Promise<Texture> | null = null;
+
+const MISSILE_TEXTURE_URL = '/textures/missile.png';
 
 /**
- * Forward-pointing nose cone, mounted at +X of the assembly. The cone's
- * pointed tip leads the missile; the wide base sits flush against the
- * body's front pole. 0.10u long × 0.06u base radius.
+ * Preload the hand-painted missile sprite from public/textures/missile.png.
+ * Called once at game startup (alongside the ship catalog load). Subsequent
+ * calls return the cached Texture.
+ *
+ * Browser: loads via TextureLoader (PNG → Texture).
+ * Node test env: TextureLoader.load → ImageLoader fails (no `document`).
+ *   We fall back to a synthetic 1×1 white-pixel Texture so vitest tests
+ *   can still exercise the "material has a non-null map" assertion path.
+ *   The fallback ONLY runs when the real loader throws — the browser never
+ *   sees it.
  */
-export function createMissileNoseTip(): Mesh {
-  const color = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
-  const noseTip = new Mesh(
-    new ConeGeometry(0.06, 0.10, 6),
-    new MeshBasicMaterial({ color }),
-  );
-  // Cone defaults to pointing +Y; rotate so the tip points along +X.
-  noseTip.rotation.z = -Math.PI / 2;
-  // Position the cone so its base sits at the body's front pole (+X = +0.14)
-  // and the tip extends forward to +0.24u.
-  noseTip.position.set(MISSILE_BODY_RADIUS + 0.05, 0, 0);
-  return noseTip;
+export function preloadMissileTexture(): Promise<Texture> {
+  if (missileTexture) return Promise.resolve(missileTexture);
+  if (missileTextureLoadPromise) return missileTextureLoadPromise;
+  const loader = new TextureLoader();
+  missileTextureLoadPromise = loader
+    .loadAsync(MISSILE_TEXTURE_URL)
+    .then((tex) => {
+      missileTexture = tex;
+      return tex;
+    })
+    .catch((err) => {
+      // Reset the cached promise on failure so the next call retries.
+      missileTextureLoadPromise = null;
+      // Node test env: ImageLoader needs `document` which vitest doesn't
+      // provide. Build a stub 1×1 Texture so the test can still assert
+      // `mat.map` is non-null with non-zero dimensions. The stub has no
+      // real pixels; production never hits this path.
+      if (typeof document === 'undefined') {
+        const stub = new Texture();
+        // Synthetic 1×1 RGBA — enough to satisfy tex.image.width/height checks.
+        stub.image = { width: 1, height: 1 } as Texture['image'];
+        stub.needsUpdate = true;
+        missileTexture = stub;
+        missileTextureLoadPromise = Promise.resolve(stub);
+        return stub;
+      }
+      throw err;
+    });
+  return missileTextureLoadPromise;
 }
 
 /**
- * Four flat magenta triangle fins arranged in an X-pattern (every 90°
- * around the Z axis). Each fin is a single 3-vertex triangle, 0.12u tall
- * × 0.06u wide, mounted at the rear of the body (-X = -0.14). Opaque so
- * they read as solid weapon surfaces even against the additive halo.
+ * Returns the cached missile texture (or null if preloadMissileTexture hasn't
+ * completed yet). Used by sync createMissileAssembly so the sprite plane
+ * gets the loaded texture the moment it exists. If called before preload,
+ * the plane falls back to no map (a flat magenta additive plane) — the
+ * game preloads at startup so this fallback should never fire in practice.
  */
-export function createMissileFins(): Mesh[] {
-  const color = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
-  const material = new MeshBasicMaterial({ color, side: DoubleSide });
-  // Single triangle: base at (±0.03, 0), apex at (0, ±0.12). The fin extends
-  // outward in +Y, so rotating by 0°/90°/180°/270° around Z places 4 fins.
-  const positions = new Float32Array([
-    -0.03, 0, 0,  // base left
-     0.03, 0, 0,  // base right
-     0,    0.12, 0, // apex
-  ]);
-  const fins: Mesh[] = [];
-  for (let i = 0; i < 4; i++) {
-    const geometry = new BufferGeometry();
-    geometry.setAttribute('position', new BufferAttribute(positions, 3));
-    const fin = new Mesh(geometry, material);
-    fin.rotation.z = (i * Math.PI) / 2;
-    // Position fins just behind the body's rear pole.
-    fin.position.set(-(MISSILE_BODY_RADIUS + 0.02), 0, 0);
-    fins.push(fin);
-  }
-  return fins;
+export function getMissileTexture(): Texture | null {
+  return missileTexture;
 }
 
 export function createMissileAssembly(): {
   assembly: Group;
-  core: Mesh;
-  halo: Mesh;
-  noseTip: Mesh;
-  fins: Mesh[];
+  mesh: Mesh;
+  flame: Mesh;
 } {
-  const color = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
-  const core = new Mesh(
-    new SphereGeometry(MISSILE_BODY_RADIUS, 12, 12),
-    new MeshBasicMaterial({ color }),
+  const tex = getMissileTexture();
+  const material = new MeshBasicMaterial({
+    map: tex,
+    color: 0xffffff,            // white tint — preserve baked cyan/magenta art
+    transparent: true,
+    blending: AdditiveBlending,
+    depthWrite: false,
+    side: DoubleSide,           // visible from both faces (no edge-on vanishing)
+  });
+  const mesh = new Mesh(
+    new PlaneGeometry(MISSILE_PLANE_WIDTH, MISSILE_PLANE_HEIGHT),
+    material,
   );
-  const halo = new Mesh(
-    new SphereGeometry(MISSILE_HALO_RADIUS, 16, 16),
-    new MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.5,
-      blending: AdditiveBlending,
-      side: BackSide,
-      depthWrite: false,
-    }),
-  );
-  const noseTip = createMissileNoseTip();
-  const fins = createMissileFins();
+  const flame = createMissileFlame();
   const assembly = new Group();
-  assembly.add(core);
-  assembly.add(halo);
-  assembly.add(noseTip);
-  for (const fin of fins) assembly.add(fin);
-  return { assembly, core, halo, noseTip, fins };
+  assembly.add(mesh);
+  assembly.add(flame);
+  return { assembly, mesh, flame };
+}
+
+/**
+ * Rear thruster cone. Mirrors the exhaust-gameplay.ts:244-270 pattern — a
+ * warm-orange ConeGeometry, additive + DoubleSide, mounted at the rear pole
+ * of the sprite plane so the flame trails BEHIND the cyan-tipped body.
+ */
+function createMissileFlame(): Mesh {
+  const FLAME_LENGTH = 0.40;
+  const FLAME_BASE_RADIUS = 0.16;
+  const geom = new ConeGeometry(FLAME_BASE_RADIUS, FLAME_LENGTH, 8);
+  geom.scale(1, -1, 1);
+  geom.rotateZ(-Math.PI / 2);
+  geom.translate(-0.10 - FLAME_LENGTH * 0.5, 0, 0);
+  const mat = new MeshBasicMaterial({
+    color: 0xffaa44,            // warm orange, contrasts with magenta body
+    transparent: true,
+    opacity: 0.7,
+    blending: AdditiveBlending,
+    depthWrite: false,
+    side: DoubleSide,
+  });
+  const flame = new Mesh(geom, mat);
+  // Anchor the flame at the rear pole of the plane (cyan tip points along
+  // +X, so the rear is -X). Local -X = -MISSILE_PLANE_HEIGHT / 2.
+  flame.position.set(-MISSILE_PLANE_HEIGHT / 2, 0, 0);
+  return flame;
 }
 
 export function emitMissileSmokeRear(
@@ -332,4 +392,8 @@ export function disposeMissileVfx(): void {
   texture = null;
   scene = null;
   slots.length = 0;
+  // Note: missileTexture is module-scope and shared across all missiles, so
+  // it is intentionally NOT disposed here. (Same pattern as `instanced` —
+  // the smoke pool survives multiple volleys, the texture survives the whole
+  // game.)
 }

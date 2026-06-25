@@ -1,6 +1,5 @@
 import {
   AdditiveBlending,
-  ConeGeometry,
   DoubleSide,
   Group,
   IcosahedronGeometry,
@@ -72,13 +71,11 @@ export interface HomingMissileState {
   position: Vector2;
   velocity: Vector2;
   remaining: number;
-  mesh: Mesh;          // sphere body core (opaque)
-  assembly: Group;     // core + halo + noseTip + 4 fins + flame, rotated to face velocity
+  mesh: Mesh;          // sprite plane body (additive, DoubleSide, pre-shaded PNG)
+  assembly: Group;     // sprite plane + flame cone, rotated to face velocity
   flame: Mesh;         // thruster flame cone (additive)
-  halo: Mesh;          // halo mesh — disposed alongside mesh + flame
-  noseTip: Mesh;       // forward-pointing cone (+X) — disposed by disposeMissileState
-  fins: Mesh[];        // 4 flat magenta triangles at -X — disposed by disposeMissileState
   volleyIndex: number; // 0..VOLLEY_COUNT-1; first NEAR_TIER_COUNT seek NEAREST, rest FARTHEST
+  target: AsteroidState | null; // Phase 7d-3 — locked-on asteroid (sticky target). Re-picked via tier logic if destroyed by another missile.
   spawnTime: number;   // for firePulse oscillation
   firePulse: number;   // accumulates elapsed time for flicker
 }
@@ -249,8 +246,6 @@ export function tickDroneDeployments(
 }
 
 const VOLLEY_HALF_SPREAD = 0.06; // was 0.225 — narrower fan reads as a stream, not a shotgun
-const FLAME_LENGTH = 0.40;
-const FLAME_BASE_RADIUS = 0.16;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Homing Missiles (Phase 7b / Phase 7c / Phase 7c-2)
@@ -281,6 +276,23 @@ const FLAME_BASE_RADIUS = 0.16;
 //          first NEAR_TIER_COUNT (3) seek NEAREST, last (3) seek FARTHEST
 //          within TRACKING_RADIUS. Disposal consolidated into disposeMissileState
 //          helper called from BOTH the expiry path and the impact path.
+//          Phase 7d-3 — STICKY TARGET. Each missile picks its target ONCE
+//          (on the first frame, via the same tier logic) and locks that
+//          target for the rest of its flight, re-picking only if the
+//          locked target is removed from the asteroid list (i.e. killed
+//          by another missile or by the bomb). Previously every missile
+//          re-ran findNearest/findFarthest every frame, which meant all
+//          3 near-tier missiles in a volley converged on the SAME asteroid
+//          (they all spawn co-located on the ship). With stickiness, by
+//          the time each missile's first lock fires, the missile has
+//          drifted along its angular-spread offset and sees a different
+//          "nearest" than its siblings — so the 3-missile tier hits 3
+//          different asteroids. Impact check now uses the LOCKED target
+//          (not findNearestAsteroid against IMPACT_RADIUS) so we can never
+//          hit a different asteroid than the one the missile is steering
+//          toward. MISSILE_IMPACT_RADIUS bumped 0.45→0.95 so the stretched
+//          body (0.18u × 2.5× = 0.45u visual half-length) doesn't visually
+//          fly THROUGH asteroids before the impact check fires.
 // Gotchas: Vector2 is readonly in this codebase — must construct new objects
 //          rather than mutating `.x`/`.y`. The spread formula is now
 //          narrower (VOLLEY_HALF_SPREAD=0.06 / 1.5) because the schedule's
@@ -298,6 +310,16 @@ const FLAME_BASE_RADIUS = 0.16;
 //          is idempotent on already-disposed materials. PendingMissile now
 //          carries `volleyIndex` so the schedule tick can pass it through to
 //          the live HomingMissileState (used for tier targeting).
+//          Phase 7e — sprite missile integration. HomingMissileState drops
+//          core/halo/noseTip/fins fields; mesh now holds the sprite plane.
+//          spawnMissileFromPending simplified accordingly. disposeMissileState
+//          disposes only mesh + flame + their materials. The texture itself
+//          is module-scope and shared, so we do NOT dispose it per-missile
+//          (would break subsequent volleys). Flight-rotation adds `- π/2`:
+//          cyan tip is at PNG +Y; we want it to point along velocity (+X
+//          when flying right). atan2(vy,vx) gives velocity angle from +X;
+//          `rotation.z = velocity_angle - π/2` rotates plane so +Y of plane
+//          = velocity direction.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -333,41 +355,29 @@ function spawnMissileFromPending(
   const vx = aimDir.x * cos - aimDir.y * sin;
   const vy = aimDir.x * sin + aimDir.y * cos;
 
-  // Body assembly (opaque core + additive halo + noseTip cone + 4 fins) — Phase 7c-2
-  const { assembly, core: body, halo, noseTip, fins } = createMissileAssembly();
+  // Body assembly (sprite plane + flame cone) — Phase 7e
+  const { assembly, mesh, flame } = createMissileAssembly();
 
-  // Flame cone (mirrors exhaust-gameplay.ts:244-270 pattern)
-  const flameGeom = new ConeGeometry(FLAME_BASE_RADIUS, FLAME_LENGTH, 8);
-  flameGeom.scale(1, -1, 1);
-  flameGeom.rotateZ(-Math.PI / 2);
-  flameGeom.translate(-0.10 - FLAME_LENGTH * 0.5, 0, 0); // body radius lives in missile-vfx.ts
-  const flameMat = new MeshBasicMaterial({
-    color: 0xffaa44, // warm orange, contrasts with magenta body
-    transparent: true,
-    opacity: 0.7,
-    blending: AdditiveBlending,
-    depthWrite: false,
-    side: DoubleSide,
-  });
-  const flame = new Mesh(flameGeom, flameMat);
-
-  assembly.add(flame);
   assembly.position.set(shipPosition.x, shipPosition.y, 0);
-  // Initial rotation to face velocity
-  assembly.rotation.z = Math.atan2(vy, vx);
+  // Initial rotation to face velocity (cyan tip at PNG +Y → -π/2 aligns +Y
+  // with velocity direction).
+  assembly.rotation.z = Math.atan2(vy, vx) - Math.PI / 2;
   scene.add(assembly);
 
   return {
     position: { x: shipPosition.x, y: shipPosition.y },
     velocity: { x: vx * HOMING_MISSILES_SPEED, y: vy * HOMING_MISSILES_SPEED },
     remaining: HOMING_MISSILES_TRACKING_DURATION,
-    mesh: body,
+    mesh,
     assembly,
     flame,
-    halo,
-    noseTip,
-    fins,
     volleyIndex,
+    // Phase 7d-3 — target is locked on the FIRST tickHomingMissiles frame
+    // via tier logic (near vs far) so each missile picks a DIFFERENT asteroid
+    // (near-tier missiles see different relative distances after they spread,
+    // far-tier missiles see different relative distances too). Setting null
+    // here keeps the spawn function free of asteroid-list coupling.
+    target: null,
     spawnTime,
     firePulse: 0,
   };
@@ -413,30 +423,22 @@ export function tickMissileVolleySchedules(
 /**
  * Unmount a homing missile and dispose all its GPU resources. Removes the
  * assembly Group from the scene FIRST (so its children are detached before
- * we dispose their geometry/material), then disposes the body core, halo,
- * flame, noseTip cone, and each of the 4 fin meshes in turn.
+ * we dispose their geometry/material), then disposes the sprite plane mesh
+ * and flame cone in turn.
  *
  * Internal helper — not exported. Used by both the expiry path
  * (missile.remaining <= 0) and the impact path (collision with asteroid).
  *
- * NOTE: the 4 fins share ONE material instance (see createMissileFins in
- * src/missile-vfx.ts). Calling `dispose()` four times on the same material
- * is safe — three.js dispose is idempotent on already-disposed materials.
+ * The texture itself is module-scope and shared, so we do NOT dispose it
+ * per-missile (would break subsequent volleys). See src/missile-vfx.ts
+ * disposeMissileVfx for the smoke-pool cleanup.
  */
 function disposeMissileState(missile: HomingMissileState, scene: Object3D): void {
   scene.remove(missile.assembly);
   missile.mesh.geometry.dispose();
   (missile.mesh.material as MeshBasicMaterial).dispose();
-  missile.halo.geometry.dispose();
-  (missile.halo.material as MeshBasicMaterial).dispose();
   missile.flame.geometry.dispose();
   (missile.flame.material as MeshBasicMaterial).dispose();
-  missile.noseTip.geometry.dispose();
-  (missile.noseTip.material as MeshBasicMaterial).dispose();
-  for (const fin of missile.fins) {
-    fin.geometry.dispose();
-    (fin.material as MeshBasicMaterial).dispose();
-  }
 }
 
 /**
@@ -459,22 +461,34 @@ export function tickHomingMissiles(
       disposeMissileState(missile, scene);
       continue;
     }
-    // Apply tracking steering — Phase 7c-2 tier targeting.
+    // Apply tracking steering — Phase 7c-2 tier targeting + Phase 7d-3 stickiness.
     // First NEAR_TIER_COUNT missiles in the volley seek the NEAREST asteroid
     // (close-in kill); the rest (volleyIndex >= NEAR_TIER_COUNT) seek the
     // FARTHEST in radius so the back half of a 6-volley reaches the back of
     // the arena instead of all clustering on the near target.
-    const target = missile.volleyIndex < HOMING_MISSILES_NEAR_TIER_COUNT
-      ? findNearestAsteroid(
-          missile.position,
-          asteroids,
-          HOMING_MISSILES_TRACKING_RADIUS,
-        )
-      : findFarthestAsteroid(
-          missile.position,
-          asteroids,
-          HOMING_MISSILES_TRACKING_RADIUS,
-        );
+    //
+    // STICKY TARGET — the target is locked ONCE (on the first frame the missile
+    // has no target) and stays locked until that asteroid is removed from the
+    // list (typically destroyed by another missile in the volley). This is
+    // what makes the 3 near-tier missiles pick 3 DIFFERENT asteroids: at spawn
+    // they're co-located so all would pick the same nearest — but by the time
+    // their target lock fires (frame 1), they've already spread along their
+    // different angular spreads, so each sees a different "nearest" asteroid.
+    // Same trick for far-tier.
+    if (missile.target === null || !asteroids.includes(missile.target)) {
+      missile.target = missile.volleyIndex < HOMING_MISSILES_NEAR_TIER_COUNT
+        ? findNearestAsteroid(
+            missile.position,
+            asteroids,
+            HOMING_MISSILES_TRACKING_RADIUS,
+          )
+        : findFarthestAsteroid(
+            missile.position,
+            asteroids,
+            HOMING_MISSILES_TRACKING_RADIUS,
+          );
+    }
+    const target = missile.target;
     if (target) {
       const desiredX = target.position.x - missile.position.x;
       const desiredY = target.position.y - missile.position.y;
@@ -506,7 +520,11 @@ export function tickHomingMissiles(
       y: missile.position.y + missile.velocity.y * deltaTime,
     };
     missile.assembly.position.set(missile.position.x, missile.position.y, 0);
-    missile.assembly.rotation.z = Math.atan2(missile.velocity.y, missile.velocity.x);
+    // Phase 7e — sprite missile: cyan tip is at PNG +Y. We want it to lead
+    // the velocity direction. atan2(vy, vx) returns the velocity angle from
+    // +X; rotating the plane by (velocity_angle - π/2) makes the plane's
+    // local +Y point along the velocity. (See src/missile-vfx.ts My Rules.)
+    missile.assembly.rotation.z = Math.atan2(missile.velocity.y, missile.velocity.x) - Math.PI / 2;
     // Flame pulse: opacity flickers at ~5 Hz, scale flickers at ~6 Hz
     missile.firePulse += deltaTime;
     (missile.flame.material as MeshBasicMaterial).opacity = 0.65 + 0.1 * Math.sin(missile.firePulse * 30);
@@ -515,12 +533,21 @@ export function tickHomingMissiles(
     // Emit smoke at the rear nozzle (behind body along velocity direction).
     emitMissileSmokeRear(scene, missile.position.x, missile.position.y,
       missile.velocity.x, missile.velocity.y);
-    // Check asteroid collision using the new constant.
-    const hit = findNearestAsteroid(missile.position, asteroids, HOMING_MISSILES_MISSILE_IMPACT_RADIUS);
-    if (hit) {
-      onMissileImpact(hit);
-      disposeMissileState(missile, scene);
-      continue;
+    // Check asteroid collision against the LOCKED target only.
+    // Phase 7d-3 — previously used findNearestAsteroid(...IMPACT_RADIUS), which
+    // could hit a different asteroid than the one the missile is steering
+    // toward. With a sticky lock, the only asteroid the missile can collide
+    // with is its target — checking target-only is both faster and correct.
+    if (target) {
+      const dToTarget = Math.hypot(
+        target.position.x - missile.position.x,
+        target.position.y - missile.position.y,
+      );
+      if (dToTarget <= HOMING_MISSILES_MISSILE_IMPACT_RADIUS) {
+        onMissileImpact(target);
+        disposeMissileState(missile, scene);
+        continue;
+      }
     }
     alive.push(missile);
   }

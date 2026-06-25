@@ -1,75 +1,58 @@
-import { describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   AdditiveBlending,
-  BackSide,
-  BufferGeometry,
-  ConeGeometry,
   DoubleSide,
   Group,
   MeshBasicMaterial,
-  SphereGeometry,
+  PlaneGeometry,
+  Texture,
 } from 'three';
-import { PICKUP_COLOR, PickupKind } from '../src/pickups';
-import { createMissileAssembly } from '../src/missile-vfx';
+import {
+  MISSILE_PLANE_WIDTH,
+  MISSILE_PLANE_HEIGHT,
+  createMissileAssembly,
+  preloadMissileTexture,
+} from '../src/missile-vfx';
 
-const MISSILE_MAGENTA = PICKUP_COLOR[PickupKind.HOMING_MISSILES];
+beforeAll(async () => {
+  await preloadMissileTexture();
+});
 
-describe('createMissileAssembly — Phase 7c-2 7-mesh body', () => {
-  it('returns a Group with exactly 7 children (core + halo + noseTip + 4 fins)', () => {
+describe('createMissileAssembly — Phase 7e sprite missile', () => {
+  it('returns a Group containing exactly 2 children (sprite plane + flame)', () => {
     const { assembly } = createMissileAssembly();
     expect(assembly).toBeInstanceOf(Group);
-    expect(assembly.children.length).toBe(7);
+    expect(assembly.children.length).toBe(2);
   });
 
-  it('core mesh is opaque (transparent: false) with magenta HOMING_MISSILES color', () => {
-    const { core } = createMissileAssembly();
-    const mat = core.material as MeshBasicMaterial;
-    expect(mat.transparent).toBe(false);
-    expect(mat.color.getHex()).toBe(MISSILE_MAGENTA);
-  });
-
-  it('core geometry is a SphereGeometry (visual sanity)', () => {
-    const { core } = createMissileAssembly();
-    expect(core.geometry).toBeInstanceOf(SphereGeometry);
-  });
-
-  it('halo mesh uses AdditiveBlending + BackSide with opacity 0.5', () => {
-    const { halo } = createMissileAssembly();
-    const mat = halo.material as MeshBasicMaterial;
-    expect(mat.blending).toBe(AdditiveBlending);
-    expect(mat.side).toBe(BackSide);
-    expect(mat.opacity).toBe(0.5);
+  it('sprite mesh is a PlaneGeometry 1.0 × 1.15, additive, transparent, double-sided', () => {
+    const { mesh } = createMissileAssembly();
+    const geom = mesh.geometry as PlaneGeometry;
+    expect(geom.parameters.width).toBeCloseTo(MISSILE_PLANE_WIDTH, 5);
+    expect(geom.parameters.height).toBeCloseTo(MISSILE_PLANE_HEIGHT, 5);
+    const mat = mesh.material as MeshBasicMaterial;
     expect(mat.transparent).toBe(true);
+    expect(mat.blending).toBe(AdditiveBlending);
     expect(mat.depthWrite).toBe(false);
+    expect(mat.side).toBe(DoubleSide);
   });
 
-  it('noseTip is a ConeGeometry with the missile color and is opaque', () => {
-    const { noseTip } = createMissileAssembly();
-    expect(noseTip.geometry).toBeInstanceOf(ConeGeometry);
-    const mat = noseTip.material as MeshBasicMaterial;
-    expect(mat.color.getHex()).toBe(MISSILE_MAGENTA);
-    expect(mat.transparent).toBe(false);
+  it('sprite material has the loaded missile texture as its map (no magenta override)', () => {
+    const { mesh } = createMissileAssembly();
+    const mat = mesh.material as MeshBasicMaterial;
+    expect(mat.map).not.toBeNull();
+    expect(mat.color.getHex()).toBe(0xffffff);
+    const tex = mat.map as Texture;
+    // tex.image is typed as the union (HTMLImageElement | HTMLCanvasElement |
+    // ImageBitmap | ...) which TS surfaces as `unknown`. We only need width/
+    // height for the sanity check, so a structural cast is enough.
+    const img = tex.image as { width: number; height: number };
+    expect(img.width).toBeGreaterThan(0);
+    expect(img.height).toBeGreaterThan(0);
   });
 
-  it('fins array contains exactly 4 Mesh entries (rear X-pattern)', () => {
-    const { fins } = createMissileAssembly();
-    expect(fins.length).toBe(4);
-    for (const fin of fins) {
-      // Each fin is a 3-vertex triangle BufferGeometry (not a stock primitive).
-      expect(fin.geometry).toBeInstanceOf(BufferGeometry);
-      const posAttr = fin.geometry.getAttribute('position');
-      expect(posAttr.count).toBe(3);
-    }
-  });
-
-  it('fins share ONE material instance with DoubleSide + magenta color (sanity)', () => {
-    const { fins } = createMissileAssembly();
-    const firstMat = fins[0].material as MeshBasicMaterial;
-    expect(firstMat.side).toBe(DoubleSide);
-    expect(firstMat.color.getHex()).toBe(MISSILE_MAGENTA);
-    // All 4 fins reference the same material (no per-fin allocation).
-    for (let i = 1; i < fins.length; i++) {
-      expect(fins[i].material).toBe(firstMat);
-    }
+  it('flame is positioned at the rear pole of the plane (-height/2 along X)', () => {
+    const { flame } = createMissileAssembly();
+    expect(flame.position.x).toBeCloseTo(-MISSILE_PLANE_HEIGHT / 2, 5);
   });
 });
