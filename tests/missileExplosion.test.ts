@@ -116,9 +116,9 @@ describe('createMissileExplosionFactory', () => {
   describe('update — particles age and die', () => {
     it('after lifetime, hasActiveParticles returns to false (no stuck slots)', () => {
       factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
-      // Phase 7g-3 — total explosion lifetime = max(SHARD=0.6, SPARK=0.45,
-      // FLASH=0.16, SMOKE=0.85) = 0.85s. Update at 0.9s should kill all.
-      factory.update(0.9);
+      // Phase 7g-4 — total explosion lifetime = max(SHARD=0.6, SPARK=0.45,
+      // FLASH=0.16, SMOKE=0.55) = 0.6s. Update at 0.7s should kill all.
+      factory.update(0.7);
       expect(factory.hasActiveParticles()).toBe(false);
     });
 
@@ -220,7 +220,7 @@ describe('createMissileExplosionFactory', () => {
 
     it('spawn fires smoke slots alongside shards/sparks/flash', () => {
       factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
-      // After 1 update tick, smoke should still be alive (lifetime 0.85s).
+      // After 1 update tick, smoke should still be alive (lifetime 0.55s).
       factory.update(1 / 60);
       expect(factory.hasActiveParticles()).toBe(true);
     });
@@ -228,7 +228,9 @@ describe('createMissileExplosionFactory', () => {
     it('smoke outlives sparks (still alive at 0.5s when sparks die at 0.45s)', () => {
       factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
       factory.update(0.5);
-      // Sparks dead, flash dead, but smoke should still be ticking (0.85s).
+      // Sparks dead, flash dead, smoke also dying but not yet fully dead
+      // (smoke lifetime 0.55s — boundary case at 0.5s, hasActiveParticles
+      // still true at 0.5s exactly because age < 0.55).
       expect(factory.hasActiveParticles()).toBe(true);
     });
 
@@ -239,6 +241,78 @@ describe('createMissileExplosionFactory', () => {
       // So scale = 0.2 + (FLASH_MAX_SCALE - 0.2) × 1 = FLASH_MAX_SCALE = 2.2.
       factory.update(0.05);
       expect(flashMesh.scale.x).toBeCloseTo(2.2, 1);
+    });
+  });
+
+  describe('Phase 7g-4 — smoke silhouette fix (radial vUv falloff)', () => {
+    it('smoke material is a ShaderMaterial (not MeshBasicMaterial — Phase 7g-4 swap)', () => {
+      const smokeMesh = factory.group.children[3];
+      const mat = (smokeMesh as unknown as { material: ShaderMaterial }).material;
+      expect(mat).toBeInstanceOf(ShaderMaterial);
+    });
+
+    it('smoke shader has vUv varying + radial falloff in fragment (no texture asset needed)', () => {
+      const smokeMesh = factory.group.children[3];
+      const mat = (smokeMesh as unknown as { material: ShaderMaterial }).material;
+      expect(mat.fragmentShader).toMatch(/varying\s+vec2\s+vUv/);
+      expect(mat.fragmentShader).toMatch(/length\(vUv\s*-\s*vec2\(0\.5\)\)/);
+      expect(mat.fragmentShader).toMatch(/pow\(1\.0\s*-\s*r,\s*2\.0\)/);
+    });
+
+    it('smoke shader vertex passes uv varying and multiplies by instanceMatrix', () => {
+      const smokeMesh = factory.group.children[3];
+      const mat = (smokeMesh as unknown as { material: ShaderMaterial }).material;
+      expect(mat.vertexShader).toMatch(/varying\s+vec2\s+vUv/);
+      expect(mat.vertexShader).toMatch(/vUv\s*=\s*uv/);
+      // Three.js auto-injects instanceMatrix; we just USE it (don't redeclare).
+      expect(mat.vertexShader).toMatch(/instanceMatrix/);
+    });
+
+    it('smoke opacity is 0.55 (Phase 7g-4: 0.4 → 0.55 to compensate for radial falloff discard)', () => {
+      const smokeMesh = factory.group.children[3];
+      const mat = (smokeMesh as unknown as {
+        material: { uniforms: { uOpacity: { value: number } } };
+      }).material;
+      expect(mat.uniforms.uOpacity.value).toBeCloseTo(0.55, 5);
+    });
+
+    it('smoke matrix max scale is bounded: initialScale × (0.25 + 0.45) ≈ 0.7u (was ~1.75u in 7g-3)', () => {
+      // We can't directly read SMOKE_GROWTH_SCALE (not exported), so we
+      // verify the SCALE CAP by reading the largest matrix in smokeMesh
+      // after pushing past smoke lifetime (force all puffs to max scale).
+      factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
+      // Update 0.5s — smoke still alive, near peak scale (t ≈ 0.91).
+      factory.update(0.5);
+      const smokeMesh = factory.group.children[3] as unknown as {
+        instanceMatrix: { array: Float32Array };
+      };
+      // The largest matrix element on the diagonal corresponds to scale.
+      // With initialScale jitter 0.7-1.0 and (base=0.25 + growth=0.45×0.91)=0.66,
+      // max scale = 1.0 × 0.66 = 0.66u. With initialScale < 1, max < 0.7u.
+      let maxScale = 0;
+      const arr = smokeMesh.instanceMatrix.array;
+      for (let i = 0; i < arr.length; i += 16) {
+        // Diagonal scale elements at indices 0, 5, 10.
+        const sx = arr[i];
+        const sy = arr[i + 5];
+        const sz = arr[i + 10];
+        maxScale = Math.max(maxScale, sx, sy, sz);
+      }
+      // Allow ~0.75u for jitter tolerance (initialScale could be 1.0 + tiny float drift).
+      expect(maxScale).toBeLessThanOrEqual(0.75);
+    });
+
+    it('all smoke dies by 0.6s (Phase 7g-4 lifetime 0.55s, was 0.85s)', () => {
+      factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
+      factory.update(0.6); // past new 0.55s smoke lifetime
+      const smokeMesh = factory.group.children[3] as unknown as {
+        instanceMatrix: { array: Float32Array };
+      };
+      const arr = smokeMesh.instanceMatrix.array;
+      // All slots should have scale 0 (parked off-screen).
+      for (let i = 0; i < arr.length; i += 16) {
+        expect(arr[i]).toBe(0); // dead slots have scale 0
+      }
     });
   });
 
@@ -275,9 +349,9 @@ describe('createMissileExplosionFactory — unstubbed RNG path', () => {
     expect(() => {
       factory.spawn({ x: 1, y: 2 }, { x: 0.5, y: 0.866 });
       factory.update(1 / 60);
-      // Phase 7g-3 — past the new max lifetime (SMOKE=0.85s), so all
-      // particles die. Use 0.9s as a buffer to avoid edge-of-frame flake.
-      factory.update(0.9);
+      // Phase 7g-4 — past the new max smoke lifetime (SMOKE=0.55s), so all
+      // particles die. Use 0.7s as a buffer to avoid edge-of-frame flake.
+      factory.update(0.7);
       factory.dispose();
     }).not.toThrow();
     expect(factory.group.parent).toBeNull(); // disposed

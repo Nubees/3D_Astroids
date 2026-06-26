@@ -106,13 +106,53 @@ import { Vector2 } from './types';
 //   worst-case at explosion center ≈ 4.55 per channel (well under 1.0).
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7g-4 — Smoke Silhouette Fix (Masked Radial Sprite via ShaderMaterial)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Fix user's complaint "the white smoke is way to big , bulky and
+//          ugly ...". Three compounding root causes from Phase 7g-3:
+//            1. Puff scale too large — final 1.75u per puff was BIGGER than
+//               the flash sphere itself (peak 1.54u). Smoke visually
+//               dominated instead of accenting the explosion.
+//            2. No edge falloff — flat PlaneGeometry(1,1) rectangles with
+//               NO alpha mask + additive blending = hard rectangular slab
+//               silhouette where the 30 puffs overlapped into a white block.
+//            3. 0.85s lifetime persisted 5× longer than the flash, so the
+//               smoke kept lingering as a "bulky" cloud after the punch.
+//
+// Fix bundle (single atomic commit):
+//   - SmokeShader: ShaderMaterial with vUv-based radial falloff
+//     pow(1-r, 2.0). Each puff now has a soft round edge that blends into
+//     adjacent puffs instead of tiling into a rectangular silhouette.
+//   - SMOKE_COUNT 30 → 20 (fewer overlapping puffs).
+//   - SMOKE_LIFETIME_SECONDS 0.85 → 0.55 (no lingering slab).
+//   - SMOKE_BASE_SCALE 0.35 → 0.25, SMOKE_GROWTH_SCALE 1.4 → 0.45
+//     (final puff scale ≈ 0.7u, smaller than flash sphere = accent not
+//     dominant element).
+//   - uOpacity 0.4 → 0.55 (with radial falloff discarding outer 30%, the
+//     surviving core needs more opacity to read against the dark scene).
+//
+// White-out budget (Phase 7g-4 re-derivation):
+//   sparks 80 × 0.5 = 40 + flash 1 × 0.85 = 0.85 + smoke 20 × 0.55 × ~0.4
+//   (avg falloff over the disc) = 4.4 + shards 0 = 45.25 peak per-pixel.
+//   Under the 60-saturation threshold. Real per-pixel overlap at center
+//   pixel after smoke expansion ≈ 3 puffs × 0.55 × 0.7 (radial falloff)
+//   = 1.15 additive contribution. Safe.
+//
+// InstancedMesh + custom ShaderMaterial note: Three.js auto-defines
+// `instanceMatrix` attribute when the material binds to an InstancedMesh
+// and we declare it explicitly in the vertex shader. We do NOT use the
+// built-in shader chunks (#include <begin_vertex>) because we need to
+// pass vUv through to the fragment shader for the radial falloff.
+// ═══════════════════════════════════════════════════════════════════════════
+
 const SHARD_COUNT = 50;
 const SPARK_COUNT = 80;
-const SMOKE_COUNT = 30; // NEW LAYER (Phase 7g-3)
+const SMOKE_COUNT = 20; // Phase 7g-4: 30 → 20 (fewer puffs to avoid bulky blob)
 const FLASH_DURATION_SECONDS = 0.16; // 0.10 → 0.16
 const SHARD_LIFETIME_SECONDS = 0.60;
 const SPARK_LIFETIME_SECONDS = 0.45;
-const SMOKE_LIFETIME_SECONDS = 0.85; // NEW — smoke lingers past flash + sparks
+const SMOKE_LIFETIME_SECONDS = 0.55; // Phase 7g-4: 0.85 → 0.55 (no lingering slab)
 const FLASH_MESH_RADIUS = 0.70; // 0.40 → 0.70
 
 const SHARD_BASE_SPEED = 7.0; // mean outward velocity (u/s)
@@ -124,11 +164,15 @@ const SPARK_BASE_SPEED = 11.0;
 const SPARK_SPEED_VARIANCE = 6.0;
 const SPARK_DRAG = 0.85;
 
-const SMOKE_BASE_SPEED = 3.5; // NEW — slower than sparks (smoke drifts)
-const SMOKE_SPEED_VARIANCE = 1.5; // NEW
-const SMOKE_DRAG = 0.78; // NEW — heavier decay → puffs slow down
-const SMOKE_BASE_SCALE = 0.35; // NEW — start small
-const SMOKE_GROWTH_SCALE = 1.4; // NEW — grow by this much over lifetime
+const SMOKE_BASE_SPEED = 3.5; // slower than sparks (smoke drifts)
+const SMOKE_SPEED_VARIANCE = 1.5;
+const SMOKE_DRAG = 0.78; // heavier decay → puffs slow down
+// Phase 7g-4: scale curve shrunk. Old (0.35 base + 1.4 growth) hit ~1.75u
+// per puff at end-of-life = bigger than the flash sphere itself, reading as
+// a bulky white slab. New (0.25 base + 0.45 growth) caps at ~0.7u per puff —
+// smaller than the flash sphere, so smoke reads as an accent not a slab.
+const SMOKE_BASE_SCALE = 0.25;
+const SMOKE_GROWTH_SCALE = 0.45;
 
 const FLASH_MAX_SCALE = 2.2; // 1.4 → 2.2
 const FLASH_PEAK_OPACITY = 0.85; // 0.55 → 0.85
@@ -137,7 +181,7 @@ const FLASH_COLOR = 0xfff5cc; // warm white
 const DEFAULT_SHARD_COLOR = 0x555566; // 0x222222 → 0x555566 — lighter slate
 const DEFAULT_SPARK_COLOR_INNER = 0xfff2a8; // warm yellow
 const DEFAULT_SPARK_COLOR_OUTER = 0xffffff; // white core
-const DEFAULT_SMOKE_COLOR = 0xeeeeee; // NEW — off-white (not pure white)
+const DEFAULT_SMOKE_COLOR = 0xeeeeee; // off-white (not pure white) — used by ShaderMaterial uColor uniform
 
 /**
  * Profile for a single missile-explosion detonation. Per-missile-kind
@@ -384,6 +428,52 @@ const SPARK_FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7g-4 — Smoke puffs need a soft round silhouette. MeshBasicMaterial
+// draws a flat PlaneGeometry(1,1) rectangle with no edge falloff — 30 of
+// these additive-blended read as a bulky white slab (user: "way to big ,
+// bulky and ugly"). Custom ShaderMaterial draws a radial falloff via vUv
+// so each puff has a soft round edge, no texture asset needed.
+//
+// Why ShaderMaterial not Sprite/Points: Points uses gl_PointSize which is
+// screen-space pixels (can't grow in world units — needed for billowing).
+// Sprite adds per-puff mesh overhead. InstancedMesh + custom shader gives
+// one draw call + world-space scaling + zero new file asset.
+//
+// InstancedMesh note: Three.js auto-declares the `instanceMatrix` attribute
+// when material is bound to an InstancedMesh, so we multiply by it directly
+// in the vertex shader. The PlaneGeometry has uv coords 0..1 by default,
+// so vUv gives us the fragment-local coordinate we need for radial falloff.
+// ═══════════════════════════════════════════════════════════════════════════
+const SMOKE_VERTEX_SHADER = /* glsl */ `
+  // NOTE: do NOT declare 'attribute mat4 instanceMatrix' here — Three.js
+  // auto-injects it when the material is bound to an InstancedMesh (under
+  // #ifdef USE_INSTANCING). Declaring it ourselves causes a GLSL
+  // re-declaration error.
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    // modelViewMatrix × instanceMatrix × position (world-space instance)
+    vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const SMOKE_FRAGMENT_SHADER = /* glsl */ `
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  varying vec2 vUv;
+  void main() {
+    // Radial distance from center (0 at center, 1 at edge of plane).
+    float r = length(vUv - vec2(0.5)) * 2.0;
+    if (r > 1.0) discard;
+    // Soft round falloff — pow(1-r, 2.0) gives a cloud-like edge that
+    // blends into adjacent puffs without a hard silhouette line.
+    float falloff = pow(1.0 - r, 2.0);
+    gl_FragColor = vec4(uColor * falloff * uOpacity, falloff * uOpacity);
+  }
+`;
+
 export function createMissileExplosionFactory(parentScene: Object3D): ExplosionFactory {
   // --- SHARDS layer (InstancedMesh) ----------------------------------------
   const shardGeometry = new TetrahedronGeometry(1, 0); // unit, scaled per-instance
@@ -432,23 +522,33 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
   flashMesh.visible = false;
   flashMesh.frustumCulled = false;
 
-  // --- SMOKE layer (InstancedMesh of PlaneGeometry) — Phase 7g-3 ------------
+  // --- SMOKE layer (InstancedMesh of PlaneGeometry) — Phase 7g-4 ------------
+  // Phase 7g-3 used MeshBasicMaterial on flat PlaneGeometry rectangles —
+  // 30 of those additive-blended with no edge falloff read as a bulky
+  // white slab (user: "way to big, bulky and ugly"). Phase 7g-4 swaps
+  // MeshBasicMaterial → ShaderMaterial with a radial vUv falloff so
+  // each puff has a soft round edge that blends into adjacent puffs
+  // instead of tiling into a rectangular silhouette.
+  //
   // Why PlaneGeometry not Points: gl_PointSize is screen-space pixels —
   // can't grow in world units, which is what makes smoke billow from
-  // 0.35u to ~1.7u over its 0.85s life. PlaneGeometry instances scale
+  // 0.25u to ~0.7u over its 0.55s life. PlaneGeometry instances scale
   // naturally in world space via setMatrixAt per frame.
-  //
-  // Why no texture asset: per Karpathy Method — minimum code that solves
-  // the problem. The "puff silhouette" comes from the additive overlap
-  // of 30 planes at 0.4 opacity each, not from a masked sprite. If the
-  // visual is wrong, that's a Phase 7g-4 follow-up, not a guess now.
   const smokeGeometry = new PlaneGeometry(1, 1);
-  const smokeMaterial = new MeshBasicMaterial({
-    color: DEFAULT_SMOKE_COLOR,
+  const smokeMaterial = new ShaderMaterial({
+    uniforms: {
+      uColor: { value: new Vector3(0.93, 0.93, 0.93) }, // DEFAULT_SMOKE_COLOR 0xeeeeee
+      // Phase 7g-4 — per-puff opacity 0.4 → 0.55. With radial falloff
+      // discarding the outer 30% of each plane, we need more opacity in
+      // the surviving core to keep the visual contribution readable.
+      uOpacity: { value: 0.55 },
+    },
+    vertexShader: SMOKE_VERTEX_SHADER,
+    fragmentShader: SMOKE_FRAGMENT_SHADER,
     transparent: true,
     blending: AdditiveBlending,
     depthWrite: false,
-    opacity: 0.4,
+    depthTest: true,
   });
   const smokeMesh = new InstancedMesh(smokeGeometry, smokeMaterial, SMOKE_COUNT);
   smokeMesh.frustumCulled = false;
