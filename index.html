@@ -37,6 +37,57 @@
       transition: transform 100ms ease-out;
       transform-origin: 50% 50%;
     }
+
+    /* My Rules — Phase 7f Magnet Booster HUD pill
+       Purpose: 4th active-pickup HUD slot. Task 6 src/game.ts creates the DOM
+         in JS (same shape as BOMB/DRONES/MISSILES pills) and toggles
+         className between 'magnet-booster-pill empty|pending|active' per frame.
+       Setup: Container is 56x56 with inline border #ffcc44 + inline opacity:0.3.
+         Child divs (nameLabel="MAGNET", countLabel, bar, stateLabel) are bare
+         <div>s with no class names. Header ("MAGNET") is set by ACTIVE_KIND_SPECS.
+       Empty state: filter:brightness(0.55) + opacity:0.6 — dims the inline-styled
+         box without overriding the gold border.
+       Pending state: !important opacity:1 + static box-shadow gold glow.
+       Active state: !important opacity:1 + pulsing box-shadow (0.5s alternate).
+         Bar fills inline-style width (0%-100%) as the 6s window drains.
+       Reduced motion: @media disables the pulse animation.
+       Critical: do NOT add child class selectors (.pill-name etc.) — the
+         children have no class names in the real DOM. Style the container only. */
+    .magnet-booster-pill {
+      /* The container's inline styles already set border/bg/padding/font. */
+      /* We just add the state-specific overlays below. */
+      transition: opacity 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    /* Empty: dim the box. The inline opacity:0.3 dims text; we add a filter for the border. */
+    .magnet-booster-pill.empty {
+      filter: brightness(0.55);
+      opacity: 0.6;  /* layered on top of inline opacity:0.3 — fights inline via class specificity */
+    }
+
+    /* Pending: solid gold glow, no animation. */
+    .magnet-booster-pill.pending {
+      opacity: 1 !important;  /* override inline opacity:0.3 */
+      box-shadow: 0 0 10px rgba(255, 204, 68, 0.55);
+    }
+
+    /* Active: pulsing gold glow + full opacity. */
+    .magnet-booster-pill.active {
+      opacity: 1 !important;
+      box-shadow: 0 0 16px rgba(255, 204, 68, 0.8);
+      animation: magnet-booster-pulse 0.5s ease-in-out infinite alternate;
+    }
+
+    @keyframes magnet-booster-pulse {
+      from { box-shadow: 0 0 10px rgba(255, 204, 68, 0.6); }
+      to   { box-shadow: 0 0 20px rgba(255, 204, 68, 0.95); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .magnet-booster-pill.active {
+        animation: none;
+      }
+    }
   </style>
 </head>
 <body>

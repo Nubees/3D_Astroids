@@ -44,14 +44,14 @@ describe('Scrap', () => {
 
   it('is pulled toward the ship when inside magnet radius', () => {
     const scrap = createScrap({ x: 0, y: 2 });
-    magnetPull(scrap, { x: 0, y: 0 }, 0.016);
+    magnetPull(scrap, { x: 0, y: 0 }, 0.016, MAGNET_RADIUS);
     expect(scrap.velocity.y).toBeLessThan(0);
   });
 
   it('is not pulled when outside magnet radius', () => {
     const scrap = createScrap({ x: 0, y: 10 });
     const originalVy = scrap.velocity.y;
-    magnetPull(scrap, { x: 0, y: 0 }, 0.016);
+    magnetPull(scrap, { x: 0, y: 0 }, 0.016, MAGNET_RADIUS);
     expect(scrap.velocity.y).toBe(originalVy);
   });
 

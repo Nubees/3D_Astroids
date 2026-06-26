@@ -32,6 +32,7 @@ const zeroInput: InputState = {
   useActive1: false,
   useActive2: false,
   useActive3: false,
+  useMagnetBooster: false,
 };
 
 describe('ArenaMovementController', () => {
@@ -45,6 +46,7 @@ describe('ArenaMovementController', () => {
       useActive1: false,
       useActive2: false,
       useActive3: false,
+      useMagnetBooster: false,
     };
     const controller = new ArenaMovementController();
 
@@ -65,6 +67,7 @@ describe('ArenaMovementController', () => {
       useActive1: false,
       useActive2: false,
       useActive3: false,
+      useMagnetBooster: false,
     };
     const controller = new ArenaMovementController();
 
@@ -83,6 +86,7 @@ describe('ArenaMovementController', () => {
       useActive1: false,
       useActive2: false,
       useActive3: false,
+      useMagnetBooster: false,
     };
     const controller = new ArenaMovementController();
 

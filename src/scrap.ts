@@ -56,19 +56,38 @@ export function magnetPull(
   scrap: ScrapState,
   shipPosition: Vector2,
   deltaTime: number,
+  effectiveRadius: number,
 ): void {
   const dx = shipPosition.x - scrap.position.x;
   const dy = shipPosition.y - scrap.position.y;
   const distance = Math.hypot(dx, dy);
-  if (distance > MAGNET_RADIUS || distance <= 0.01) return;
+  if (distance > effectiveRadius || distance <= 0.01) return;
 
-  const pullStrength = (MAGNET_RADIUS - distance) / MAGNET_RADIUS;
+  const pullStrength = (effectiveRadius - distance) / effectiveRadius;
   const speed = 12.0 * pullStrength;
   scrap.velocity = {
     x: (dx / distance) * speed,
     y: (dy / distance) * speed,
   };
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Phase 7f magnetPull signature change
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Add a required `effectiveRadius: number` parameter so the Magnet
+//          Booster pickup can widen the pull radius. Task 3 unblocks
+//          threading the boosted value from src/game.ts.
+// Setup:   Game passes `MAGNET_RADIUS` (this file's exported baseline) for
+//          now — Task 6 replaces those with `this.effectiveMagnetRadius`.
+// Issues:  Pre-Task 3, magnetPull hard-coded `MAGNET_RADIUS` in the gate
+//          check and the falloff formula, so the booster had nowhere to
+//          plug its boosted value.
+// Fix:     Replace `MAGNET_RADIUS` references inside the function body with
+//          `effectiveRadius`. The constant stays exported for Game imports
+//          and for tests that pin the baseline value (2.5).
+// Gotchas: Required param — no default value. TypeScript will reject any
+//          call site that forgets the new arg, which is the design intent.
+// ═══════════════════════════════════════════════════════════════════════════
 
 export function isScrapCollected(scrap: ScrapState, shipPosition: Vector2): boolean {
   const distance = Math.hypot(

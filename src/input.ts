@@ -11,6 +11,10 @@ import { Vector2 } from './types';
 //          Mouse aim is stored as a screen-space point; Game converts it to world
 //          space. Shield is now passive; C / RMB are reserved for a future EMP
 //          pulse ability and are intentionally not mapped yet.
+//
+// Phase 7f: Added useMagnetBooster: boolean bound to Digit4 for the Magnet
+// Booster pickup active ability. Uses event.code === 'Digit4' so it works on
+// AZERTY / QWERTZ / Dvorak. Lives on the 4th active slot (counting from 1).
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MOVEMENT_KEYS = new Set([
@@ -26,6 +30,7 @@ export interface InputState {
   readonly useActive1: boolean;   // bound to '1' (Digit1)
   readonly useActive2: boolean;   // bound to '2' (Digit2)
   readonly useActive3: boolean;   // bound to '3' (Digit3)
+  readonly useMagnetBooster: boolean;  // bound to '4' (Digit4, Phase 7f)
 }
 
 export class InputManager {
@@ -51,14 +56,20 @@ export class InputManager {
         key === 'x' ||
         event.code === 'Digit1' ||
         event.code === 'Digit2' ||
-        event.code === 'Digit3'
+        event.code === 'Digit3' ||
+        event.code === 'Digit4'
       ) {
         event.preventDefault();
       }
       this.keys.add(key);
       // Also track the raw code for digit-row keys (KeyboardEvent.key is
       // locale-dependent, event.code is layout-independent).
-      if (event.code === 'Digit1' || event.code === 'Digit2' || event.code === 'Digit3') {
+      if (
+        event.code === 'Digit1' ||
+        event.code === 'Digit2' ||
+        event.code === 'Digit3' ||
+        event.code === 'Digit4'
+      ) {
         this.keys.add(event.code);
       }
       this.anyKeyHit = true;
@@ -67,7 +78,12 @@ export class InputManager {
     this.onKeyUp = (event: KeyboardEvent): void => {
       const key = event.key.toLowerCase();
       this.keys.delete(key);
-      if (event.code === 'Digit1' || event.code === 'Digit2' || event.code === 'Digit3') {
+      if (
+        event.code === 'Digit1' ||
+        event.code === 'Digit2' ||
+        event.code === 'Digit3' ||
+        event.code === 'Digit4'
+      ) {
         this.keys.delete(event.code);
       }
     };
@@ -132,6 +148,7 @@ export class InputManager {
       useActive1: this.keys.has('Digit1'),
       useActive2: this.keys.has('Digit2'),
       useActive3: this.keys.has('Digit3'),
+      useMagnetBooster: this.keys.has('Digit4'),
     };
   }
 

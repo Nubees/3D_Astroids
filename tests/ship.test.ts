@@ -23,6 +23,7 @@ function createInput(overrides: Partial<InputState> = {}): InputState {
     useActive1: false,
     useActive2: false,
     useActive3: false,
+    useMagnetBooster: false,
     ...overrides,
   };
 }
@@ -109,6 +110,7 @@ describe('Ship — fireRateMultiplier (Phase 7 pickup)', () => {
       useActive1: false,
       useActive2: false,
       useActive3: false,
+      useMagnetBooster: false,
     };
     ship.update(input, 0.1, 3);
     expect(ship.fireCooldown).toBeCloseTo(0.6, 5);
@@ -125,6 +127,7 @@ describe('Ship — fireRateMultiplier (Phase 7 pickup)', () => {
       useActive1: false,
       useActive2: false,
       useActive3: false,
+      useMagnetBooster: false,
     };
     ship.update(input, 0.1);
     expect(ship.fireCooldown).toBeCloseTo(0.8, 5);

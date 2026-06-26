@@ -2,6 +2,7 @@ import {
   AdditiveBlending,
   BufferGeometry,
   CanvasTexture,
+  CapsuleGeometry,
   ConeGeometry,
   DodecahedronGeometry,
   DoubleSide,
@@ -17,6 +18,7 @@ import {
   TetrahedronGeometry,
 } from 'three';
 import { AsteroidKind, AsteroidSize, AsteroidState, Vector2 } from './types';
+import { MAGNET_RADIUS } from './scrap';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Pickup System (Phase 7)
@@ -41,6 +43,7 @@ export enum PickupKind {
   BOMB_STRIKE = 'bombStrike',       // active — slot 1 — orange  0xffaa00
   ORBIT_DRONES = 'orbitDrones',     // active — slot 2 — cyan    0x66ddff
   HOMING_MISSILES = 'homingMissiles', // active — slot 3 — magenta 0xff66ff
+  MAGNET_BOOSTER = 'magnetBooster',  // active — slot 4 — gold    0xffcc44 (Phase 7f)
 }
 
 // Phase 7b — per-kind geometry table. Allocated once at module load, reused
@@ -52,6 +55,7 @@ const PICKUP_GEOMETRY_BY_KIND: Record<PickupKind, BufferGeometry> = {
   [PickupKind.BOMB_STRIKE]: new DodecahedronGeometry(0.20, 0),
   [PickupKind.ORBIT_DRONES]: new IcosahedronGeometry(0.14, 0),
   [PickupKind.HOMING_MISSILES]: new ConeGeometry(0.14, 0.30, 6),
+  [PickupKind.MAGNET_BOOSTER]: new CapsuleGeometry(0.12, 0.32, 4, 8),
 };
 
 // Phase 7b — per-kind spin axis. Each kind has a distinct rotation axis
@@ -63,6 +67,7 @@ export const PICKUP_SPIN_AXIS: Record<PickupKind, 'x' | 'y' | 'z'> = {
   [PickupKind.BOMB_STRIKE]: 'y',
   [PickupKind.ORBIT_DRONES]: 'x',
   [PickupKind.HOMING_MISSILES]: 'z',
+  [PickupKind.MAGNET_BOOSTER]: 'y',
 };
 
 export const PICKUP_BOB_AMPLITUDE = 0.12;
@@ -105,6 +110,7 @@ export const PICKUP_DURATION_SECONDS: Record<PickupKind, number> = {
   [PickupKind.BOMB_STRIKE]: 0,
   [PickupKind.ORBIT_DRONES]: 0,
   [PickupKind.HOMING_MISSILES]: 0,
+  [PickupKind.MAGNET_BOOSTER]: 0,
 };
 
 export const PICKUP_LIFETIME = 10.0;
@@ -119,6 +125,7 @@ export const PICKUP_COLOR: Record<PickupKind, number> = {
   [PickupKind.BOMB_STRIKE]: 0xffaa00,
   [PickupKind.ORBIT_DRONES]: 0x66ddff,
   [PickupKind.HOMING_MISSILES]: 0xff66ff,
+  [PickupKind.MAGNET_BOOSTER]: 0xffcc44,
 };
 
 export interface PickupState {
@@ -129,7 +136,6 @@ export interface PickupState {
   spin: number;
 }
 
-const MAGNET_RADIUS = 2.5;
 const MAGNET_PULL_SPEED = 12.0;
 
 export function createPickupState(kind: PickupKind, position: Vector2): PickupState {
@@ -152,13 +158,14 @@ export function updatePickup(
   pickup: PickupState,
   shipPosition: Vector2,
   deltaTime: number,
+  effectiveRadius: number,
 ): void {
   const dx = shipPosition.x - pickup.position.x;
   const dy = shipPosition.y - pickup.position.y;
   const distance = Math.hypot(dx, dy);
-  if (distance <= MAGNET_RADIUS && distance > 0.01) {
+  if (distance <= effectiveRadius && distance > 0.01) {
     // Override velocity with magnet pull toward the ship.
-    const pullStrength = (MAGNET_RADIUS - distance) / MAGNET_RADIUS;
+    const pullStrength = (effectiveRadius - distance) / effectiveRadius;
     const speed = MAGNET_PULL_SPEED * pullStrength;
     pickup.velocity = {
       x: (dx / distance) * speed,
@@ -172,6 +179,28 @@ export function updatePickup(
   pickup.age += deltaTime;
   pickup.spin += deltaTime * 1.5;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Phase 7f updatePickup signature change
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Add a required `effectiveRadius: number` parameter so the Magnet
+//          Booster pickup can widen the pull radius for dropped pickups.
+//          Mirrors src/scrap.ts:magnetPull signature change.
+// Setup:   The local `MAGNET_RADIUS = 2.5` constant was a duplicate of the
+//          canonical export in src/scrap.ts — this task removes it and
+//          imports the canonical one (kept as `MAGNET_RADIUS` so the test
+//          baseline and Game geometry calls compile unchanged). Game.ts
+//          currently passes `MAGNET_RADIUS` as a temporary placeholder —
+//          Task 6 replaces those with `this.effectiveMagnetRadius`.
+// Issues:  Pre-Task 3, updatePickup hard-coded the local `MAGNET_RADIUS`
+//          in the gate check and falloff formula, so the booster had no
+//          way to widen the pickup-pull radius.
+// Fix:     Remove the duplicate constant, import from './scrap', add the
+//          `effectiveRadius` parameter, and swap references in the body.
+// Gotchas: `MAGNET_PULL_SPEED` is a SEPARATE constant and stays local.
+//          Required param — no default value. TypeScript will reject any
+//          call site that forgets the new arg.
+// ═══════════════════════════════════════════════════════════════════════════
 
 export function isPickupExpired(pickup: PickupState): boolean {
   return pickup.age >= PICKUP_LIFETIME;
@@ -506,6 +535,20 @@ export const ACTIVE_KIND_SPECS: Record<PickupKind, ActiveKindSpec> = {
     isDeployable: false,
     durationSeconds: 0,
   },
+  // Phase 7f — Magnet Booster spec is a no-op placeholder; the real state
+  // machine lives in src/magnet-booster.ts (pendingTier / activeTier /
+  // activeUntil). chargeCap=0 + isDeployable=false keeps the existing
+  // ammo-dispatch path inert; Task 6 routes collect/activate through the
+  // dedicated magnet-booster module and useActiveItem dispatches on the
+  // 'MAGNET' displayName.
+  [PickupKind.MAGNET_BOOSTER]: {
+    chargeCap: 0,
+    cooldownSeconds: 0,
+    displayName: 'MAGNET',
+    color: 0xffcc44,
+    isDeployable: false,
+    durationSeconds: 0,
+  },
 };
 
 export function createEmptyActiveAmmo(): ActiveAmmoMap {
@@ -669,3 +712,40 @@ export function disposePickupMesh(group: Group): void {
   });
   while (group.children.length > 0) group.remove(group.children[0]);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Phase 7f PickupKind.MAGNET_BOOSTER additions
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Phase 7f Task 4 — add the 4th active pickup kind (MAGNET_BOOSTER)
+//          to the enum + per-kind geometry table + per-kind color table. No
+//          state-machine code in this file (that lives in magnet-booster.ts);
+//          pickups.ts only owns the visual identity + the kind value that
+//          ALL_KINDS / maybeDropPickup / applyActivePickupEffect pick up
+//          automatically once added to the enum.
+// Setup:   Three.js CapsuleGeometry is added to the import block (was not
+//          imported before — Three.js r0.184.0 ships it natively, no vendoring
+//          needed). All three tables (PickupKind enum, PICKUP_GEOMETRY_BY_KIND,
+//          PICKUP_COLOR) grow by one entry each, and the existing drop rolls
+//          in maybeDropPickup already cover MAGNET_BOOSTER via the uniform-
+//          random ALL_KINDS indexer. Task 6 wires applyPickupEffect →
+//          collectMagnetBooster so a collected MAGNET_BOOSTER bumps the
+//          pending tier.
+// Issues:  Pre-Task 4, only 6 kinds existed in the enum (3 passive + 3 active);
+//          the Phase 7 HUD active-slot row only renders 3 pills because
+//          ACTIVE_KIND_SPECS is keyed on PickupKind with only 6 entries. Task 6
+//          extends the HUD reconcile to a 4th pill, and Task 7 adds the CSS.
+// Fix:     Three additive entries + a CapsuleGeometry import. No code path
+//          branches change. The drop roll Math.floor(Math.random()*ALL_KINDS.length)
+//          automatically becomes 1-of-7 now that ALL_KINDS gains the 7th entry
+//          when the enum grows — preserved by Object.values(PickupKind) iteration
+//          in createEmptyActiveAmmo so the ammo map covers MAGNET_BOOSTER too.
+// Gotchas: CapsuleGeometry signature is (radius, length, capSegments, radialSegments).
+//          radius=0.12, length=0.32, capSegments=4, radialSegments=8 yields a
+//          compact pill ~0.56u tall × 0.24u wide that matches the silhouette
+//          used in the plan's reference render. The visual is a vertical capsule
+//          (Three.js default orientation along Y) — the per-kind spin axis for
+//          MAGNET_BOOSTER is still TBD; Task 6's HUD pill may add a Y-spin
+//          animation. Color 0xffcc44 (gold) matches the preview ring + active
+//          ring in src/magnet-booster-vfx.ts so the player sees a consistent
+//          visual identity across collectable + activation feedback.
+// ═══════════════════════════════════════════════════════════════════════════

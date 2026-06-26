@@ -16,11 +16,12 @@ import {
   maybeDropPickup,
   updatePickup,
 } from '../src/pickups';
+import { MAGNET_RADIUS } from '../src/scrap';
 import { createAsteroidState } from '../src/asteroid';
 import { AsteroidSize, AsteroidKind } from '../src/types';
 
 describe('PickupKind — Phase 7 enum', () => {
-  it('has exactly 6 kinds in stable order', () => {
+  it('has exactly 7 kinds in stable order', () => {
     const kinds = Object.values(PickupKind);
     expect(kinds).toEqual([
       'fireRate',       // passive — slot 0
@@ -29,6 +30,7 @@ describe('PickupKind — Phase 7 enum', () => {
       'bombStrike',     // active — slot 1 key
       'orbitDrones',    // active — slot 2 key
       'homingMissiles', // active — slot 3 key
+      'magnetBooster',  // active — slot 4 key (Phase 7f)
     ]);
   });
 
@@ -69,7 +71,7 @@ describe('PickupState — passive lifecycle', () => {
 
   it('updatePickup increments age by deltaTime', () => {
     const p = createPickupState(PickupKind.SHIELD, { x: 0, y: 0 });
-    updatePickup(p, { x: 100, y: 100 }, 0.5);
+    updatePickup(p, { x: 100, y: 100 }, 0.5, MAGNET_RADIUS);
     expect(p.age).toBeCloseTo(0.5, 5);
   });
 
@@ -77,7 +79,7 @@ describe('PickupState — passive lifecycle', () => {
     const p = createPickupState(PickupKind.SPREAD, { x: 0, y: 0 });
     // Ship within 2.5 (MAGNET_RADIUS). Update with large dt so velocity
     // change is observable.
-    updatePickup(p, { x: 1, y: 1 }, 0.1);
+    updatePickup(p, { x: 1, y: 1 }, 0.1, MAGNET_RADIUS);
     // Velocity should now point toward ship (positive x and y).
     expect(p.velocity.x).toBeGreaterThan(0);
     expect(p.velocity.y).toBeGreaterThan(0);
@@ -86,7 +88,7 @@ describe('PickupState — passive lifecycle', () => {
   it('updatePickup does NOT magnetize when ship is outside MAGNET_RADIUS', () => {
     const p = createPickupState(PickupKind.SPREAD, { x: 0, y: 0 });
     const v0 = { ...p.velocity };
-    updatePickup(p, { x: 100, y: 100 }, 0.1);
+    updatePickup(p, { x: 100, y: 100 }, 0.1, MAGNET_RADIUS);
     expect(p.velocity.x).toBeCloseTo(v0.x, 5);
     expect(p.velocity.y).toBeCloseTo(v0.y, 5);
   });

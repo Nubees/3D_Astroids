@@ -203,6 +203,26 @@ import {
   tickShieldFlare,
   triggerShieldFlare,
 } from './shield-visuals';
+// Phase 7f — Magnet Booster. Renamed the imported effectiveMagnetRadius to
+// effectiveMagnetRadiusFromState because the Game class adds its own getter
+// with the same name; importing both as `effectiveMagnetRadius` triggers a
+// TypeScript duplicate-identifier error.
+import {
+  MAGNET_BOOSTER_DURATION_SECONDS,
+  MagnetBoosterState,
+  activateMagnetBooster,
+  activeRemainingSeconds,
+  collectMagnetBooster,
+  createMagnetBooster,
+  effectiveMagnetRadius as effectiveMagnetRadiusFromState,
+  tickMagnetBooster,
+} from './magnet-booster';
+import {
+  createActiveRing,
+  createPreviewRing,
+  updateActiveRing,
+  updatePreviewRing,
+} from './magnet-booster-vfx';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -226,6 +246,21 @@ import {
 //          the shield is depleted the ship explodes into particles, the screen is
 //          cleared of threats, and the player must press a key and wait through a
 //          3-second countdown before respawning.
+//
+//          Phase 7f adds the Magnet Booster — a 4th active pickup with a dedicated
+//          state machine in src/magnet-booster.ts (pendingTier / activeTier /
+//          activeUntil). The Game owns a magnetBooster state field, a preview
+//          ring (shows queued tier near the ship) and an active ring (pulses
+//          during the 6s activation window); both rings are children of shipMesh
+//          so they inherit position + rotation. The effectiveMagnetRadius getter
+//          wraps the state-machine function so every per-frame call site
+//          (updateScrap, updatePickups, updateMagnetRing) reads the current
+//          radius through one accessor. Active input dispatches Digit4 directly
+//          to activateMagnetBooster (chargeCap=0 so the ammo/charge path is
+//          inert). HUD 4th slot reconciles 3 visual states (empty / pending /
+//          active) from pendingTier + activeTier — Task 7 supplies the .empty /
+//          .pending / .active CSS classes; this task sets className + countLabel
+//          text + bar fill so the DOM state is correct.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -339,6 +374,14 @@ export class Game {
   private readonly shieldMesh: Mesh;
   private readonly magnetRing: Mesh;
   private readonly breatherMesh: Mesh;
+  // Phase 7f — Magnet Booster state + rings. Preview ring shows the queued
+  // tier (pendingTier>0); active ring pulses during the 6s activation
+  // window (activeTier>0). Both rings are children of shipMesh so they
+  // inherit ship position + rotation; both default to visible=false so they
+  // never appear on a fresh game start.
+  private magnetBooster: MagnetBoosterState = createMagnetBooster();
+  private readonly magnetPreviewRing: Mesh = createPreviewRing();
+  private readonly magnetActiveRing: Mesh = createActiveRing();
   private readonly shield: ShieldState;
   private readonly wave: WaveState;
   private readonly breather: BreatherZoneState;
@@ -473,6 +516,15 @@ export class Game {
 
     this.magnetRing = createMagnetRing();
     this.shipMesh.add(this.magnetRing);
+
+    // Phase 7f — attach preview + active rings to the ship group so they
+    // inherit the ship's position + rotation. Both default to visible=false
+    // at construction (see createPreviewRing / createActiveRing in
+    // magnet-booster-vfx.ts), so a fresh game start shows no extra rings.
+    this.shipMesh.add(this.magnetPreviewRing);
+    this.shipMesh.add(this.magnetActiveRing);
+    this.magnetPreviewRing.visible = false;
+    this.magnetActiveRing.visible = false;
 
     this.breather = createBreatherZoneState();
     this.breatherMesh = createBreatherMesh();
@@ -648,6 +700,15 @@ export class Game {
     this.freezeFramesRemaining = 0;
     disposeShockwaveParticles();
     disposeMissileVfx();
+    // Phase 7f — Magnet Booster cleanup. Reset the state machine so a
+    // stop() → start() cycle starts clean (no stale pendingTier or active
+    // window), and hide both rings so they don't carry over to the next
+    // game instance. The 4th active HUD icon's DOM is removed by the
+    // activeHudElement branch above (activeHudIcons.clear() drops the
+    // cached refs along with the 3 ammo icons).
+    this.magnetBooster = createMagnetBooster();
+    this.magnetPreviewRing.visible = false;
+    this.magnetActiveRing.visible = false;
   }
 
   private loop = (time: number): void => {
@@ -707,6 +768,7 @@ export class Game {
       useActive1: rawInput.useActive1,
       useActive2: rawInput.useActive2,
       useActive3: rawInput.useActive3,
+      useMagnetBooster: rawInput.useMagnetBooster,
     };
 
     // Respawn flow: ship is dead/exploding; skip gameplay until it revives.
@@ -756,6 +818,14 @@ export class Game {
     if (input.useActive1) this.useActiveItem(PickupKind.BOMB_STRIKE);
     if (input.useActive2) this.useActiveItem(PickupKind.ORBIT_DRONES);
     if (input.useActive3) this.useActiveItem(PickupKind.HOMING_MISSILES);
+    // Phase 7f — Magnet Booster dispatch (Digit4). Routes directly to
+    // activateMagnetBooster rather than useActiveItem because the magnet
+    // booster uses a dedicated state machine (pendingTier / activeTier) and
+    // has chargeCap=0 + isDeployable=false in ACTIVE_KIND_SPECS, so the
+    // ammo/charge path would gate it permanently. activateMagnetBooster is
+    // itself idempotent (returns false if already active or pendingTier=0),
+    // so spam-Digit4 is safe.
+    if (input.useMagnetBooster) activateMagnetBooster(this.magnetBooster, this.gameTimeSeconds);
     this.updateShards(deltaTime);
     this.updateAsteroids(deltaTime);
     this.handleAsteroidCollisions();
@@ -887,7 +957,7 @@ export class Game {
     const pullCount = this.scrap.reduce((count, piece) => {
       const dx = piece.state.position.x - shipPosition.x;
       const dy = piece.state.position.y - shipPosition.y;
-      return Math.hypot(dx, dy) <= MAGNET_RADIUS ? count + 1 : count;
+      return Math.hypot(dx, dy) <= this.effectiveMagnetRadius ? count + 1 : count;
     }, 0);
 
     const material = this.magnetRing.material as MeshBasicMaterial;
@@ -899,6 +969,15 @@ export class Game {
       // Faint baseline ring so the player always knows the magnet radius.
       material.opacity = 0.025;
     }
+  }
+
+  // Phase 7f — wraps the state-machine function so every per-frame call site
+  // (updateScrap, updatePickups, updateMagnetRing) reads the current radius
+  // through one getter. activeTier overrides pendingTier in the underlying
+  // effectiveMagnetMultiplier, so the player always sees the strongest
+  // current radius even mid-activation.
+  get effectiveMagnetRadius(): number {
+    return effectiveMagnetRadiusFromState(this.magnetBooster, MAGNET_RADIUS);
   }
 
   private updateBreatherMesh(): void {
@@ -1115,7 +1194,7 @@ export class Game {
     const alive: LiveScrap[] = [];
     for (const piece of this.scrap) {
       updateScrap(piece.state, deltaTime);
-      magnetPull(piece.state, this.ship.state.position, deltaTime);
+      magnetPull(piece.state, this.ship.state.position, deltaTime, this.effectiveMagnetRadius);
       piece.mesh.position.set(piece.state.position.x, piece.state.position.y, 0);
 
       if (isScrapCollected(piece.state, this.ship.state.position)) {
@@ -1153,7 +1232,7 @@ export class Game {
   private updatePickups(deltaTime: number): void {
     const alive: LivePickup[] = [];
     for (const pickup of this.pickups) {
-      updatePickup(pickup.state, this.ship.state.position, deltaTime);
+      updatePickup(pickup.state, this.ship.state.position, deltaTime, this.effectiveMagnetRadius);
       // Per-kind axis rotation (Phase 7b).
       const axis = PICKUP_SPIN_AXIS[pickup.state.kind];
       pickup.mesh.rotation[axis] = pickup.state.spin;
@@ -1222,7 +1301,18 @@ export class Game {
   }
 
   private applyPickupToShip(kind: PickupKind): void {
-    if (
+    // Phase 7f — Magnet Booster uses a dedicated state machine in
+    // src/magnet-booster.ts instead of the ammo/charge map. Branch out
+    // BEFORE the existing active/passive split so collectMagnetBooster runs
+    // (and only runs) for MAGNET_BOOSTER. The "isActive" check is true while
+    // activeUntil > gameTime (collect-while-active bumps pendingTier but
+    // never resets activeUntil — see magnet-booster.ts).
+    if (kind === PickupKind.MAGNET_BOOSTER) {
+      collectMagnetBooster(
+        this.magnetBooster,
+        this.magnetBooster.activeUntil > this.gameTimeSeconds,
+      );
+    } else if (
       kind === PickupKind.BOMB_STRIKE ||
       kind === PickupKind.ORBIT_DRONES ||
       kind === PickupKind.HOMING_MISSILES
@@ -1527,6 +1617,21 @@ export class Game {
       if (ACTIVE_KIND_SPECS[k].isDeployable && this.activeDeployments.length > 0) continue;
       tickActiveAmmo(this.activeAmmo[k], deltaTime);
     }
+    // Phase 7f — Magnet Booster per-frame tick + ring updates. The tick
+    // expires the 6s window and returns true on the expiry frame (a signal
+    // available for future HUD transition animations). updatePreviewRing
+    // hides the preview ring when pendingTier=0 (so it disappears during
+    // the active window, since pendingTier was consumed at activation);
+    // updateActiveRing hides the active ring when activeTier=0 or the
+    // window just expired.
+    tickMagnetBooster(this.magnetBooster, this.gameTimeSeconds);
+    updatePreviewRing(this.magnetPreviewRing, this.magnetBooster.pendingTier);
+    updateActiveRing(
+      this.magnetActiveRing,
+      this.magnetBooster.activeTier,
+      activeRemainingSeconds(this.magnetBooster, this.gameTimeSeconds),
+      deltaTime,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2930,7 +3035,13 @@ export class Game {
     this.activeHudElement.style.pointerEvents = 'none';
     document.body.appendChild(this.activeHudElement);
 
-    for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES]) {
+    // Phase 7f — Magnet Booster icon (4th slot). Uses the same DOM shape
+    // as the 3 ammo icons (header + box + countLabel + bar + stateLabel)
+    // but its reconcile logic differs — it reads pendingTier / activeTier
+    // from the dedicated magnet-booster state machine (not ammo.charges).
+    // The icon is always visible (Task 7's "4" label in the empty state
+    // teaches the player the input key).
+    for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES, PickupKind.MAGNET_BOOSTER]) {
       const spec = ACTIVE_KIND_SPECS[kind];
       // ═════════════════════════════════════════════════════════════════════
       // My Rules — Active HUD Icon Row (Phase 7b addon names)
@@ -3186,10 +3297,48 @@ export class Game {
       entry.bar.style.width = `${(effect.remaining / effect.total) * 100}%`;
     }
 
-    // Reconcile active icon row to activeAmmo.
-    for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES]) {
+    // Reconcile active icon row to activeAmmo + magnet booster state.
+    // Phase 7f — extends the 3-slot row to 4 slots. MAGNET_BOOSTER is the
+    // 4th slot and uses a separate branch: its reconcile reads from
+    // this.magnetBooster (pendingTier / activeTier) instead of activeAmmo.
+    // The shape of the DOM (header + box + countLabel + bar + stateLabel)
+    // matches the other 3 so the existing CSS selectors apply unchanged.
+    for (const kind of [PickupKind.BOMB_STRIKE, PickupKind.ORBIT_DRONES, PickupKind.HOMING_MISSILES, PickupKind.MAGNET_BOOSTER]) {
       const icon = this.activeHudIcons.get(kind);
       if (!icon) continue;
+      // Phase 7f — Magnet Booster reconcile is special: it uses 3 visual
+      // states (empty / pending / active) mapped from pendingTier and
+      // activeTier. Task 7 will style the .empty / .pending / .active CSS
+      // classes on the container; for now we just set the className +
+      // countLabel text + bar fill so the DOM state is correct.
+      if (kind === PickupKind.MAGNET_BOOSTER) {
+        const mb = this.magnetBooster;
+        const remaining = activeRemainingSeconds(mb, this.gameTimeSeconds);
+        if (mb.activeTier > 0) {
+          // ACTIVE: pulsing gold border (via .active CSS class), count
+          // shows the active tier multiplier, bar fills as the 6s window
+          // drains.
+          icon.container.className = 'magnet-booster-pill active';
+          icon.countLabel.textContent = `${mb.activeTier + 1}x`;
+          icon.stateLabel.textContent = `${remaining.toFixed(1)}s`;
+          icon.bar.style.width = `${(remaining / MAGNET_BOOSTER_DURATION_SECONDS) * 100}%`;
+        } else if (mb.pendingTier > 0) {
+          // PENDING: solid gold border, count shows the queued multiplier,
+          // bar is empty (no time-based drain while pending).
+          icon.container.className = 'magnet-booster-pill pending';
+          icon.countLabel.textContent = `${mb.pendingTier + 1}x`;
+          icon.stateLabel.textContent = 'READY';
+          icon.bar.style.width = '0%';
+        } else {
+          // EMPTY: dim border, no count text, "4" label (always visible
+          // so the player learns the Digit4 binding).
+          icon.container.className = 'magnet-booster-pill empty';
+          icon.countLabel.textContent = '4';
+          icon.stateLabel.textContent = '';
+          icon.bar.style.width = '0%';
+        }
+        continue;
+      }
       const ammo = this.activeAmmo[kind];
       const spec = ACTIVE_KIND_SPECS[kind];
       icon.countLabel.textContent = `${ammo.charges}`;
