@@ -3,6 +3,8 @@ import {
   findNearestAsteroid,
   findFarthestAsteroid,
   HomingMissileState,
+  knockbackAsteroid,
+  missileIgnoresAsteroid,
   tickHomingMissiles,
 } from '../src/active-deployments';
 import { Group, Mesh, Object3D } from 'three';
@@ -10,6 +12,7 @@ import { createAsteroidState } from '../src/asteroid';
 import { AsteroidKind, AsteroidSize, AsteroidState, Vector2 } from '../src/types';
 import {
   HOMING_MISSILES_NEAR_TIER_COUNT,
+  HOMING_MISSILES_TINY_KNOCKBACK_SPEED,
   HOMING_MISSILES_TRACKING_RADIUS,
   HOMING_MISSILES_VOLLEY_COUNT,
 } from '../src/pickups';
@@ -216,5 +219,269 @@ describe('Missile target stickiness — Phase 7d-3', () => {
     // `nearer` enters the list — the lock must hold.
     tickHomingMissiles([m], [near, far, nearer], 1 / 60, scene, () => undefined);
     expect(m.target).toBe(far);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7 fix — missile "goes behind the asteroid" bug.
+// Reproduces the symptom: a missile that hits an asteroid calls
+// onMissileImpact (which destroys the asteroid in game state) but the
+// asteroids array passed to tickHomingMissiles still contains the dead
+// target. Subsequent missiles in the same volley that were tracking the
+// same target keep steering toward its frozen position — visually they
+// curve into the spot where the explosion happened, then "fly past
+// nothing" and time out at the 10s tracking duration.
+//
+// The fix lives at the game.ts wrapper around tickHomingMissiles: the
+// callback now captures which asteroid states were destroyed this tick
+// and the wrapper filters `this.asteroids` immediately after. This test
+// reproduces the same wrapper pattern (capture-then-filter) so we can
+// assert the fix's behavior at the unit level.
+//
+// Test setup note: Missile A is placed at x=1.7 so it's ALREADY inside
+// the 0.95u impact radius on frame 1 — A's first tick fires the impact
+// before B has had any chance to close the 2u gap. Earlier drafts put
+// A at (0.7, 0) and B at (0.1, 0) so both flew right at the same speed;
+// both hit shared on the same frame, the test asserted mB was still
+// alive but mB had already been disposed, and the failure looked like
+// "re-pick didn't happen." Making A's hit instantaneous isolates the
+// invalidation→re-pick behavior we actually want to test.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Missile target invalidation — Phase 7 fix', () => {
+  it('a second missile tracking the same target re-picks after the target is destroyed mid-flight', () => {
+    // Both missiles target the same asteroid. Missile A is closer so it
+    // hits first. The test simulates game.ts's wrapper: it captures
+    // destroyed asteroids in a Set and filters them out of the asteroids
+    // list after each tick — exactly the pattern game.ts now uses.
+    const shared = makeAsteroid(2, 0);
+    const bystander = makeAsteroid(8, 0);
+
+    const scene = makeScene();
+    // A is placed ALREADY inside the impact radius (distance 0.3u < 0.95u)
+    // so its very first tick fires the impact — B is still mid-flight
+    // 2u away from `shared` and cannot hit for ~14 more frames at 7u/s.
+    const mA = makeMissile(0, { x: 1.7, y: 0 }); // 0.3u from shared → instant impact
+    const mB = makeMissile(1, { x: 0, y: 0 }); // 2u from shared → still in flight
+
+    let destroyedTarget: AsteroidState | null = null;
+    // Wrapper that mirrors game.ts:1703 + the new pruning step.
+    const tickWrapper = (
+      missiles: HomingMissileState[],
+      asteroids: AsteroidState[],
+    ) => {
+      const destroyedThisTick = new Set<AsteroidState>();
+      const alive = tickHomingMissiles(
+        missiles,
+        asteroids,
+        1 / 60,
+        scene,
+        (a) => {
+          destroyedThisTick.add(a);
+          destroyedTarget = a;
+        },
+      );
+      const remainingAsteroids = asteroids.filter((a) => !destroyedThisTick.has(a));
+      return { missiles: alive, asteroids: remainingAsteroids };
+    };
+
+    // Tick both missiles. They both lock `shared` on frame 1, and A's
+    // impact fires immediately because it's already inside the radius.
+    let asteroids = [shared, bystander];
+    let { missiles, asteroids: nextAsteroids } = tickWrapper([mA, mB], asteroids);
+    asteroids = nextAsteroids;
+    expect(mA.target).toBe(shared);
+    expect(mB.target).toBe(shared);
+    expect(destroyedTarget).toBe(shared); // A destroyed shared on the very first tick.
+
+    // One more tick with `shared` already removed — B's lock check
+    // sees `asteroids.includes(mB.target) === false` and re-picks
+    // the only remaining target (`bystander`).
+    const post = tickWrapper(missiles, asteroids);
+    expect(mB.target).toBe(bystander);
+    expect(post.missiles).toContain(mB);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7f-2 — Missiles ignore TINY asteroids (targeting skips them,
+// impact knocks them aside instead of destroying).
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Phase 7f-2 — Missile ignores TINY asteroids', () => {
+  it('missileIgnoresAsteroid returns true only for TINY', () => {
+    const tiny = makeAsteroid(0, 0);
+    tiny.size = AsteroidSize.TINY;
+    const small = makeAsteroid(0, 0);
+    small.size = AsteroidSize.SMALL;
+    const medium = makeAsteroid(0, 0);
+    medium.size = AsteroidSize.MEDIUM;
+    const large = makeAsteroid(0, 0);
+    large.size = AsteroidSize.LARGE;
+    expect(missileIgnoresAsteroid(tiny)).toBe(true);
+    expect(missileIgnoresAsteroid(small)).toBe(false);
+    expect(missileIgnoresAsteroid(medium)).toBe(false);
+    expect(missileIgnoresAsteroid(large)).toBe(false);
+  });
+
+  it('findNearestAsteroid skips TINY and returns the closest non-tiny', () => {
+    const tiny = makeAsteroid(2, 0);
+    tiny.size = AsteroidSize.TINY;
+    const medium = makeAsteroid(3, 0);
+    medium.size = AsteroidSize.MEDIUM;
+    const large = makeAsteroid(7, 0);
+    large.size = AsteroidSize.LARGE;
+    // TINY is closer to (0,0) than MEDIUM, but the helper must skip it.
+    expect(findNearestAsteroid({ x: 0, y: 0 }, [tiny, medium, large], 10)).toBe(medium);
+  });
+
+  it('findFarthestAsteroid skips TINY and returns the farthest non-tiny', () => {
+    const tiny = makeAsteroid(2, 0);
+    tiny.size = AsteroidSize.TINY;
+    const mid = makeAsteroid(5, 0);
+    mid.size = AsteroidSize.SMALL;
+    const far = makeAsteroid(9, 0);
+    far.size = AsteroidSize.MEDIUM;
+    // TINY is at 2u; LARGE-equivalent at 9u should win.
+    expect(findFarthestAsteroid({ x: 0, y: 0 }, [tiny, mid, far], 10)).toBe(far);
+  });
+
+  it('knockbackAsteroid returns a new state with velocity boosted along direction', () => {
+    const tiny = makeAsteroid(0, 0);
+    tiny.size = AsteroidSize.TINY;
+    tiny.velocity = { x: 1, y: 0 };
+    const knocked = knockbackAsteroid(tiny, { x: 1, y: 0 }, 5);
+    expect(knocked.velocity.x).toBeCloseTo(6, 5);
+    expect(knocked.velocity.y).toBeCloseTo(0, 5);
+    // Position unchanged (knockback is impulse-only).
+    expect(knocked.position).toEqual(tiny.position);
+    // Returns a new object, not the same reference (immutable).
+    expect(knocked).not.toBe(tiny);
+    expect(knocked.velocity).not.toBe(tiny.velocity);
+  });
+
+  it('knockbackAsteroid at angle adds the impulse as a vector', () => {
+    const tiny = makeAsteroid(0, 0);
+    tiny.size = AsteroidSize.TINY;
+    tiny.velocity = { x: 0, y: 0 };
+    // 90° up impulse at HOMING_MISSILES_TINY_KNOCKBACK_SPEED.
+    const knocked = knockbackAsteroid(tiny, { x: 0, y: 1 }, HOMING_MISSILES_TINY_KNOCKBACK_SPEED);
+    expect(knocked.velocity.x).toBeCloseTo(0, 5);
+    expect(knocked.velocity.y).toBeCloseTo(HOMING_MISSILES_TINY_KNOCKBACK_SPEED, 5);
+  });
+
+  it('tickHomingMissiles impact on TINY pushes it, clears target, missile stays in flight', () => {
+    // Pre-lock the missile onto the TINY directly — this simulates the
+    // scenario where a tiny wandered into the missile's flight cone AFTER
+    // the missile had already acquired its lock. Without the pre-lock,
+    // findNearestAsteroid (which now skips TINY) would never even pick the
+    // tiny, so the impact branch would never fire.
+    const tiny = makeAsteroid(2, 0);
+    tiny.size = AsteroidSize.TINY;
+    const medium = makeAsteroid(8, 0);
+    medium.size = AsteroidSize.MEDIUM;
+    const scene = makeScene();
+    const m = makeMissile(0, { x: 1.5, y: 0 }); // 0.5u from tiny
+    m.target = tiny; // simulate a pre-acquired tiny lock
+    let knockedAsteroid: AsteroidState | null = null;
+    let knockedDirection: Vector2 | null = null;
+    let impactCalls = 0;
+
+    const alive = tickHomingMissiles(
+      [m],
+      [tiny, medium],
+      1 / 60,
+      scene,
+      () => {
+        impactCalls++;
+      },
+      (a, dir) => {
+        knockedAsteroid = a;
+        knockedDirection = dir;
+      },
+    );
+
+    // Missile is still alive (knockback, not destroy).
+    expect(alive).toContain(m);
+    // No impact fired (we knocked, not destroyed).
+    expect(impactCalls).toBe(0);
+    // Knockback fired on the tiny with a normalized direction.
+    expect(knockedAsteroid).toBe(tiny);
+    expect(knockedDirection).not.toBeNull();
+    const dLen = Math.hypot(knockedDirection!.x, knockedDirection!.y);
+    expect(dLen).toBeCloseTo(1, 5);
+    // Target was cleared (so next frame re-picks medium).
+    expect(m.target).toBeNull();
+
+    // Next tick — missile locks the MEDIUM, not the TINY (TINY skipped
+    // by findNearestAsteroid in the tier helper).
+    tickHomingMissiles(
+      [m],
+      [tiny, medium],
+      1 / 60,
+      scene,
+      () => {},
+      () => {},
+    );
+    expect(m.target).toBe(medium);
+  });
+
+  it('tickHomingMissiles impact on MEDIUM still destroys (regression guard)', () => {
+    // Phase 7f-2 must NOT change the non-tiny destruction path.
+    const medium = makeAsteroid(2, 0);
+    medium.size = AsteroidSize.MEDIUM;
+    const scene = makeScene();
+    const m = makeMissile(0, { x: 1.5, y: 0 }); // 0.5u from medium
+    m.target = medium; // pre-lock (consistent with the TINY test above)
+    let impactCalls = 0;
+    let knockedCalls = 0;
+
+    const alive = tickHomingMissiles(
+      [m],
+      [medium],
+      1 / 60,
+      scene,
+      () => {
+        impactCalls++;
+      },
+      () => {
+        knockedCalls++;
+      },
+    );
+
+    expect(impactCalls).toBe(1);
+    expect(knockedCalls).toBe(0);
+    expect(alive).not.toContain(m); // missile disposed
+  });
+
+  it('tickHomingMissiles WITHOUT onTinyKnockback callback falls back to destroy (back-compat)', () => {
+    // The Phase 7f-2 TINY-knockback path is opt-in via the optional callback.
+    // If a caller does NOT pass onTinyKnockback, the TINY falls through to
+    // the existing destroy path — same behavior as before Phase 7f-2. This
+    // keeps back-compat for any external/headless callers that haven't been
+    // updated yet (none in this codebase, but the contract should not
+    // silently break for them). The Game wrapper DOES pass onTinyKnockback,
+    // so in practice missiles always use the push-aside path.
+    const tiny = makeAsteroid(2, 0);
+    tiny.size = AsteroidSize.TINY;
+    const scene = makeScene();
+    const m = makeMissile(0, { x: 1.5, y: 0 });
+    m.target = tiny; // pre-lock to force the impact branch
+    let impactCalls = 0;
+
+    const alive = tickHomingMissiles(
+      [m],
+      [tiny],
+      1 / 60,
+      scene,
+      () => {
+        impactCalls++;
+      },
+      // no onTinyKnockback passed
+    );
+
+    // Fallback: TINY is destroyed like any other asteroid.
+    expect(impactCalls).toBe(1);
+    expect(alive).not.toContain(m);
   });
 });

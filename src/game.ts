@@ -163,6 +163,7 @@ import {
   PICKUP_HALO_PROXIMITY_BOOST,
   PICKUP_SONAR_RING_PERIOD_SECONDS,
   PICKUP_SPIN_AXIS,
+  HOMING_MISSILES_TINY_KNOCKBACK_SPEED, // Phase 7f-2 — tiny-knockback impulse speed
   PickupKind,
   PickupState,
   applyActivePickupEffect,
@@ -218,11 +219,12 @@ import {
   tickMagnetBooster,
 } from './magnet-booster';
 import {
+  createActiveField,
   createActiveRing,
-  createPreviewRing,
+  updateActiveField,
   updateActiveRing,
-  updatePreviewRing,
 } from './magnet-booster-vfx';
+import { createMissileExplosionFactory } from './missileExplosion';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -249,9 +251,9 @@ import {
 //
 //          Phase 7f adds the Magnet Booster — a 4th active pickup with a dedicated
 //          state machine in src/magnet-booster.ts (pendingTier / activeTier /
-//          activeUntil). The Game owns a magnetBooster state field, a preview
-//          ring (shows queued tier near the ship) and an active ring (pulses
-//          during the 6s activation window); both rings are children of shipMesh
+//          activeUntil). The Game owns a magnetBooster state field, an
+//          active ring (pulses during the 10s activation window) and an
+//          active field disk (green, shield-style); both are children of shipMesh
 //          so they inherit position + rotation. The effectiveMagnetRadius getter
 //          wraps the state-machine function so every per-frame call site
 //          (updateScrap, updatePickups, updateMagnetRing) reads the current
@@ -374,14 +376,14 @@ export class Game {
   private readonly shieldMesh: Mesh;
   private readonly magnetRing: Mesh;
   private readonly breatherMesh: Mesh;
-  // Phase 7f — Magnet Booster state + rings. Preview ring shows the queued
-  // tier (pendingTier>0); active ring pulses during the 6s activation
-  // window (activeTier>0). Both rings are children of shipMesh so they
-  // inherit ship position + rotation; both default to visible=false so they
+  // Phase 7f — Magnet Booster state + visuals. Active ring + green field
+  // disk pulse during the 10s activation window (activeTier>0). Both are
+  // children of shipMesh so they inherit ship position + rotation; both
+  // default to visible=false so they
   // never appear on a fresh game start.
   private magnetBooster: MagnetBoosterState = createMagnetBooster();
-  private readonly magnetPreviewRing: Mesh = createPreviewRing();
   private readonly magnetActiveRing: Mesh = createActiveRing();
+  private readonly magnetActiveField: Mesh = createActiveField();
   private readonly shield: ShieldState;
   private readonly wave: WaveState;
   private readonly breather: BreatherZoneState;
@@ -414,6 +416,10 @@ export class Game {
   private activeAmmo: ActiveAmmoMap = createEmptyActiveAmmo();
   private activeDeployments: DroneDeploymentState[] = [];
   private homingMissiles: HomingMissileState[] = [];
+  // Phase 7g — missile-destroyed explosion factory. Pre-allocates 50
+  // shards + 80 sparks + 1 flash sphere; reused across all detonations.
+  // The factory is created in the constructor and disposed in stop().
+  private missileExplosionFactory: ReturnType<typeof createMissileExplosionFactory> | null = null;
   private pickupHudElement: HTMLDivElement | null = null;
   private pickupHudPills: Map<PickupKind, PassivePill> = new Map();
   private activeHudElement: HTMLDivElement | null = null;
@@ -480,6 +486,11 @@ export class Game {
     this.scene = new Scene();
     this.scene.background = new Color(0x050510);
 
+    // Phase 7g — missile-destroyed explosion factory (creates the 131-slot
+    // pool: 50 shards + 80 sparks + 1 flash sphere). Called BEFORE any
+    // other scene-add so the explosion group lives at a stable layer index.
+    this.missileExplosionFactory = createMissileExplosionFactory(this.scene);
+
     const width = window.innerWidth;
     const height = window.innerHeight;
 
@@ -517,14 +528,15 @@ export class Game {
     this.magnetRing = createMagnetRing();
     this.shipMesh.add(this.magnetRing);
 
-    // Phase 7f — attach preview + active rings to the ship group so they
-    // inherit the ship's position + rotation. Both default to visible=false
-    // at construction (see createPreviewRing / createActiveRing in
-    // magnet-booster-vfx.ts), so a fresh game start shows no extra rings.
-    this.shipMesh.add(this.magnetPreviewRing);
+    // Phase 7f — attach active ring + green field disk to the ship group so
+    // they inherit the ship's position + rotation. Both default to
+    // visible=false at construction (see createActiveRing / createActiveField
+    // in magnet-booster-vfx.ts), so a fresh game start shows no extra rings.
+    // 2026-06-26 v2 — preview ring removed; pending state is HUD-only.
     this.shipMesh.add(this.magnetActiveRing);
-    this.magnetPreviewRing.visible = false;
+    this.shipMesh.add(this.magnetActiveField);
     this.magnetActiveRing.visible = false;
+    this.magnetActiveField.visible = false;
 
     this.breather = createBreatherZoneState();
     this.breatherMesh = createBreatherMesh();
@@ -635,6 +647,15 @@ export class Game {
     this.cameraShakeAmplitude = 0;
     this.cameraShakeRemaining = 0;
 
+    // Phase 7g — dispose the missile-destroyed explosion factory. Removes
+    // the shards InstancedMesh + sparks Points + flash sphere from the
+    // scene and disposes their geometry + materials. Idempotent: a fresh
+    // Game instance will re-create the factory in its constructor.
+    if (this.missileExplosionFactory) {
+      this.missileExplosionFactory.dispose();
+      this.missileExplosionFactory = null;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // My Rules — Phase 7 HUD Cleanup
     // ═══════════════════════════════════════════════════════════════════════════
@@ -707,8 +728,8 @@ export class Game {
     // activeHudElement branch above (activeHudIcons.clear() drops the
     // cached refs along with the 3 ammo icons).
     this.magnetBooster = createMagnetBooster();
-    this.magnetPreviewRing.visible = false;
     this.magnetActiveRing.visible = false;
+    this.magnetActiveField.visible = false;
   }
 
   private loop = (time: number): void => {
@@ -1617,17 +1638,23 @@ export class Game {
       if (ACTIVE_KIND_SPECS[k].isDeployable && this.activeDeployments.length > 0) continue;
       tickActiveAmmo(this.activeAmmo[k], deltaTime);
     }
-    // Phase 7f — Magnet Booster per-frame tick + ring updates. The tick
-    // expires the 6s window and returns true on the expiry frame (a signal
-    // available for future HUD transition animations). updatePreviewRing
-    // hides the preview ring when pendingTier=0 (so it disappears during
-    // the active window, since pendingTier was consumed at activation);
-    // updateActiveRing hides the active ring when activeTier=0 or the
-    // window just expired.
+    // Phase 7f — Magnet Booster per-frame tick + visual updates. The tick
+    // expires the 10s window and returns true on the expiry frame (a signal
+    // available for future HUD transition animations). updateActiveRing hides
+    // the gold ring outline when activeTier=0 or the window just expired;
+    // updateActiveField does the same for the green shield-style disk and
+    // also advances the disk shader's uTime clock so it pulses in sync
+    // with the ring. 2026-06-26 v2 — preview ring removed entirely; the
+    // pending state is communicated by the HUD pill alone.
     tickMagnetBooster(this.magnetBooster, this.gameTimeSeconds);
-    updatePreviewRing(this.magnetPreviewRing, this.magnetBooster.pendingTier);
     updateActiveRing(
       this.magnetActiveRing,
+      this.magnetBooster.activeTier,
+      activeRemainingSeconds(this.magnetBooster, this.gameTimeSeconds),
+      deltaTime,
+    );
+    updateActiveField(
+      this.magnetActiveField,
       this.magnetBooster.activeTier,
       activeRemainingSeconds(this.magnetBooster, this.gameTimeSeconds),
       deltaTime,
@@ -1693,15 +1720,76 @@ export class Game {
       this.scene,
       this.homingMissiles,
     );
+    // Phase 7 fix — capture which asteroids get destroyed this tick so we
+    // can prune `this.asteroids` after tickHomingMissiles returns. The
+    // prior implementation called onMissileImpact directly inside the
+    // tick's iteration, but the callback never spliced the LiveAsteroid
+    // out of this.asteroids — so subsequent missiles in the same volley
+    // kept targeting the dead asteroid's frozen position, "flew past
+    // nothing," and timed out at the 10s tracking duration. handleCollisions
+    // and fireBombStrike already rebuild `this.asteroids` from a fresh
+    // `alive` list inside their own loops; the missile path now mirrors
+    // that pattern by pruning the destroyed wrappers here.
+    //
+    // Phase 7f-2 — parallel `tinyKnockbacks` map captures TINY pushes the
+    // missile delivers instead of destroying. After the tick returns we
+    // apply the velocity impulse to each LiveAsteroid's state in place
+    // (no list rebuild — tinies stay in play). The knockback direction
+    // is already a unit vector; we add it scaled by
+    // HOMING_MISSILES_TINY_KNOCKBACK_SPEED to the asteroid's existing
+    // velocity. This is what gives missiles their "shove tinies aside
+    // and keep flying" behavior — see src/active-deployments.ts Phase
+    // 7f-2 entry for the targeting + impact-branch details.
+    const destroyedThisTick = new Set<AsteroidState>();
+    const tinyKnockbacks = new Map<AsteroidState, Vector2>();
     this.homingMissiles = tickHomingMissiles(
       this.homingMissiles,
       this.asteroids.map((a) => a.state),
       deltaTime,
       this.scene,
-      (asteroid) => this.onMissileImpact(asteroid),
+      (asteroid) => {
+        destroyedThisTick.add(asteroid);
+        this.onMissileImpact(asteroid);
+      },
+      (asteroid, direction) => {
+        tinyKnockbacks.set(asteroid, direction);
+      },
+      // Phase 7g — spawn the layered explosion VFX at the missile's last
+      // known position when it is destroyed (either fuel-expiry or impact).
+      // The factory's spawn is O(1) + a small randomized direction loop.
+      (position, velocityDir) => {
+        if (this.missileExplosionFactory) {
+          this.missileExplosionFactory.spawn(position, velocityDir);
+        }
+      },
     );
+    if (destroyedThisTick.size > 0) {
+      this.asteroids = this.asteroids.filter((a) => !destroyedThisTick.has(a.state));
+    }
+    if (tinyKnockbacks.size > 0) {
+      const knockSpeed = HOMING_MISSILES_TINY_KNOCKBACK_SPEED;
+      this.asteroids = this.asteroids.map((a) => {
+        const dir = tinyKnockbacks.get(a.state);
+        if (!dir) return a;
+        return {
+          ...a,
+          state: {
+            ...a.state,
+            velocity: {
+              x: a.state.velocity.x + dir.x * knockSpeed,
+              y: a.state.velocity.y + dir.y * knockSpeed,
+            },
+          },
+        };
+      });
+    }
     // Tick the smoke pool (one InstancedMesh for all in-flight missiles).
     updateMissileSmoke(deltaTime);
+    // Phase 7g — tick the missile explosion factory (shards + sparks + flash).
+    // The factory's slot pools self-prune when particles exceed their lifetime.
+    if (this.missileExplosionFactory) {
+      this.missileExplosionFactory.update(deltaTime);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

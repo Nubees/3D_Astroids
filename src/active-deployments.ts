@@ -8,7 +8,7 @@ import {
   MeshStandardMaterial,
   Object3D,
 } from 'three';
-import { AsteroidState, Vector2 } from './types';
+import { AsteroidSize, AsteroidState, Vector2 } from './types';
 import {
   HOMING_MISSILES_DAMAGE,
   HOMING_MISSILES_MISSILE_IMPACT_RADIUS,
@@ -95,8 +95,26 @@ const ORBIT_ANGULAR_SPEED = (2 * Math.PI) / ORBIT_DRONES_ORBIT_PERIOD_SECONDS;
 const FADE_FRAME_SCALE = 0.95;
 
 /**
+ * Returns true if `asteroid` should be ignored by missile targeting. Phase
+ * 7f-2 — tinies get pushed aside rather than targeted; missiles focus on
+ * SMALL/MEDIUM/LARGE (and crystals). The user's complaint was specifically
+ * about tinies ("the smallest asteroid parts"); SMALL stays in the
+ * targeting pool because it just split off a medium and is still a real
+ * threat. If SMALL knockback is wanted later, flip this to
+ * `size === AsteroidSize.TINY || size === AsteroidSize.SMALL` and mirror
+ * the change in the tickHomingMissiles impact branch.
+ */
+export function missileIgnoresAsteroid(asteroid: AsteroidState): boolean {
+  return asteroid.size === AsteroidSize.TINY;
+}
+
+/**
  * Find the closest asteroid to `position` within `maxRadius`. Returns
  * null if none in range. Used by both drone auto-fire and missile tracking.
+ *
+ * Phase 7f-2 — skips TINY asteroids (missileIgnoresAsteroid) so missiles
+ * focus on SMALL/MEDIUM/LARGE. Drone auto-fire intentionally uses the same
+ * helper so the priority order matches: drones also prefer bigger rocks.
  */
 export function findNearestAsteroid(
   position: Vector2,
@@ -106,6 +124,7 @@ export function findNearestAsteroid(
   let nearest: AsteroidState | null = null;
   let nearestDistance = maxRadius;
   for (const a of asteroids) {
+    if (missileIgnoresAsteroid(a)) continue;
     const d = Math.hypot(a.position.x - position.x, a.position.y - position.y);
     if (d <= nearestDistance) {
       nearest = a;
@@ -120,6 +139,8 @@ export function findNearestAsteroid(
  * null if none in range. Used by Phase 7c-2 "far tier" missiles (volleyIndex
  * >= NEAR_TIER_COUNT) so the last 3 missiles in a 6-volley hit the back of
  * the arena instead of clustering on the near target.
+ *
+ * Phase 7f-2 — skips TINY asteroids for the same reason as findNearestAsteroid.
  */
 export function findFarthestAsteroid(
   position: Vector2,
@@ -129,6 +150,7 @@ export function findFarthestAsteroid(
   let farthest: AsteroidState | null = null;
   let farthestDistance = -1;
   for (const a of asteroids) {
+    if (missileIgnoresAsteroid(a)) continue;
     const d = Math.hypot(a.position.x - position.x, a.position.y - position.y);
     if (d <= maxRadius && d > farthestDistance) {
       farthest = a;
@@ -136,6 +158,32 @@ export function findFarthestAsteroid(
     }
   }
   return farthest;
+}
+
+/**
+ * Apply a velocity impulse to `asteroid` along `direction` (a unit vector
+ * from caller). Returns a new AsteroidState with the same position but
+ * boosted velocity. Vector2 is readonly in this codebase, so we cannot
+ * mutate asteroid.velocity in place — same pattern as
+ * resolveAsteroidCollision in src/asteroid.ts:266.
+ *
+ * Phase 7f-2 — used by tickHomingMissiles when a missile grazes a TINY
+ * asteroid. The Game wrapper applies the returned state to the
+ * LiveAsteroid.state field; the per-frame drift update picks up the new
+ * velocity on the next tick.
+ */
+export function knockbackAsteroid(
+  asteroid: AsteroidState,
+  direction: Vector2,
+  speed: number,
+): AsteroidState {
+  return {
+    ...asteroid,
+    velocity: {
+      x: asteroid.velocity.x + direction.x * speed,
+      y: asteroid.velocity.y + direction.y * speed,
+    },
+  };
 }
 
 export function spawnDroneDeployment(
@@ -320,6 +368,34 @@ const VOLLEY_HALF_SPREAD = 0.06; // was 0.225 — narrower fan reads as a stream
 //          when flying right). atan2(vy,vx) gives velocity angle from +X;
 //          `rotation.z = velocity_angle - π/2` rotates plane so +Y of plane
 //          = velocity direction.
+//          Phase 7f-2 — TINY asteroids are knocked aside instead of destroyed.
+//          findNearestAsteroid / findFarthestAsteroid skip TINY in their
+//          iteration (missileIgnoresAsteroid helper), so missiles never lock
+//          onto tinies in the first place. The impact branch in
+//          tickHomingMissiles gained a second path: when the locked target
+//          happens to be a TINY (e.g. a tiny wandered into the missile's
+//          flight cone after the lock was already taken), the missile calls
+//          the new optional onTinyKnockback callback with the impulse
+//          direction and clears its own target so it re-picks a bigger rock
+//          on the next frame. The missile itself stays in flight — no
+//          disposal, no onMissileImpact call. This is the "missiles part
+//          the sea of tiny fragments and keep going for the bigger threats"
+//          behavior the user asked for. knockbackAsteroid is the pure helper
+//          that produces the new state; Game applies the impulse to its
+//          LiveAsteroid list.
+//          Phase 7g — missile-destroyed explosion VFX. New optional
+//          onMissileDispose(position, velocityDir) callback fires at BOTH
+//          disposal sites: (1) fuel-expiry (line ~548) and (2) impact-destroy
+//          (line ~674). The Game wires this to its missileExplosionFactory
+//          so every missile detonation — whether it ran out of fuel or hit
+//          an asteroid — spawns the layered shards+sparks+flash VFX. The
+//          velocityDir is the unit vector of the missile's last motion; the
+//          factory uses it to bias the shard/spray pattern in the direction
+//          of flight. Callback is OPTIONAL so existing pure-logic tests
+//          (which only exercise destroy/knockback logic, not VFX) compile
+//          unchanged. The onTinyKnockback branch does NOT fire onMissileDispose
+//          because that path does not destroy the missile — it survives and
+//          re-picks a bigger target.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -444,8 +520,31 @@ function disposeMissileState(missile: HomingMissileState, scene: Object3D): void
 /**
  * Tick all live missiles. Applies tracking steering, rotates the assembly to
  * face velocity, pulses the flame cone, emits smoke, integrates position,
- * and checks asteroid collision. Calls `onMissileImpact(asteroid)` on hit so
- * the caller can decrement the asteroid's health and trigger destruction.
+ * and checks asteroid collision.
+ *
+ * Collision handling — Phase 7f-2:
+ *   - Non-TINY target: call onMissileImpact(target), dispose missile, continue.
+ *     This is the existing destroy path.
+ *   - TINY target: call onTinyKnockback(target, direction), clear
+ *     missile.target so the next frame re-picks a bigger rock, keep
+ *     missile in flight. This is the new "knock aside" path.
+ *
+ * Callbacks:
+ *   - onMissileImpact: required. Used for normal destruction (decrement
+ *     HP, trigger split logic in Game).
+ *   - onTinyKnockback: optional. Used by Game to apply the velocity impulse
+ *     to the LiveAsteroid state. Optional so existing pure-logic tests
+ *     that only exercise destroy behavior do not need to pass it.
+ *     Back-compat: if onTinyKnockback is undefined, a TINY impact falls
+ *     through to the destroy path (same behavior as pre-Phase 7f-2).
+ *     This keeps the function safe to call from any caller that hasn't
+ *     been updated to opt into the new behavior.
+ *   - onMissileDispose (Phase 7g): optional. Fires for EVERY missile
+ *     destruction — both fuel-expiry (line ~542) and impact (line ~657).
+ *     Used by Game to spawn the layered explosion VFX (shards + sparks +
+ *     flash core). The callback receives the missile's last known position
+ *     and a unit velocity direction (for debris bias). Optional so existing
+ *     pure-logic tests don't need to wire it up.
  */
 export function tickHomingMissiles(
   missiles: HomingMissileState[],
@@ -453,11 +552,23 @@ export function tickHomingMissiles(
   deltaTime: number,
   scene: Object3D,
   onMissileImpact: (asteroid: AsteroidState) => void,
+  onTinyKnockback?: (asteroid: AsteroidState, direction: Vector2) => void,
+  onMissileDispose?: (position: Vector2, velocityDir: Vector2) => void,
 ): HomingMissileState[] {
   const alive: HomingMissileState[] = [];
   for (const missile of missiles) {
     missile.remaining -= deltaTime;
     if (missile.remaining <= 0) {
+      // Phase 7g — notify the explosion factory BEFORE disposal so it can
+      // read the missile's last known position + velocity direction (the
+      // debris-bias cue for the shard/spray pattern).
+      if (onMissileDispose) {
+        const speed = Math.hypot(missile.velocity.x, missile.velocity.y);
+        const dir = speed > 0.01
+          ? { x: missile.velocity.x / speed, y: missile.velocity.y / speed }
+          : { x: 1, y: 0 };
+        onMissileDispose(missile.position, dir);
+      }
       disposeMissileState(missile, scene);
       continue;
     }
@@ -538,15 +649,54 @@ export function tickHomingMissiles(
     // could hit a different asteroid than the one the missile is steering
     // toward. With a sticky lock, the only asteroid the missile can collide
     // with is its target — checking target-only is both faster and correct.
+    //
+    // Phase 7f-2 — TINY asteroids are knocked aside instead of destroyed.
+    // The lock-clear on knockback means the next frame re-runs the tier
+    // helper (findNearest/findFarthest) which now SKIPS TINY, so the missile
+    // locks the next non-tiny asteroid it sees. Missile stays in flight.
     if (target) {
       const dToTarget = Math.hypot(
         target.position.x - missile.position.x,
         target.position.y - missile.position.y,
       );
       if (dToTarget <= HOMING_MISSILES_MISSILE_IMPACT_RADIUS) {
-        onMissileImpact(target);
-        disposeMissileState(missile, scene);
-        continue;
+        if (missileIgnoresAsteroid(target) && onTinyKnockback) {
+          // TINY: shove it along the missile's velocity direction and re-pick.
+          // Fall back to the missile→target direction if velocity is
+          // degenerate (shouldn't happen — missiles spawn at full speed —
+          // but defensive).
+          const vLen = Math.hypot(missile.velocity.x, missile.velocity.y);
+          let dir: Vector2;
+          if (vLen > 0.01) {
+            dir = { x: missile.velocity.x / vLen, y: missile.velocity.y / vLen };
+          } else {
+            const dx = target.position.x - missile.position.x;
+            const dy = target.position.y - missile.position.y;
+            const d = Math.hypot(dx, dy);
+            if (d > 0.01) {
+              dir = { x: dx / d, y: dy / d };
+            } else {
+              dir = { x: 1, y: 0 };
+            }
+          }
+          onTinyKnockback(target, dir);
+          missile.target = null; // force re-pick next frame
+          // Do NOT dispose — missile keeps flying.
+        } else {
+          onMissileImpact(target);
+          // Phase 7g — spawn the explosion VFX at the impact point BEFORE
+          // disposing the missile assembly so the spawn reads the missile's
+          // last velocity direction (used for debris bias).
+          if (onMissileDispose) {
+            const speed = Math.hypot(missile.velocity.x, missile.velocity.y);
+            const dir = speed > 0.01
+              ? { x: missile.velocity.x / speed, y: missile.velocity.y / speed }
+              : { x: 1, y: 0 };
+            onMissileDispose(missile.position, dir);
+          }
+          disposeMissileState(missile, scene);
+          continue;
+        }
       }
     }
     alive.push(missile);
