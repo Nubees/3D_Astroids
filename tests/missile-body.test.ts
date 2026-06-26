@@ -25,7 +25,7 @@ describe('createMissileAssembly — Phase 7e sprite missile', () => {
     expect(assembly.children.length).toBe(2);
   });
 
-  it('sprite mesh is a PlaneGeometry 0.9 × 0.858 (Phase 7e-2 shrink + 7e-3 aspect swap + 7e-4 +10% lengthen), additive, transparent, double-sided', () => {
+  it('sprite mesh is a PlaneGeometry 0.9 × 0.858 (Phase 7e-2 shrink + 7e-3 aspect swap + 7e-4 +10% lengthen), additive, transparent, double-sided, always on top (depthTest:false)', () => {
     const { mesh } = createMissileAssembly();
     const geom = mesh.geometry as PlaneGeometry;
     expect(geom.parameters.width).toBeCloseTo(MISSILE_PLANE_WIDTH, 5);
@@ -34,6 +34,7 @@ describe('createMissileAssembly — Phase 7e sprite missile', () => {
     expect(mat.transparent).toBe(true);
     expect(mat.blending).toBe(AdditiveBlending);
     expect(mat.depthWrite).toBe(false);
+    expect(mat.depthTest).toBe(false); // Phase 7g-2 fix — missile stays visible against asteroid occluders
     expect(mat.side).toBe(DoubleSide);
   });
 
@@ -51,8 +52,22 @@ describe('createMissileAssembly — Phase 7e sprite missile', () => {
     expect(img.height).toBeGreaterThan(0);
   });
 
-  it('flame is positioned at the rear pole of the plane (-height/2 along X)', () => {
+  it('flame is positioned at the rear pole of the plane (-height/2 along Y — sprite plane forward = +Y)', () => {
     const { flame } = createMissileAssembly();
-    expect(flame.position.x).toBeCloseTo(-MISSILE_PLANE_HEIGHT / 2, 5);
+    // Phase 7g-2 fix — the old -X anchor was stale from the +X-axis
+    // procedural body (Phase 7c-2). The Phase 7e sprite swap rotated
+    // forward to +Y but the flame anchor wasn't updated, so the cone
+    // rendered off to the SIDE of the missile body.
+    expect(flame.position.y).toBeCloseTo(-MISSILE_PLANE_HEIGHT / 2, 5);
+    expect(flame.position.x).toBeCloseTo(0, 5);
+  });
+
+  it('flame material is additive, depthWrite:false, and depthTest:false (always on top — matches sprite)', () => {
+    const { flame } = createMissileAssembly();
+    const mat = flame.material as MeshBasicMaterial;
+    expect(mat.transparent).toBe(true);
+    expect(mat.blending).toBe(AdditiveBlending);
+    expect(mat.depthWrite).toBe(false);
+    expect(mat.depthTest).toBe(false);
   });
 });

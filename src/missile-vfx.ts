@@ -215,6 +215,30 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          Plane height 0.78 → 0.858u, width 0.9 unchanged, so aspect shifts
 //          from 1.15 to 1.05 (slightly more elongated silhouette). Smoke
 //          offset re-derives to 0.479u and follows automatically.
+//          Phase 7g-2 — (user fix 2026-06-26) TWO visual bugs from playtest:
+//          (1) Missiles flew behind asteroids and disappeared (then exploded
+//          out of sight). Root cause: the sprite material has depthWrite:false
+//          (it's transparent additive); when the opaque asteroid's depth is
+//          written at a slightly nearer camera-space z (the asteroid's near
+//          hemisphere), the missile's z=0 fragments fail the depth test and
+//          get rejected — exactly the same occluder problem shockwave.ts:76
+//          already solved with depthTest:false. Fix: add depthTest:false to
+//          BOTH the sprite material AND the flame material. Pattern matches
+//          shockwave.ts:76 ("always reads against the dark arena background
+//          regardless of occluders"). (2) An odd orange flame-like effect
+//          rendered on the SIDE of the missile body, not at the rear.
+//          Root cause: the flame's anchor and cone math were written for the
+//          OLD procedural +X-axis body (Phase 7c-2 era — noseTip cone at +X,
+//          fins at -X). When Phase 7e swapped to the sprite plane with +Y
+//          as the forward axis, the flame anchor wasn't updated. The
+//          contradictory comments at createMissileFlame said "cyan tip
+//          points along +X" — true for the old body, stale for the new
+//          sprite. Fix: drop geom.scale(1,-1,1) + geom.rotateZ(-π/2) (both
+//          were for the +X-axis orientation) and switch all X-coords to Y.
+//          The cone's natural long axis is already +Y, so the geometry
+//          simplifies to just a translate along local -Y to push the flame
+//          behind the body's rear pole. flame.position.set(0, -HEIGHT/2, 0)
+//          replaces flame.position.set(-HEIGHT/2, 0, 0).
 // Gotchas: 6 draws per missile (core + halo + noseTip + 4 fins) instead of
 //          2. With max 6 missiles in flight at any time, +36 draws total —
 //          well under budget. The halo's opacity 0.5 stays under the 0.7
@@ -308,6 +332,8 @@ export function createMissileAssembly(): {
     transparent: true,
     blending: AdditiveBlending,
     depthWrite: false,
+    depthTest: false,           // user fix 2026-06-26 — keep missile visible on top of asteroids;
+                                // matches the shockwave.ts:76 pattern (same "always on top" need)
     side: DoubleSide,           // visible from both faces (no edge-on vanishing)
   });
   const mesh = new Mesh(
@@ -330,21 +356,28 @@ function createMissileFlame(): Mesh {
   const FLAME_LENGTH = 0.40;
   const FLAME_BASE_RADIUS = 0.16;
   const geom = new ConeGeometry(FLAME_BASE_RADIUS, FLAME_LENGTH, 8);
-  geom.scale(1, -1, 1);
-  geom.rotateZ(-Math.PI / 2);
-  geom.translate(-0.10 - FLAME_LENGTH * 0.5, 0, 0);
+  // ConeGeometry default: tip at -Y/2 (pointed), base at +Y/2 (wide). On the
+  // sprite plane (cyan tip at PNG +Y maps to local +Y after the assembly
+  // rotation in active-deployments.ts:638), forward = +Y and rear = -Y.
+  // The cone's natural long axis is already along local Y, so NO rotateZ
+  // is needed — the old rotateZ(-π/2) was for the +X-axis procedural body
+  // that Phase 7e replaced.
+  geom.translate(0, -0.10 - FLAME_LENGTH * 0.5, 0);
   const mat = new MeshBasicMaterial({
     color: 0xffaa44,            // warm orange, contrasts with magenta body
     transparent: true,
     opacity: 0.7,
     blending: AdditiveBlending,
     depthWrite: false,
+    depthTest: false,           // user fix 2026-06-26 — keep flame visible on top of asteroids;
+                                // matches shockwave.ts:76 (same "always on top" need)
     side: DoubleSide,
   });
   const flame = new Mesh(geom, mat);
-  // Anchor the flame at the rear pole of the plane (cyan tip points along
-  // +X, so the rear is -X). Local -X = -MISSILE_PLANE_HEIGHT / 2.
-  flame.position.set(-MISSILE_PLANE_HEIGHT / 2, 0, 0);
+  // Anchor the flame at the rear pole of the sprite plane (rear = local -Y).
+  // Previously anchored at local -X — that was correct for the OLD procedural
+  // +X-axis body (Phase 7c-2 era) but stale since the Phase 7e sprite swap.
+  flame.position.set(0, -MISSILE_PLANE_HEIGHT / 2, 0);
   return flame;
 }
 
