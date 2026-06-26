@@ -97,7 +97,8 @@ function ensureInstanced(parentScene: Object3D): InstancedMesh {
   const geometry = new PlaneGeometry(SMOKE_BASE_SIZE, SMOKE_BASE_SIZE);
   material = new MeshBasicMaterial({
     map: texture,
-    color: 0xaaaaaa,
+    color: 0x666666, // Phase 7e-2: was 0xaaaaaa — darker smoke per user feedback; additive blending still
+                     // gives a faint glow but the trail no longer bleaches the framebuffer.
     transparent: true,
     blending: AdditiveBlending,
     depthWrite: false,
@@ -181,7 +182,7 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          Phase 7e — sprite missile. User provided a hand-painted PNG
 //          (cyan-tipped magenta missile, pre-shaded for additive). Replaces
 //          the 6-piece procedural body (core + halo + nose cone + 4 fins)
-//          with a single PlaneGeometry(1.0 × 1.15u) carrying the texture.
+//          with a single PlaneGeometry(0.9 × 1.03u — was 1.0 × 1.15, shrunk Phase 7e-2) carrying the texture.
 //          1 draw per missile instead of 6; visual quality = artist intent.
 //          Flight-rotation becomes atan2(vy,vx) - π/2 (cyan tip at PNG +Y,
 //          rotated so +Y maps to velocity direction). Plane is DoubleSide so
@@ -190,6 +191,15 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          and shared across all missiles — no per-missile texture alloc.
 //          MISSILE_SMOKE_REAR_OFFSET auto-derives from plane height so
 //          smoke follows the bigger body without manual tuning.
+//          Phase 7e-2 — sprite size -10% (1.0×1.15 → 0.9×1.03u) and
+//          smoke color darkened (0xaaaaaa → 0x666666). Smaller plane = fewer
+//          pixels upscaled at gameplay distance = sharper rendered sprite
+//          (Three.js bilinear filtering blurs the 142×155 source texture when
+//          stretched to ~50px on screen; the smaller footprint pulls the on-
+//          screen size closer to native resolution). Aspect ratio (h/w = 1.15)
+//          is preserved so the art doesn't get squished. Darker smoke color
+//          still adds a faint glow under AdditiveBlending but the trail no
+//          longer bleaches the framebuffer to white.
 // Gotchas: 6 draws per missile (core + halo + noseTip + 4 fins) instead of
 //          2. With max 6 missiles in flight at any time, +36 draws total —
 //          well under budget. The halo's opacity 0.5 stays under the 0.7
@@ -207,10 +217,10 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          readers see the full evolution of the missile visual.)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const MISSILE_PLANE_WIDTH = 1.0;        // perpendicular to flight axis
-export const MISSILE_PLANE_HEIGHT = 1.15;      // along flight axis (1.0 width × 1.15 h/w)
+export const MISSILE_PLANE_WIDTH = 0.9;        // perpendicular to flight axis (was 1.0 — Phase 7e-2 shrink for sharper sprite)
+export const MISSILE_PLANE_HEIGHT = 1.03;      // along flight axis (was 1.15 — Phase 7e-2 -10% shrink; aspect preserved at h/w=1.15)
 export const MISSILE_SMOKE_REAR_OFFSET =
-  MISSILE_PLANE_HEIGHT / 2 + 0.05; // 0.625u — auto-derives from plane height
+  MISSILE_PLANE_HEIGHT / 2 + 0.05; // 0.565u — auto-derives from plane height
 
 let missileTexture: Texture | null = null;
 let missileTextureLoadPromise: Promise<Texture> | null = null;

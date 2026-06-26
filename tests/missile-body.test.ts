@@ -25,7 +25,7 @@ describe('createMissileAssembly — Phase 7e sprite missile', () => {
     expect(assembly.children.length).toBe(2);
   });
 
-  it('sprite mesh is a PlaneGeometry 1.0 × 1.15, additive, transparent, double-sided', () => {
+  it('sprite mesh is a PlaneGeometry 0.9 × 1.03 (Phase 7e-2 -10% shrink), additive, transparent, double-sided', () => {
     const { mesh } = createMissileAssembly();
     const geom = mesh.geometry as PlaneGeometry;
     expect(geom.parameters.width).toBeCloseTo(MISSILE_PLANE_WIDTH, 5);
