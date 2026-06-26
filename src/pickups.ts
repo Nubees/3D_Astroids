@@ -350,6 +350,15 @@ export function applyPickupEffect(
 //        7.0u/s and 14u turn-limited arc, a missile can travel 60+ u over
 //        10s, so this is effectively "fly forever until you hit something" —
 //        which is what the user wants for the panic-button feel.
+//        Phase 7d-3 — MISSILE_IMPACT_RADIUS 0.45→0.95. With the body now
+//        stretched 2.5× along the flight axis (Phase 7d-2), the visual body
+//        half-length is 0.225u and the smallest asteroid radius is 0.55u, so
+//        the old 0.45u hit zone was SMALLER than a small asteroid — fast-
+//        curving missiles could fly through asteroids without the impact
+//        check firing on the same frame. 0.95u = 0.225 (body half) + 0.55
+//        (small asteroid radius) + 0.117 (per-frame sweep at 7u/s × 60fps)
+//        + ~0.06 margin. See Phase 7d-3 entry in active-deployments.ts for
+//        the sticky-target fix that goes with this.
 // Gotchas: BOMB_STRIKE_RADIUS change means fireBombStrike's damage pass now
 //          also catches crystals at 6-8 units (was 4-5). Existing tests
 //          assert the OLD values (BOMB_STRIKE_RADIUS===5.0 etc.) and need
@@ -422,7 +431,7 @@ export const HOMING_MISSILES_TRACKING_RADIUS = 14.0;      // was 10.0 — reach 
 export const HOMING_MISSILES_TRACKING_DURATION = 10.0;    // was 3.5 — Phase 7d-2 fly until destroyed or 10s
 export const HOMING_MISSILES_TURN_RATE = 14.0;
 export const HOMING_MISSILES_VOLLEY_STAGGER_MS = 180;     // 0/180/360/540/720/900ms cadence
-export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.45;
+export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.95; // was 0.45 — Phase 7d-3 covers stretched body half-length (0.225u) + SMALL asteroid radius (0.55u) + per-frame sweep (0.117u) + margin
 
 export interface ActiveAmmoState {
   charges: number;
