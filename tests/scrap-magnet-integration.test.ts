@@ -47,21 +47,21 @@ describe('magnetPull with effectiveRadius (Phase 7f)', () => {
   it('pull strength falls off: scrap near outer edge moves slower than scrap near center', () => {
     // Scrap at (1, 0) — distance 1, inside boosted radius 5.0
     // pullStrength = (5.0 - 1) / 5.0 = 0.8
-    // speed = 12.0 * 0.8 = 9.6
+    // speed = 33.6 * 0.8 = 26.88  (2026-06-26 v2: 24.0 → 33.6, +40% on top of v1's 2x)
     const innerScrap = createScrap({ x: 1, y: 0 });
     magnetPull(innerScrap, { x: 0, y: 0 }, 1 / 60, 5.0);
     const innerSpeed = Math.hypot(innerScrap.velocity.x, innerScrap.velocity.y);
 
     // Scrap at (4, 0) — distance 4, inside boosted radius 5.0
     // pullStrength = (5.0 - 4) / 5.0 = 0.2
-    // speed = 12.0 * 0.2 = 2.4
+    // speed = 33.6 * 0.2 = 6.72
     const outerScrap = createScrap({ x: 4, y: 0 });
     magnetPull(outerScrap, { x: 0, y: 0 }, 1 / 60, 5.0);
     const outerSpeed = Math.hypot(outerScrap.velocity.x, outerScrap.velocity.y);
 
     expect(innerSpeed).toBeGreaterThan(outerSpeed);
-    expect(innerSpeed).toBeCloseTo(9.6, 1);
-    expect(outerSpeed).toBeCloseTo(2.4, 1);
+    expect(innerSpeed).toBeCloseTo(26.88, 1);
+    expect(outerSpeed).toBeCloseTo(6.72, 1);
   });
 
   it('does not modify scrap velocity when distance <= 0.01', () => {

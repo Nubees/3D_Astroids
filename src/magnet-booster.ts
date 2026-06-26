@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Pure logic for the Magnet Booster 4th active pickup. Tracks the
 //          pending tier (0/1/2) the player has collected and the active
-//          tier during the 6-second activation window. No Three.js — this
+//          tier during the 10-second activation window. No Three.js — this
 //          module is pure state + math, fully testable in Node.
 // Setup: Imported by src/game.ts (lifecycle + per-frame tick + HUD), tests/.
 // Issues: None at creation.
@@ -24,7 +24,15 @@
 //          the game's clock.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const MAGNET_BOOSTER_DURATION_SECONDS = 6.0;
+// 2026-06-26 tuning pass v2 — duration extended 6.0s → 10.0s. The 6s
+// window felt too short for the player to actually capitalize on the
+// wider pull ring (especially with the +40% v2 pull speed, scrap now
+// travels much farther per second and can clear the ring before the
+// timer expires). 10s gives a comfortable loop where the player can
+// pause to position, sweep, then reposition before the timer ends.
+// Phase 7f design spec still anchors the concept; only this runtime
+// constant changed.
+export const MAGNET_BOOSTER_DURATION_SECONDS = 10.0;
 export const MAX_PENDING_TIER = 2;
 
 export interface MagnetBoosterState {

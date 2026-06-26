@@ -6,10 +6,11 @@ import type { Page } from '@playwright/test';
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose:  Capture screenshots that prove the Phase 7f magnet-booster HUD
 //           + 3D ring visuals read correctly in a real browser.
-//             1. PENDING state: pill shows "2x" with gold border, preview
-//                ring visible around ship at 2× baseline radius.
+//             1. PENDING state: pill shows "2x" with gold border, NO
+//                in-world preview ring (HUD pill is the only pending cue).
 //             2. ACTIVE state: pill shows "3x" with pulsing gold border,
-//                active ring visible around ship at 3× baseline radius.
+//                active ring + green field disk visible around ship at
+//                3× baseline radius.
 // Setup:    Playwright boots the Vite dev server (playwright.config.ts).
 //           Uses window.__game debug surface to mutate magnetBooster state
 //           directly (no need to roll for crystal drops or wait for
@@ -46,14 +47,14 @@ async function bootGame(page: Page): Promise<void> {
 test.describe.configure({ mode: 'serial' });
 
 test.describe('Phase 7f — magnet booster HUD + ring visuals', () => {
-  test('1/2 — pending state: pill shows "2x" + gold border + preview ring at 2x radius', async ({
+  test('1/2 — pending state: pill shows "2x" + gold border (no in-world preview)', async ({
     page,
   }) => {
     test.setTimeout(60000);
     await bootGame(page);
 
     // Stage the pending state: pendingTier=1 → "2x" multiplier. Move ship
-    // to origin so the preview ring is centered in the canvas.
+    // to origin so the active visuals (when triggered) are centered.
     const result = await page.evaluate(() => {
       const w = window as unknown as {
         __game: {
@@ -126,12 +127,12 @@ test.describe('Phase 7f — magnet booster HUD + ring visuals', () => {
         activeTier: number;
         activeUntil: number;
       };
-      // Set activeTier=2, activeUntil=6s in the future, pendingTier=0
+      // Set activeTier=2, activeUntil=10s in the future, pendingTier=0
       // (matches the state after Digit4 activation with a pendingTier=2
-      // booster).
+      // booster). 2026-06-26 v2 tuning — duration 6s → 10s.
       mb.pendingTier = 0;
       mb.activeTier = 2;
-      mb.activeUntil = w.__game.gameTimeSeconds + 6.0;
+      mb.activeUntil = w.__game.gameTimeSeconds + 10.0;
       w.__game.ship.state.position = { x: 0, y: 0 };
       return { ok: true, activeUntil: mb.activeUntil, now: w.__game.gameTimeSeconds };
     });
@@ -181,6 +182,30 @@ test.describe('Phase 7f — magnet booster HUD + ring visuals', () => {
       return (window as unknown as { __pageErrors?: string[] }).__pageErrors ?? [];
     });
     expect(errs).toEqual([]);
+
+    // Verify the active ring + green field disk are both visible in the
+    // 3D scene at the 3× baseline scale. The field disk is the new
+    // shield-style cue (Phase 7f v2 tuning); without this assertion the
+    // v2 tuning could regress to "ring only" without anyone noticing.
+    const visuals = await page.evaluate(() => {
+      const g = (window as unknown as { __game: Record<string, unknown> }).__game;
+      const ring = (g as Record<string, unknown>).magnetActiveRing as
+        | { visible: boolean; scale: { x: number; y: number } }
+        | undefined;
+      const field = (g as Record<string, unknown>).magnetActiveField as
+        | { visible: boolean; scale: { x: number; y: number } }
+        | undefined;
+      return {
+        ringVisible: ring?.visible ?? false,
+        ringScaleX: ring?.scale.x ?? 0,
+        fieldVisible: field?.visible ?? false,
+        fieldScaleX: field?.scale.x ?? 0,
+      };
+    });
+    expect(visuals.ringVisible).toBe(true);
+    expect(visuals.ringScaleX).toBeCloseTo(3, 5);
+    expect(visuals.fieldVisible).toBe(true);
+    expect(visuals.fieldScaleX).toBeCloseTo(3, 5);
 
     await page.screenshot({ path: '.test-artifacts/phase-7f-active-3x.png' });
   });

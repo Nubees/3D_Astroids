@@ -37,8 +37,8 @@ import {
 const BASELINE = 2.5; // matches src/scrap.ts:19 (the canonical baseline)
 
 describe('MagnetBooster constants', () => {
-  it('exposes MAGNET_BOOSTER_DURATION_SECONDS = 6.0', () => {
-    expect(MAGNET_BOOSTER_DURATION_SECONDS).toBe(6.0);
+  it('exposes MAGNET_BOOSTER_DURATION_SECONDS = 10.0', () => {
+    expect(MAGNET_BOOSTER_DURATION_SECONDS).toBe(10.0);
   });
 
   it('exposes MAX_PENDING_TIER = 2', () => {
@@ -100,12 +100,12 @@ describe('collectMagnetBooster (active)', () => {
 });
 
 describe('activateMagnetBooster', () => {
-  it('succeeds with pendingTier=1, sets activeUntil = gameTime + 6, sets activeTier = 1', () => {
+  it('succeeds with pendingTier=1, sets activeUntil = gameTime + 10, sets activeTier = 1', () => {
     const state = createMagnetBooster();
     state.pendingTier = 1;
     const ok = activateMagnetBooster(state, 5.0);
     expect(ok).toBe(true);
-    expect(state.activeUntil).toBeCloseTo(11.0, 5);
+    expect(state.activeUntil).toBeCloseTo(15.0, 5);
     expect(state.activeTier).toBe(1);
     expect(state.pendingTier).toBe(0); // consumed
   });

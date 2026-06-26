@@ -136,7 +136,12 @@ export interface PickupState {
   spin: number;
 }
 
-const MAGNET_PULL_SPEED = 12.0;
+// 2026-06-26 tuning pass v2 — +40% on top of the v1 2x boost.
+// 12.0 (baseline) → 24.0 (v1) → 33.6 (v2, current). Mirrors src/scrap.ts
+// magnetPull so both scrap and pickups feel the same boost. Keep these
+// two constants in sync — the player perceives ONE magnet field, not
+// two independent ones.
+const MAGNET_PULL_SPEED = 33.6;
 
 export function createPickupState(kind: PickupKind, position: Vector2): PickupState {
   // Initial outward velocity in a random direction (mirrors scrap muzzle
@@ -197,9 +202,12 @@ export function updatePickup(
 //          way to widen the pickup-pull radius.
 // Fix:     Remove the duplicate constant, import from './scrap', add the
 //          `effectiveRadius` parameter, and swap references in the body.
-// Gotchas: `MAGNET_PULL_SPEED` is a SEPARATE constant and stays local.
-//          Required param — no default value. TypeScript will reject any
-//          call site that forgets the new arg.
+// Gotchas: `MAGNET_PULL_SPEED` is a SEPARATE constant from scrap.ts's
+//          `12.0 * pullStrength` formula but MUST match in magnitude —
+//          the player perceives ONE magnet field that pulls both scrap
+//          and pickups. The 2026-06-26 tuning pass bumped both to 24.0
+//          (2x stronger). Required param — no default value. TypeScript
+//          will reject any call site that forgets the new arg.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function isPickupExpired(pickup: PickupState): boolean {
@@ -250,6 +258,7 @@ const ALL_KINDS: PickupKind[] = [
   PickupKind.BOMB_STRIKE,
   PickupKind.ORBIT_DRONES,
   PickupKind.HOMING_MISSILES,
+  PickupKind.MAGNET_BOOSTER,  // Phase 7f — 7th kind, 1-of-7 roll (crystal-guaranteed + 10% iron LARGE)
 ];
 
 /**
@@ -461,6 +470,15 @@ export const HOMING_MISSILES_TRACKING_DURATION = 10.0;    // was 3.5 — Phase 7
 export const HOMING_MISSILES_TURN_RATE = 14.0;
 export const HOMING_MISSILES_VOLLEY_STAGGER_MS = 180;     // 0/180/360/540/720/900ms cadence
 export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.95; // was 0.45 — Phase 7d-3 covers stretched body half-length (0.225u) + SMALL asteroid radius (0.55u) + per-frame sweep (0.117u) + margin
+// Phase 7f-2 — TINY knockback speed. When a missile grazes a TINY asteroid
+// it does NOT destroy it; it imparts this much velocity in the missile's
+// direction of motion (added to the tiny's existing velocity along that
+// axis). Chosen to be ~2× the max natural asteroid drift speed (~3u/s in
+// Phase 1) so the shove is visibly fast, but small enough that tinies do
+// not fly off-screen in a single frame. The IMPACT_RADIUS above already
+// catches tinies (0.25u radius vs 0.95u impact — missile sweeps ~5x the
+// tiny's footprint), so no proximity-check change is needed.
+export const HOMING_MISSILES_TINY_KNOCKBACK_SPEED = 6.0;
 
 export interface ActiveAmmoState {
   charges: number;

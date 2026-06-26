@@ -64,7 +64,12 @@ export function magnetPull(
   if (distance > effectiveRadius || distance <= 0.01) return;
 
   const pullStrength = (effectiveRadius - distance) / effectiveRadius;
-  const speed = 12.0 * pullStrength;
+  // 2026-06-26 tuning pass v2 — +40% faster on top of the v1 2x boost.
+  // 12.0 (baseline) → 24.0 (v1) → 33.6 (v2, current). Falloff shape
+  // preserved; total impulse over the 10s active window is now ~9.3x
+  // baseline (was 6.7x at v1) — 10s + 33.6 makes a single magnet
+  // activation actually worth triggering.
+  const speed = 33.6 * pullStrength;
   scrap.velocity = {
     x: (dx / distance) * speed,
     y: (dy / distance) * speed,
