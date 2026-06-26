@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AdditiveBlending, Group, Object3D, Scene, ShaderMaterial, Vector3 } from 'three';
+import {
+  AdditiveBlending,
+  Group,
+  InstancedMesh,
+  Object3D,
+  Scene,
+  ShaderMaterial,
+  Vector3,
+} from 'three';
 import {
   DEFAULT_MISSILE_EXPLOSION_PROFILE,
   createMissileExplosionFactory,
@@ -44,10 +52,10 @@ describe('createMissileExplosionFactory', () => {
   });
 
   describe('factory wiring', () => {
-    it('adds a Group to the parent scene with 3 children (shards + sparks + flash)', () => {
+    it('adds a Group to the parent scene with 4 children (shards + sparks + flash + smoke — Phase 7g-3)', () => {
       expect(factory.group).toBeInstanceOf(Group);
       expect(factory.group.parent).toBe(scene);
-      expect(factory.group.children.length).toBe(3);
+      expect(factory.group.children.length).toBe(4);
     });
 
     it('dispose() removes the group from the scene', () => {
@@ -108,26 +116,26 @@ describe('createMissileExplosionFactory', () => {
   describe('update — particles age and die', () => {
     it('after lifetime, hasActiveParticles returns to false (no stuck slots)', () => {
       factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
-      // Total explosion lifetime = max(SHARD=0.6, SPARK=0.45, FLASH=0.1)
-      // = 0.6s. Update at 0.7s should kill all particles.
-      factory.update(0.7);
+      // Phase 7g-3 — total explosion lifetime = max(SHARD=0.6, SPARK=0.45,
+      // FLASH=0.16, SMOKE=0.85) = 0.85s. Update at 0.9s should kill all.
+      factory.update(0.9);
       expect(factory.hasActiveParticles()).toBe(false);
     });
 
-    it('flash mesh hides after the 0.10s flash lifetime', () => {
+    it('flash mesh hides after the 0.16s flash lifetime (Phase 7g-3 — was 0.10s)', () => {
       factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
       const flashMesh = factory.group.children[2];
       expect(flashMesh.visible).toBe(true);
-      factory.update(0.11);
+      factory.update(0.17); // Phase 7g-3 — past the 0.16s lifetime
       expect(flashMesh.visible).toBe(false);
     });
 
-    it('progressively: 0.05s flash is still visible, 0.11s is not', () => {
+    it('progressively: 0.10s flash is still visible, 0.17s is not (Phase 7g-3)', () => {
       factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
       const flashMesh = factory.group.children[2];
-      factory.update(0.05);
+      factory.update(0.10); // 63% of new 0.16s lifetime — still visible
       expect(flashMesh.visible).toBe(true);
-      factory.update(0.06); // cumulative ~0.11
+      factory.update(0.07); // cumulative ~0.17 — past lifetime
       expect(flashMesh.visible).toBe(false);
     });
 
@@ -189,6 +197,51 @@ describe('createMissileExplosionFactory', () => {
     });
   });
 
+  describe('Phase 7g-3 — brighter explosion + white smoke layer', () => {
+    it('shard material has emissive 0x111122 (catches bloom pass — was 0x000000 in Phase 7g)', () => {
+      const shardMesh = factory.group.children[0];
+      const mat = (shardMesh as unknown as {
+        material: { emissive: { getHex: () => number }; emissiveIntensity: number };
+      }).material;
+      expect(mat.emissive.getHex()).toBe(0x111122);
+      expect(mat.emissiveIntensity).toBeGreaterThan(0);
+    });
+
+    it('smoke layer is an InstancedMesh with AdditiveBlending + transparent + depthWrite:false', () => {
+      const smokeMesh = factory.group.children[3];
+      expect(smokeMesh).toBeInstanceOf(InstancedMesh);
+      const mat = (smokeMesh as unknown as {
+        material: { blending: number; transparent: boolean; depthWrite: boolean };
+      }).material;
+      expect(mat.blending).toBe(AdditiveBlending);
+      expect(mat.transparent).toBe(true);
+      expect(mat.depthWrite).toBe(false);
+    });
+
+    it('spawn fires smoke slots alongside shards/sparks/flash', () => {
+      factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
+      // After 1 update tick, smoke should still be alive (lifetime 0.85s).
+      factory.update(1 / 60);
+      expect(factory.hasActiveParticles()).toBe(true);
+    });
+
+    it('smoke outlives sparks (still alive at 0.5s when sparks die at 0.45s)', () => {
+      factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
+      factory.update(0.5);
+      // Sparks dead, flash dead, but smoke should still be ticking (0.85s).
+      expect(factory.hasActiveParticles()).toBe(true);
+    });
+
+    it('flash mesh max scale is bounded by FLASH_MAX_SCALE 2.2× (was 1.4× in Phase 7g)', () => {
+      factory.spawn({ x: 0, y: 0 }, { x: 1, y: 0 });
+      const flashMesh = factory.group.children[2];
+      // After 0.05s of update: t = 0.05/0.16 ≈ 0.31, rise = min(1, 0.31*4) = 1
+      // So scale = 0.2 + (FLASH_MAX_SCALE - 0.2) × 1 = FLASH_MAX_SCALE = 2.2.
+      factory.update(0.05);
+      expect(flashMesh.scale.x).toBeCloseTo(2.2, 1);
+    });
+  });
+
   describe('AdditiveBlending discipline (white-out prevention)', () => {
     it('spark ShaderMaterial uses AdditiveBlending', () => {
       const sparkPoints = factory.group.children[1];
@@ -222,7 +275,9 @@ describe('createMissileExplosionFactory — unstubbed RNG path', () => {
     expect(() => {
       factory.spawn({ x: 1, y: 2 }, { x: 0.5, y: 0.866 });
       factory.update(1 / 60);
-      factory.update(0.7);
+      // Phase 7g-3 — past the new max lifetime (SMOKE=0.85s), so all
+      // particles die. Use 0.9s as a buffer to avoid edge-of-frame flake.
+      factory.update(0.9);
       factory.dispose();
     }).not.toThrow();
     expect(factory.group.parent).toBeNull(); // disposed

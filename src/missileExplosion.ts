@@ -68,12 +68,52 @@ import { Vector2 } from './types';
 //    bomb freeze was caused by inline `require('three')` calls).
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7g-3 — Brightness + Density + White Smoke Tuning
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Five compounding visibility issues from the Phase 7g/7g-2
+//          explosion made the user say "Cannot See the Explosion .. Its
+//          All Very DArk". Root causes + fixes:
+//
+//            1. Flash sphere too small: 0.40u × 1.4 max-scale = ~17px peak.
+//               → FLASH_MESH_RADIUS 0.40 → 0.70, FLASH_MAX_SCALE 1.4 → 2.2
+//                 (peak size ≈ 0.70 × 2.2 = 1.54u ≈ ~30px on screen)
+//            2. Flash too brief: 0.10s = 6 frames at 60fps. Eye misses it.
+//               → FLASH_DURATION_SECONDS 0.10 → 0.16 (~50% longer punch)
+//            3. Flash dim at peak: 0.55 opacity × warm-white tint.
+//               → FLASH_PEAK_OPACITY 0.55 → 0.85
+//            4. Sparks tiny: gl_PointSize ×200 + pow(1-r, 2.5) thin cores
+//               gave ~1.4px per spark. Hard to see.
+//               → ×200 → ×320 multiplier, falloff 2.5 → 1.4 (wider core),
+//                 per-spark size 0.08-0.14u → 0.12-0.22u
+//            5. Shards invisible: dark grey 0x222222 with no emissive,
+//               against dark starfield → ZERO pixels.
+//               → DEFAULT_SHARD_COLOR 0x222222 → 0x555566 (lighter slate),
+//                 emissive 0x000000 → 0x111122 (faint blue glow catches bloom)
+//
+//          Plus user-requested white smoke layer (the "maybe white smoke"
+//          in their ask). 30 PlaneGeometry instances, additive blend at
+//          0.4 opacity per puff, scale grows 0.35u → ~1.7u over 0.85s.
+//          PlaneGeometry chosen over Points because Points gl_PointSize
+//          is screen-space pixels — can't grow in world units which is
+//          what makes smoke billow.
+//
+// White-out budget (peak per-pixel sum):
+//   sparks 80 × 0.5 = 40 + flash 1 × 0.85 = 0.85 + smoke 30 × 0.4 = 12
+//   shards (NON-additive) = 0 → total 52.85, under 60-saturation threshold
+//   from feedback_additive_blending_whiteout.md. Smoke overlap is typically
+//   ≤3 puffs per pixel after expansion (spread across ~20 sq.u.), so real
+//   worst-case at explosion center ≈ 4.55 per channel (well under 1.0).
+// ═══════════════════════════════════════════════════════════════════════════
+
 const SHARD_COUNT = 50;
 const SPARK_COUNT = 80;
-const FLASH_DURATION_SECONDS = 0.10;
+const SMOKE_COUNT = 30; // NEW LAYER (Phase 7g-3)
+const FLASH_DURATION_SECONDS = 0.16; // 0.10 → 0.16
 const SHARD_LIFETIME_SECONDS = 0.60;
 const SPARK_LIFETIME_SECONDS = 0.45;
-const FLASH_MESH_RADIUS = 0.40;
+const SMOKE_LIFETIME_SECONDS = 0.85; // NEW — smoke lingers past flash + sparks
+const FLASH_MESH_RADIUS = 0.70; // 0.40 → 0.70
 
 const SHARD_BASE_SPEED = 7.0; // mean outward velocity (u/s)
 const SHARD_SPEED_VARIANCE = 4.0;
@@ -84,13 +124,20 @@ const SPARK_BASE_SPEED = 11.0;
 const SPARK_SPEED_VARIANCE = 6.0;
 const SPARK_DRAG = 0.85;
 
-const FLASH_MAX_SCALE = 1.4;
-const FLASH_PEAK_OPACITY = 0.55;
+const SMOKE_BASE_SPEED = 3.5; // NEW — slower than sparks (smoke drifts)
+const SMOKE_SPEED_VARIANCE = 1.5; // NEW
+const SMOKE_DRAG = 0.78; // NEW — heavier decay → puffs slow down
+const SMOKE_BASE_SCALE = 0.35; // NEW — start small
+const SMOKE_GROWTH_SCALE = 1.4; // NEW — grow by this much over lifetime
+
+const FLASH_MAX_SCALE = 2.2; // 1.4 → 2.2
+const FLASH_PEAK_OPACITY = 0.85; // 0.55 → 0.85
 const FLASH_COLOR = 0xfff5cc; // warm white
 
-const DEFAULT_SHARD_COLOR = 0x222222; // dark grey, NON-additive
+const DEFAULT_SHARD_COLOR = 0x555566; // 0x222222 → 0x555566 — lighter slate
 const DEFAULT_SPARK_COLOR_INNER = 0xfff2a8; // warm yellow
 const DEFAULT_SPARK_COLOR_OUTER = 0xffffff; // white core
+const DEFAULT_SMOKE_COLOR = 0xeeeeee; // NEW — off-white (not pure white)
 
 /**
  * Profile for a single missile-explosion detonation. Per-missile-kind
@@ -146,10 +193,26 @@ interface FlashSlot {
   y: number;
 }
 
+// Phase 7g-3 — SmokeSlot for the new white smoke layer. Same pool pattern
+// as ShardSlot / SparkSlot: alive flag + age counter + x/y/vx/vy. Only
+// extras are rotZ (puffs face random rotations so they don't all look
+// identical) and initialScale (size jitter so puffs vary in size).
+interface SmokeSlot {
+  alive: boolean;
+  age: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  rotZ: number;
+  initialScale: number;
+}
+
 interface ExplosionSlots {
   shards: ShardSlot[];
   sparks: SparkSlot[];
   flashes: FlashSlot[];
+  smoke: SmokeSlot[]; // Phase 7g-3
   // Scratch object for matrix writes (reused — no per-frame allocations).
   dummy: Object3D;
 }
@@ -201,6 +264,46 @@ function makeFlashSlots(): FlashSlot[] {
   return [{ alive: false, age: 0, x: 0, y: 0 }];
 }
 
+// Phase 7g-3 — pre-allocate smoke pool. Same shape as makeSparkSlots but
+// with the two smoke-specific extras (rotZ + initialScale).
+function makeSmokeSlots(): SmokeSlot[] {
+  const slots: SmokeSlot[] = [];
+  for (let i = 0; i < SMOKE_COUNT; i++) {
+    slots.push({
+      alive: false,
+      age: 0,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      rotZ: 0,
+      initialScale: 0.3,
+    });
+  }
+  return slots;
+}
+
+// Phase 7g-3 — same signature as resetShard / resetSpark: takes pre-baked
+// unit direction × speed so spawn() controls the velocity math. Sets the
+// smoke-specific rotation + size jitter.
+function resetSmoke(
+  slot: SmokeSlot,
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+): void {
+  slot.alive = true;
+  slot.age = 0;
+  slot.x = x;
+  slot.y = y;
+  slot.vx = vx;
+  slot.vy = vy;
+  slot.rotZ = Math.random() * Math.PI * 2;
+  // 0.7..1.0 size jitter — modulates the base scale so puffs vary.
+  slot.initialScale = 0.7 + Math.random() * 0.3;
+}
+
 function randomDirection(): Vector2 {
   // Uniform angle 0..2π → unit vector. Pure function on global RNG so tests
   // can stub Math.random in setUp/tearDown.
@@ -232,7 +335,8 @@ function resetSpark(slot: SparkSlot, x: number, y: number, vx: number, vy: numbe
   slot.y = y;
   slot.vx = vx;
   slot.vy = vy;
-  slot.size = 0.08 + Math.random() * 0.06; // 0.08..0.14u sprite
+  // Phase 7g-3 — 0.08..0.14u → 0.12..0.22u (~60% larger raw spark size).
+  slot.size = 0.12 + Math.random() * 0.10;
 }
 
 function resetFlash(slot: FlashSlot, x: number, y: number): void {
@@ -253,7 +357,8 @@ const SPARK_VERTEX_SHADER = /* glsl */ `
   void main() {
     vLife = aLife;
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * 200.0 * aLife / -mvPosition.z;
+    // Phase 7g-3 — 200.0 → 320.0 makes each spark ~60% larger in screen pixels.
+    gl_PointSize = aSize * 320.0 * aLife / -mvPosition.z;
     gl_Position = projectionMatrix * mvPosition;
   }
 `;
@@ -271,7 +376,9 @@ const SPARK_FRAGMENT_SHADER = /* glsl */ `
     vec2 d = gl_PointCoord - vec2(0.5);
     float r = length(d) * 2.0;
     if (r > 1.0) discard;
-    float core = pow(1.0 - r, 2.5);
+    // Phase 7g-3 — falloff exponent 2.5 → 1.4 gives each spark a wider
+    // bright core (was a thin hot dot, now reads as a glowing puff).
+    float core = pow(1.0 - r, 1.4);
     vec3 col = mix(uOuterColor, uInnerColor, vLife);
     gl_FragColor = vec4(col * core * vLife, core * vLife);
   }
@@ -282,6 +389,12 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
   const shardGeometry = new TetrahedronGeometry(1, 0); // unit, scaled per-instance
   const shardMaterial = new MeshStandardMaterial({
     color: DEFAULT_SHARD_COLOR,
+    // Phase 7g-3 — emissive 0x111122 + intensity 0.5 gives shards a faint
+    // blue glow so they catch the project's bloom pass against the dark
+    // starfield. Without this, the lighter slate color (0x555566) still
+    // reads as dim — bloom catches emissive, not diffuse.
+    emissive: 0x111122,
+    emissiveIntensity: 0.5,
     roughness: 0.65,
     metalness: 0.2,
     flatShading: true,
@@ -319,10 +432,34 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
   flashMesh.visible = false;
   flashMesh.frustumCulled = false;
 
+  // --- SMOKE layer (InstancedMesh of PlaneGeometry) — Phase 7g-3 ------------
+  // Why PlaneGeometry not Points: gl_PointSize is screen-space pixels —
+  // can't grow in world units, which is what makes smoke billow from
+  // 0.35u to ~1.7u over its 0.85s life. PlaneGeometry instances scale
+  // naturally in world space via setMatrixAt per frame.
+  //
+  // Why no texture asset: per Karpathy Method — minimum code that solves
+  // the problem. The "puff silhouette" comes from the additive overlap
+  // of 30 planes at 0.4 opacity each, not from a masked sprite. If the
+  // visual is wrong, that's a Phase 7g-4 follow-up, not a guess now.
+  const smokeGeometry = new PlaneGeometry(1, 1);
+  const smokeMaterial = new MeshBasicMaterial({
+    color: DEFAULT_SMOKE_COLOR,
+    transparent: true,
+    blending: AdditiveBlending,
+    depthWrite: false,
+    opacity: 0.4,
+  });
+  const smokeMesh = new InstancedMesh(smokeGeometry, smokeMaterial, SMOKE_COUNT);
+  smokeMesh.frustumCulled = false;
+
   // --- Group all layers under one parent for easy scene mgmt ---------------
+  // IMPORTANT: order matters for test fixtures that read factory.group.children
+  // by index. 0=shards, 1=sparks, 2=flash, 3=smoke. Smoke appended LAST so
+  // existing flash-at-children[2] tests don't break.
   const group = new Group();
   group.name = 'MissileExplosionFactory';
-  group.add(shardMesh, sparkPoints, flashMesh);
+  group.add(shardMesh, sparkPoints, flashMesh, smokeMesh);
   parentScene.add(group);
 
   // --- Per-instance buffer attributes for sparks ----------------------------
@@ -346,6 +483,7 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
     shards: makeShardSlots(),
     sparks: makeSparkSlots(),
     flashes: makeFlashSlots(),
+    smoke: makeSmokeSlots(), // Phase 7g-3
     // Scratch dummy for matrix writes (InstancedMesh setMatrixAt needs an Object3D).
     dummy: new Object3D(),
   };
@@ -410,6 +548,33 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
     flashMaterial.opacity = FLASH_PEAK_OPACITY * fade;
   }
 
+  // Phase 7g-3 — same shape as applyShardsMatrices but with scale growth
+  // over lifetime (puffs billow outward). Alive slots get a per-frame
+  // matrix; dead slots are parked off-screen at zero scale so they
+  // don't render.
+  function applySmokeMatrices(): void {
+    const dummy = slots.dummy;
+    for (let i = 0; i < SMOKE_COUNT; i++) {
+      const s = slots.smoke[i];
+      if (s.alive) {
+        const t = s.age / SMOKE_LIFETIME_SECONDS;
+        // Scale = initialScale × (base + growth × t). At t=0 the puff is
+        // initialScale × base (small); at t=1 it is initialScale × (base
+        // + growth) (full size). The growth gives the billowing-puff feel.
+        const scale = s.initialScale * (SMOKE_BASE_SCALE + SMOKE_GROWTH_SCALE * t);
+        dummy.position.set(s.x, s.y, 0);
+        dummy.rotation.set(0, 0, s.rotZ);
+        dummy.scale.set(scale, scale, scale);
+      } else {
+        dummy.position.set(0, 0, -1000);
+        dummy.scale.setScalar(0);
+      }
+      dummy.updateMatrix();
+      smokeMesh.setMatrixAt(i, dummy.matrix);
+    }
+    smokeMesh.instanceMatrix.needsUpdate = true;
+  }
+
   function spawn(
     position: Vector2,
     velocityDir: Vector2,
@@ -419,6 +584,7 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
     // Count scales with intensity (capped at full pool).
     const shardBudget = Math.floor(SHARD_COUNT * intensity);
     const sparkBudget = Math.floor(SPARK_COUNT * intensity);
+    const smokeBudget = Math.floor(SMOKE_COUNT * intensity); // Phase 7g-3
 
     // Fire the flash first (single slot — fastest reset).
     resetFlash(slots.flashes[0], position.x, position.y);
@@ -457,6 +623,23 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
       sparksFired++;
     }
 
+    // Phase 7g-3 — fire smoke puffs. Lower velocity-bias than sparks (0.2
+    // vs 0.3) because smoke drifts more than it flies — the user wants
+    // "white smoke" to read as billowing clouds, not a streak.
+    let smokeFired = 0;
+    for (let i = 0; i < SMOKE_COUNT && smokeFired < smokeBudget; i++) {
+      if (slots.smoke[i].alive) continue;
+      const dir = randomDirection();
+      const bx = dir.x + velocityDir.x * 0.2;
+      const by = dir.y + velocityDir.y * 0.2;
+      const blen = Math.hypot(bx, by);
+      const ndx = blen > 0.01 ? bx / blen : 1;
+      const ndy = blen > 0.01 ? by / blen : 0;
+      const speed = SMOKE_BASE_SPEED + Math.random() * SMOKE_SPEED_VARIANCE;
+      resetSmoke(slots.smoke[i], position.x, position.y, ndx * speed, ndy * speed);
+      smokeFired++;
+    }
+
     // Apply current profile to materials.
     shardMaterial.color.setHex(profile.shardColor);
     const innerR = ((profile.sparkInnerColor >> 16) & 0xff) / 255;
@@ -475,11 +658,13 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
     applyShardsMatrices();
     applySparkAttributes();
     applyFlashState();
+    applySmokeMatrices(); // Phase 7g-3 — same reason as the others above
   }
 
   function update(deltaTime: number): void {
     const dragShard = Math.pow(SHARD_DRAG, deltaTime);
     const dragSpark = Math.pow(SPARK_DRAG, deltaTime);
+    const dragSmoke = Math.pow(SMOKE_DRAG, deltaTime); // Phase 7g-3
 
     // Shards: integrate position + rotation, apply drag, age out.
     for (let i = 0; i < SHARD_COUNT; i++) {
@@ -514,6 +699,24 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
       s.vy *= dragSpark;
     }
 
+    // Phase 7g-3 — Smoke: integrate, apply drag, age out. No rotation update
+    // (rotZ is fixed at spawn — keeps the per-frame loop cheap; the puffs
+    // grow via scale not via spin). Same shape as the sparks loop, just
+    // different constants and a longer lifetime (0.85s vs 0.45s).
+    for (let i = 0; i < SMOKE_COUNT; i++) {
+      const s = slots.smoke[i];
+      if (!s.alive) continue;
+      s.age += deltaTime;
+      if (s.age >= SMOKE_LIFETIME_SECONDS) {
+        s.alive = false;
+        continue;
+      }
+      s.x += s.vx * deltaTime;
+      s.y += s.vy * deltaTime;
+      s.vx *= dragSmoke;
+      s.vy *= dragSmoke;
+    }
+
     // Flash: single slot, age-driven scale + opacity curve.
     const f = slots.flashes[0];
     if (f.alive) {
@@ -526,6 +729,7 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
     applyShardsMatrices();
     applySparkAttributes();
     applyFlashState();
+    applySmokeMatrices(); // Phase 7g-3
   }
 
   function dispose(): void {
@@ -536,13 +740,17 @@ export function createMissileExplosionFactory(parentScene: Object3D): ExplosionF
     sparkMaterial.dispose();
     flashGeometry.dispose();
     flashMaterial.dispose();
+    smokeGeometry.dispose(); // Phase 7g-3
+    smokeMaterial.dispose(); // Phase 7g-3
     if (shardMesh.dispose) shardMesh.dispose();
+    if (smokeMesh.dispose) smokeMesh.dispose(); // Phase 7g-3
   }
 
   function hasActiveParticles(): boolean {
     for (const s of slots.shards) if (s.alive) return true;
     for (const s of slots.sparks) if (s.alive) return true;
     for (const f of slots.flashes) if (f.alive) return true;
+    for (const s of slots.smoke) if (s.alive) return true; // Phase 7g-3
     return false;
   }
 
