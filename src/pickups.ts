@@ -345,6 +345,11 @@ export function applyPickupEffect(
 //        every item on screen from the ship's central position); this also
 //        drives the visible shockwave rings (16u primary, 18u secondary in
 //        fireBombStrike) and the shards-cleansing radius check.
+//        Phase 7d-2 — TRACKING_DURATION 3.5→10.0 (fly until destroyed or 10s;
+//        the user's "they must fly until destroyed or 10 seconds" rule). At
+//        7.0u/s and 14u turn-limited arc, a missile can travel 60+ u over
+//        10s, so this is effectively "fly forever until you hit something" —
+//        which is what the user wants for the panic-button feel.
 // Gotchas: BOMB_STRIKE_RADIUS change means fireBombStrike's damage pass now
 //          also catches crystals at 6-8 units (was 4-5). Existing tests
 //          assert the OLD values (BOMB_STRIKE_RADIUS===5.0 etc.) and need
@@ -414,7 +419,7 @@ export const HOMING_MISSILES_NEAR_TIER_COUNT = 3;         // NEW — first 3 hit
 export const HOMING_MISSILES_DAMAGE = 10;
 export const HOMING_MISSILES_SPEED = 7.0;
 export const HOMING_MISSILES_TRACKING_RADIUS = 14.0;      // was 10.0 — reach far half of arena
-export const HOMING_MISSILES_TRACKING_DURATION = 3.5;     // was 2.5 — Phase 7c-2 longer flight time
+export const HOMING_MISSILES_TRACKING_DURATION = 10.0;    // was 3.5 — Phase 7d-2 fly until destroyed or 10s
 export const HOMING_MISSILES_TURN_RATE = 14.0;
 export const HOMING_MISSILES_VOLLEY_STAGGER_MS = 180;     // 0/180/360/540/720/900ms cadence
 export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.45;
