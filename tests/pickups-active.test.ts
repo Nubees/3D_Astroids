@@ -148,7 +148,7 @@ describe('Active ammo state machine', () => {
 describe('Per-kind constants match spec values', () => {
   it('Bomb Strike constants', () => {
     expect(BOMB_STRIKE_COOLDOWN_SECONDS).toBe(3.0);
-    expect(BOMB_STRIKE_RADIUS).toBe(8.0); // Phase 7b: 5.0 → 8.0
+    expect(BOMB_STRIKE_RADIUS).toBe(15.0); // Phase 7d: 8.0 → 15.0 — wipes the whole screen (arena is 30u)
     expect(BOMB_STRIKE_CHARGE_CAP).toBe(3);
     expect(BOMB_STRIKE_DAMAGE).toBe(10); // Phase 7c: 1 → 10 (one-shot any asteroid)
   });
@@ -173,7 +173,7 @@ describe('Per-kind constants match spec values', () => {
     expect(HOMING_MISSILES_DAMAGE).toBe(10); // Phase 7c: 1 → 10 (one-shot any asteroid)
     expect(HOMING_MISSILES_SPEED).toBe(7.0); // Phase 7b: 6.0 → 7.0
     expect(HOMING_MISSILES_TRACKING_RADIUS).toBe(14.0); // Phase 7c-2: 10.0 → 14.0 (reach far arena)
-    expect(HOMING_MISSILES_TRACKING_DURATION).toBe(3.5); // Phase 7c-2: 2.5 → 3.5 (longer flight)
+    expect(HOMING_MISSILES_TRACKING_DURATION).toBe(10.0); // Phase 7d: 3.5 → 10.0 (fly until destroyed or 10s)
     expect(HOMING_MISSILES_TURN_RATE).toBe(14.0); // Phase 7b: 8.0 → 14.0
   });
 });

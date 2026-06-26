@@ -1427,16 +1427,16 @@ export class Game {
     this.scene.add(core);
     this.activeCoreFlashes.push({ mesh: core, age: 0, duration: 0.1 });
 
-    // T+50: Primary shock ring (12u radius, orange) — was 8u.
+    // T+50: Primary shock ring (16u radius, orange) — Phase 7d: was 12u, bumped to match 15u damage radius.
     setTimeout(() => {
-      this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0, 12.0));
+      this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0, 16.0));
     }, 50);
 
-    // T+50: Shock-front particles (30 outward streamers).
+    // T+50: Shock-front particles (30 outward streamers, 30u/s so they reach the 15u edge in 0.5s lifetime).
     setTimeout(() => {
       emitShockwaveParticles(this.scene, position.x, position.y, {
         count: 30,
-        speed: 6,
+        speed: 30,
         color: 0xffcc66,
         lifetime: 0.5,
       });
@@ -1448,20 +1448,20 @@ export class Game {
       this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, 0.5);
     }, 200);
 
-    // T+300: Debris chunks (8 faster, bigger).
+    // T+300: Debris chunks (8 faster, bigger, 30u/s to reach new 15u radius).
     setTimeout(() => {
       emitShockwaveParticles(this.scene, position.x, position.y, {
         count: 8,
-        speed: 10,
+        speed: 30,
         color: 0xffaa00,
         lifetime: 0.6,
         isDebris: true,
       });
     }, 300);
 
-    // T+400: Secondary outer ring (14u radius, cooler red-orange) — was T+80ms with 10u.
+    // T+400: Secondary outer ring (18u radius, cooler red-orange) — Phase 7d: was 14u, bumped to overshoot new 15u damage radius.
     setTimeout(() => {
-      this.activeShockwaves.push(new Shockwave(position, 0xff4400, 0.5, 14.0));
+      this.activeShockwaves.push(new Shockwave(position, 0xff4400, 0.5, 18.0));
     }, 400);
 
     // DOM edge flash (Phase 7b — kept).

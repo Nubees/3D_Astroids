@@ -36,7 +36,7 @@ import { Vector2 } from './types';
 //    the bomb caller.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const SHOCKWAVE_DURATION_SECONDS = 0.7; // was 0.5 — Phase 7b slower ring expansion matches new damage radius
+const SHOCKWAVE_DURATION_SECONDS = 1.0; // was 0.7 — Phase 7d longer expansion to match new 15-18u bomb rings
 const SHOCKWAVE_SCALE_MAX = 4.0;
 const SHOCKWAVE_INNER_RADIUS = 0.4;
 const SHOCKWAVE_OUTER_RADIUS = 0.6;

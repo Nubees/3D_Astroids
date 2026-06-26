@@ -341,6 +341,10 @@ export function applyPickupEffect(
 //        TRACKING_RADIUS 10→14 (reach far half of arena), TRACKING_DURATION
 //        2.5→3.5 (longer flight time), new NEAR_TIER_COUNT=3 so the first 3
 //        missiles hit the nearest target and the last 3 fan out farther.
+//        Phase 7d — BOMB_STRIKE_RADIUS 8.0→15.0 (arena is 30u, so 15u wipes
+//        every item on screen from the ship's central position); this also
+//        drives the visible shockwave rings (16u primary, 18u secondary in
+//        fireBombStrike) and the shards-cleansing radius check.
 // Gotchas: BOMB_STRIKE_RADIUS change means fireBombStrike's damage pass now
 //          also catches crystals at 6-8 units (was 4-5). Existing tests
 //          assert the OLD values (BOMB_STRIKE_RADIUS===5.0 etc.) and need
@@ -355,7 +359,7 @@ export function applyPickupEffect(
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Bomb Strike constants.
-export const BOMB_STRIKE_RADIUS = 8.0; // was 5.0 — Phase 7b "wipes out the area" upgrade
+export const BOMB_STRIKE_RADIUS = 15.0; // was 8.0 — Phase 7d "wipes the whole screen" upgrade (arena is 30u; 15u covers all visible items)
 export const BOMB_STRIKE_COOLDOWN_SECONDS = 3.0;
 export const BOMB_STRIKE_CHARGE_CAP = 3;
 export const BOMB_STRIKE_DAMAGE = 10;
@@ -410,7 +414,7 @@ export const HOMING_MISSILES_NEAR_TIER_COUNT = 3;         // NEW — first 3 hit
 export const HOMING_MISSILES_DAMAGE = 10;
 export const HOMING_MISSILES_SPEED = 7.0;
 export const HOMING_MISSILES_TRACKING_RADIUS = 14.0;      // was 10.0 — reach far half of arena
-export const HOMING_MISSILES_TRACKING_DURATION = 3.5;     // was 2.5 — longer flight time
+export const HOMING_MISSILES_TRACKING_DURATION = 3.5;     // was 2.5 — Phase 7c-2 longer flight time
 export const HOMING_MISSILES_TURN_RATE = 14.0;
 export const HOMING_MISSILES_VOLLEY_STAGGER_MS = 180;     // 0/180/360/540/720/900ms cadence
 export const HOMING_MISSILES_MISSILE_IMPACT_RADIUS = 0.45;
