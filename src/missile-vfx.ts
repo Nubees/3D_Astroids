@@ -182,7 +182,7 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          Phase 7e — sprite missile. User provided a hand-painted PNG
 //          (cyan-tipped magenta missile, pre-shaded for additive). Replaces
 //          the 6-piece procedural body (core + halo + nose cone + 4 fins)
-//          with a single PlaneGeometry(0.9 × 0.78u — was 1.0 × 1.15, shrunk Phase 7e-2, re-aspected Phase 7e-3) carrying the texture.
+//          with a single PlaneGeometry(0.9 × 0.858u — was 1.0 × 1.15, shrunk Phase 7e-2, re-aspected Phase 7e-3, +10% lengthened Phase 7e-4) carrying the texture.
 //          1 draw per missile instead of 6; visual quality = artist intent.
 //          Flight-rotation becomes atan2(vy,vx) - π/2 (cyan tip at PNG +Y,
 //          rotated so +Y maps to velocity direction). Plane is DoubleSide so
@@ -210,6 +210,11 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 //          (artist chose red deliberately for the "danger projectile" cue;
 //          tinting would muddy the tip toward magenta). MISSILE_SMOKE_REAR_OFFSET
 //          re-derives automatically to 0.44u to follow the shorter body.
+//          Phase 7e-4 — sprite +10% lengthen. User said "make the missile
+//          10% longer" after seeing the new red-tipped sprite in action.
+//          Plane height 0.78 → 0.858u, width 0.9 unchanged, so aspect shifts
+//          from 1.15 to 1.05 (slightly more elongated silhouette). Smoke
+//          offset re-derives to 0.479u and follows automatically.
 // Gotchas: 6 draws per missile (core + halo + noseTip + 4 fins) instead of
 //          2. With max 6 missiles in flight at any time, +36 draws total —
 //          well under budget. The halo's opacity 0.5 stays under the 0.7
@@ -228,9 +233,9 @@ export function emitMissileSmoke(parentScene: Object3D, x: number, y: number): v
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const MISSILE_PLANE_WIDTH = 0.9;        // perpendicular to flight axis (was 1.0 — Phase 7e-2 shrink for sharper sprite)
-export const MISSILE_PLANE_HEIGHT = 0.78;      // along flight axis (was 1.03 — Phase 7e-3 re-aspected to match wider-than-tall Small sprite; was 1.15 before Phase 7e-2)
+export const MISSILE_PLANE_HEIGHT = 0.858;     // along flight axis (was 0.78 — Phase 7e-4 +10% lengthen per user feedback; aspect now 1.05)
 export const MISSILE_SMOKE_REAR_OFFSET =
-  MISSILE_PLANE_HEIGHT / 2 + 0.05; // 0.44u — auto-derives from plane height
+  MISSILE_PLANE_HEIGHT / 2 + 0.05; // 0.479u — auto-derives from plane height
 
 let missileTexture: Texture | null = null;
 let missileTextureLoadPromise: Promise<Texture> | null = null;
