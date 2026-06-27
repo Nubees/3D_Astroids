@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { IcosahedronGeometry, MeshStandardMaterial, VideoTexture } from 'three';
+import { MeshStandardMaterial, SphereGeometry, VideoTexture } from 'three';
 import { AsteroidSize } from '../src/types';
 import { SIZE_RADIUS } from '../src/asteroid';
 import {
@@ -13,7 +13,7 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Lock the visual + lifecycle contract for the video-textured RED
 //          targeted asteroid (isTargeted=true) — the new mesh factory that
-//          wraps an IcosahedronGeometry in a VideoTexture driven by
+//          wraps a SphereGeometry in a VideoTexture driven by
 //          /public/video/asteroid1.mp4. Split/drop physics remain on the
 //          original Iron Slag — only the visual mesh swaps.
 //
@@ -23,23 +23,27 @@ import {
 //          are global mutable singletons; beforeEach resets state by calling
 //          disposeVideoAsteroidResources() at the end of every test.
 //
-// Issues:  None at creation — Phase 7h is the first video-textured feature.
-//          Gotcha: the shared texture must NOT be disposed per-mesh because
-//          all targeted asteroids share one texture. The tests below lock
-//          that contract by stashing userData.videoAsteroid and asserting
-//          that the SAME texture instance is returned across multiple calls.
+// Issues:  Phase 7h v2 shipped with IcosahedronGeometry; user reported
+//          "video doesn't cover the whole asteroid". Root cause: the
+//          icosahedron's UVs cluster into 20 tiny triangles, so most faces
+//          sample an unused wedge of the texture and render as base material
+//          color. Phase 7h v3 fixed it by switching to SphereGeometry,
+//          which has natural equirectangular UVs that span the full 0-1
+//          range.
 //
-// Fix:     Phase 7h. Tests cover:
-//          (1) Mesh creation — Group shape, child Mesh, IcosahedronGeometry
+// Fix:     Phase 7h v3. Tests cover:
+//          (1) Mesh creation — Group shape, child Mesh, SphereGeometry
 //              radius matching SIZE_RADIUS[size], material map = VideoTexture.
-//          (2) Singleton — second call returns the SAME texture instance.
-//          (3) userData stash — disposeAsteroidMesh in asteroid.ts uses this
+//          (2) UV coverage — UVs span >50% of the 0-1 range in both U and V
+//              axes (locks the "video covers whole asteroid" guarantee).
+//          (3) Singleton — second call returns the SAME texture instance.
+//          (4) userData stash — disposeAsteroidMesh in asteroid.ts uses this
 //              to detach the per-mesh reference.
-//          (4) Disposal — disposeVideoAsteroidResources pauses the video,
+//          (5) Disposal — disposeVideoAsteroidResources pauses the video,
 //              removes it from DOM, disposes the texture, and nulls both
 //              module-level singletons.
-//          (5) Disposal is idempotent — calling it twice does not throw.
-//          (6) Per-mesh material disposal does NOT dispose the texture —
+//          (6) Disposal is idempotent — calling it twice does not throw.
+//          (7) Per-mesh material disposal does NOT dispose the texture —
 //              the shared texture is owned by Game.stop().
 //
 // Gotchas: JSDOM (Vitest's default) does not actually decode MP4. We only
@@ -60,16 +64,46 @@ describe('createVideoAsteroidMesh', () => {
     expect(mesh.type).toBe('Group');
   });
 
-  it('uses IcosahedronGeometry at the same radius as the original asteroid', () => {
+  it('uses SphereGeometry at the same radius as the original asteroid', () => {
     const mesh = createVideoAsteroidMesh(AsteroidSize.LARGE);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((inner as any).geometry).toBeInstanceOf(IcosahedronGeometry);
+    expect((inner as any).geometry).toBeInstanceOf(SphereGeometry);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const params = ((inner as any).geometry as IcosahedronGeometry).parameters;
-    // parameters.radius is the radius passed to IcosahedronGeometry(radius, 0)
+    const params = ((inner as any).geometry as SphereGeometry).parameters;
+    // SphereGeometry(radius, 16, 12) — parameters.radius is the first arg.
     expect(params.radius).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE]);
     expect(params.radius).toBeCloseTo(2.2);
+  });
+
+  it('SphereGeometry UVs span the full 0-1 range so the video covers the whole asteroid', () => {
+    // Phase 7h v3 fix for the "video doesn't cover the whole asteroid" bug:
+    // SphereGeometry uses equirectangular UV projection, so every vertex's
+    // UV falls within [0,1]² and the video texture is sampled on every face.
+    // (Compare to IcosahedronGeometry at detail 0, where UVs cluster into 20
+    // tiny triangles and most of the texture is never sampled.)
+    const mesh = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    const inner = mesh.children[0];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const geom = (inner as any).geometry as SphereGeometry;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const uvAttr = (geom.attributes as any).uv;
+    expect(uvAttr).toBeDefined();
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (let i = 0; i < uvAttr.count; i++) {
+      const u = uvAttr.getX(i);
+      const v = uvAttr.getY(i);
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    // UVs should span nearly the full [0,1] range — there should be vertices
+    // near both U=0 and U=1 (top/bottom of sphere wraps around) and near
+    // both V=0 and V=1 (poles). A tight cluster would indicate a coverage
+    // regression like the Phase 7h v2 icosahedron bug.
+    expect(maxU - minU).toBeGreaterThan(0.5);
+    expect(maxV - minV).toBeGreaterThan(0.5);
   });
 
   it('wraps the geometry in a MeshStandardMaterial with a VideoTexture as map', () => {
@@ -122,7 +156,7 @@ describe('createVideoAsteroidMesh', () => {
     for (const size of [AsteroidSize.TINY, AsteroidSize.SMALL, AsteroidSize.MEDIUM, AsteroidSize.LARGE]) {
       const mesh = createVideoAsteroidMesh(size);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const geom = (mesh.children[0] as any).geometry as IcosahedronGeometry;
+      const geom = (mesh.children[0] as any).geometry as SphereGeometry;
       expect(geom.parameters.radius).toBeCloseTo(SIZE_RADIUS[size]);
     }
   });

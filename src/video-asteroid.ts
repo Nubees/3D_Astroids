@@ -1,9 +1,9 @@
 import {
   Group,
-  IcosahedronGeometry,
   LinearFilter,
   Mesh,
   MeshStandardMaterial,
+  SphereGeometry,
   VideoTexture,
 } from 'three';
 import { AsteroidSize } from './types';
@@ -15,17 +15,17 @@ import { SIZE_RADIUS } from './asteroid';
 // Purpose: Replace the RED targeted asteroid mesh (the one that doesn't
 //          bump into other asteroids — see asteroid.ts:266
 //          `if (a.isTargeted || b.isTargeted) return;`) with an MP4-video-
-//          textured IcosahedronGeometry so the asteroid looks like a
-//          real video playing on a 3D surface.
+//          textured SphereGeometry so the asteroid looks like a real video
+//          playing on a 3D surface.
 //
 //          Why MP4 + VideoTexture (not a sprite or animated texture):
 //          - User has 2 MP4 files of a rotating asteroid; wants them
 //            played in real-time as the mesh surface.
 //          - VideoTexture uploads each frame automatically — no manual
 //            frame stepping needed.
-//          - Wrapping the video on IcosahedronGeometry sized to the
-//            original `radius = SIZE_RADIUS[size]` keeps collision and
-//            visual size identical to the previous generated asteroid.
+//          - Wrapping the video on a SphereGeometry sized to the original
+//            `radius = SIZE_RADIUS[size]` keeps collision and visual size
+//            identical to the previous generated asteroid.
 //
 // Setup:   createVideoAsteroidMesh(size) — call from createAsteroidMesh
 //          when isTargeted=true. The singleton <video> element + VideoTexture
@@ -34,15 +34,29 @@ import { SIZE_RADIUS } from './asteroid';
 //          Public asset: /public/video/asteroid1.mp4 (copied from user's
 //          Downloads folder; ~2.7MB).
 //
-// Issues:  User said "the RED Asteroid that doesn't bump into the other
-//          Asteroids" — that's the targeted red iron asteroid (isTargeted=true,
-//          color=0xcc4444). Crystals are a separate kind (cyan, CRYSTAL_HEALTH=6)
-//          and are NOT replaced — this is only for the targeted red ones.
+// Issues:  Phase 7h shipped with `IcosahedronGeometry(radius, 0)`. The user
+//          reported "the video does not cover the whole asteroid" — visual
+//          inspection of phase-7h-video-close.png confirmed the front face
+//          showed the video but the back/side faces were solid black or
+//          grey Iron Slag color. Root cause: PolyhedronGeometry (which
+//          IcosahedronGeometry inherits from) generates UVs via spherical
+//          coordinates of each vertex. At detail 0 the icosahedron has only
+//          60 unique vertices, so the UVs cluster into 20 tiny triangles
+//          in UV space — most of the texture is never sampled. The faces
+//          whose UVs fall outside the "used" wedge of the texture either
+//          sample an uninitialized region (black) or stretch the texture
+//          in a way that makes it look like grey Iron Slag.
 //
-// Fix:     Phase 7h. Replace targeted iron asteroid's IcosahedronGeometry +
-//          MeshStandardMaterial with VideoTexture-wrapped variant. State,
-//          collision, splitting, health, drop-on-kill, and split-children
-//          behavior are unchanged — only the visual mesh swaps.
+// Fix:     Phase 7h v3 — Switch from `IcosahedronGeometry(radius, 0)` to
+//          `SphereGeometry(radius, 16, 12)`. SphereGeometry uses
+//          equirectangular UV projection: U = longitude/2π + 0.5,
+//          V = latitude/π + 0.5. This produces UVs that span the FULL 0-1
+//          range across the entire sphere, so the 2D video texture wraps
+//          perfectly around the surface. Trade-off: the chunky icosahedron
+//          silhouette is replaced by a low-poly sphere (16 segments wide ×
+//          12 tall = 192 triangles vs the icosahedron's 80). At gameplay
+//          camera distance the difference is barely perceptible, and the
+//          video coverage is now complete.
 //
 // Gotchas:
 //  - The <video> element must be `muted=true` + `playsinline=true` +
@@ -70,11 +84,13 @@ import { SIZE_RADIUS } from './asteroid';
 //    done before" — splitAsteroid() in asteroid.ts already returns 2
 //    normal iron children; no change to split logic needed.
 //  - The user said: "It must be made to the same size as the Original
-//    Generated Asteroid" — we use SIZE_RADIUS[size] for the IcosahedronGeometry
-//    radius, identical to the original.
+//    Generated Asteroid" — we use SIZE_RADIUS[size] for the SphereGeometry
+//    radius, identical to the original IcosahedronGeometry radius.
 //  - DO NOT use `require('three')` anywhere — see
 //    feedback_require_three_freeze.md (Phase 7b bomb freeze was caused by
 //    inline `require('three')` calls).
+//  - SphereGeometry's UV coverage is INTRINSIC — every face samples a
+//    proper portion of the texture. No need for manual UV remapping.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Path to the MP4 asset — Vite serves /public/video/* at /video/*.
@@ -158,19 +174,27 @@ function getOrCreateVideo(): { video: HTMLVideoElement; texture: VideoTexture } 
 }
 
 /**
- * Build a Group containing an IcosahedronGeometry wrapped with the shared
- * video texture. Same physical radius as the original generated asteroid
+ * Build a Group containing a SphereGeometry wrapped with the shared video
+ * texture. Same physical radius as the original generated asteroid
  * (via SIZE_RADIUS[size]).
  *
- * Detail level 0 = chunky jagged silhouette (matches the original targeted
- * asteroid's 80-triangle look). Higher detail would smooth out the video
- * mapping and lose the "asteroid" feel.
+ * SphereGeometry (16 width segments × 12 height segments) was chosen over
+ * IcosahedronGeometry because SphereGeometry has natural equirectangular
+ * UVs that span the full 0-1 range across the entire surface — every face
+ * of the sphere samples a proper portion of the video texture. With
+ * IcosahedronGeometry at detail 0, the UVs cluster into 20 tiny triangles
+ * that only sample a small wedge of the texture, leaving most of the
+ * asteroid showing material base color (black when unlit).
+ *
+ * The 16×12 sphere has 192 triangles vs the icosahedron's 80, so the
+ * silhouette is slightly rounder. At gameplay camera distance (≈20u from
+ * a 2.2u radius asteroid) this is barely perceptible.
  */
 export function createVideoAsteroidMesh(size: AsteroidSize): Group {
   const radius = SIZE_RADIUS[size];
   const { texture } = getOrCreateVideo();
 
-  const geometry = new IcosahedronGeometry(radius, 0);
+  const geometry = new SphereGeometry(radius, 16, 12);
   const material = new MeshStandardMaterial({
     map: texture,
     // The video provides the color; emissive stays at 0 so the asteroid

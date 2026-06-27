@@ -49,11 +49,16 @@ export { AsteroidSize, AsteroidKind } from './types';
 //          removed; only the fractured material needs disposal in userData.
 //          Phase 7h: the RED targeted asteroid (isTargeted=true — the one that
 //          doesn't bump into other asteroids per resolveAsteroidCollision at
-//          line 266) is now rendered as a VideoTexture-wrapped IcosahedronGeometry
+//          line 266) is now rendered as a VideoTexture-wrapped SphereGeometry
 //          driven by the MP4 at /public/video/asteroid1.mp4. Same radius as
 //          the original (SIZE_RADIUS[size]), same state/collision/split/drop
 //          behavior — only the visual mesh swaps. See src/video-asteroid.ts
 //          for the singleton <video> element + VideoTexture management.
+//          Phase 7h v3 switched from IcosahedronGeometry to SphereGeometry
+//          because the icosahedron's UVs cluster into 20 tiny triangles and
+//          most of the texture is never sampled. SphereGeometry uses
+//          equirectangular UV projection that spans the full 0-1 range, so
+//          the video covers the entire surface.
 //          When shot, splitAsteroid() already returns 2 normal iron children —
 //          "Split/Drop two generated Parts, like it was done before" — no
 //          change to split logic.
@@ -109,8 +114,8 @@ export function createAsteroidMesh(
 ): Group {
   // Phase 7h — RED targeted asteroid (the one that doesn't bump into
   // other asteroids) is now rendered as a VideoTexture-wrapped
-  // IcosahedronGeometry driven by /public/video/asteroid1.mp4. The mesh
-  // factory still returns a Group (same shape as the IcosahedronGeometry
+  // SphereGeometry driven by /public/video/asteroid1.mp4. The mesh
+  // factory still returns a Group (same shape as the SphereGeometry
   // path), so the rest of the codebase (game.ts spawn/dispose, collision,
   // splitting) needs zero changes.
   if (isTargeted) {
