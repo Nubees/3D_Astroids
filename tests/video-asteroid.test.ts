@@ -31,9 +31,10 @@ import {
 //          which has natural equirectangular UVs that span the full 0-1
 //          range.
 //
-// Fix:     Phase 7h v3. Tests cover:
+// Fix:     Phase 7h v3 (geometry) + Phase 7h v5 (channel routing). Tests cover:
 //          (1) Mesh creation — Group shape, child Mesh, SphereGeometry
-//              radius matching SIZE_RADIUS[size], material map = VideoTexture.
+//              radius matching SIZE_RADIUS[size], material emissiveMap =
+//              VideoTexture (NOT the diffuse `map` slot).
 //          (2) UV coverage — UVs span >50% of the 0-1 range in both U and V
 //              axes (locks the "video covers whole asteroid" guarantee).
 //          (3) Singleton — second call returns the SAME texture instance.
@@ -45,6 +46,10 @@ import {
 //          (6) Disposal is idempotent — calling it twice does not throw.
 //          (7) Per-mesh material disposal does NOT dispose the texture —
 //              the shared texture is owned by Game.stop().
+//          (8) v5 channel routing — material.map is null and material.color
+//              is 0x000000 so the lit hemisphere does not double-count the
+//              texture (outgoingLight + totalEmissiveRadiance would saturate
+//              to white). Video lives ONLY in emissiveMap.
 //
 // Gotchas: JSDOM (Vitest's default) does not actually decode MP4. We only
 //          assert that the VideoTexture was created and references the
@@ -106,20 +111,26 @@ describe('createVideoAsteroidMesh', () => {
     expect(maxV - minV).toBeGreaterThan(0.5);
   });
 
-  it('wraps the geometry in a MeshStandardMaterial with a VideoTexture as map', () => {
+  it('wraps the geometry in a MeshStandardMaterial with a VideoTexture as emissiveMap', () => {
     const mesh = createVideoAsteroidMesh(AsteroidSize.SMALL);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const material = (inner as any).material as MeshStandardMaterial;
     expect(material).toBeInstanceOf(MeshStandardMaterial);
-    expect(material.map).toBeInstanceOf(VideoTexture);
-    // Phase 7h v4: emissive is set to white with intensity 1 so the
-    // material self-illuminates. Without this, the unlit hemisphere of
-    // the PBR-shaded sphere appears dark even though every face IS
-    // sampling the texture — the player reads this as "video only on
-    // one side". Self-illuminated PBR keeps texture color consistent
-    // around the full sphere; directional light still adds contour.
-    expect(material.color.getHex()).toBe(0xffffff);
+    // Phase 7h v5: video lives in emissiveMap (post-lighting additive slot),
+    // NOT the diffuse `map` slot. v4 routed it through both `map` AND
+    // emissive, which double-counted on the lit hemisphere:
+    //   outgoingLight ≈ directional * (white map) ≈ 1.0
+    //   totalEmissiveRadiance = 1.0
+    //   finalColor ≈ 2.0  →  tonemapped to 1.0 = pure white ("all white asteroid")
+    // v5 keeps the texture only in emissiveMap and sets `color: 0x000000`
+    // so `outgoingLight ≈ 0` on every face. Lit and unlit hemispheres both
+    // read the video color at full saturation, no additive overshoot.
+    // Trade-off: no PBR contour from the directional light — surface reads
+    // as a flat video wrap. Correct intent for a self-illuminated asteroid.
+    expect(material.map).toBeNull();
+    expect(material.emissiveMap).toBeInstanceOf(VideoTexture);
+    expect(material.color.getHex()).toBe(0x000000);
     expect(material.emissive.getHex()).toBe(0xffffff);
     expect(material.emissiveIntensity).toBe(1);
   });
@@ -130,12 +141,13 @@ describe('createVideoAsteroidMesh', () => {
     const c = createVideoAsteroidMesh(AsteroidSize.SMALL);
 
     // All three materials must reference the same texture instance.
+    // Phase 7h v5: texture is in emissiveMap, not the diffuse `map` slot.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ta = ((a.children[0] as any).material as MeshStandardMaterial).map;
+    const ta = ((a.children[0] as any).material as MeshStandardMaterial).emissiveMap;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const tb = ((b.children[0] as any).material as MeshStandardMaterial).map;
+    const tb = ((b.children[0] as any).material as MeshStandardMaterial).emissiveMap;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const tc = ((c.children[0] as any).material as MeshStandardMaterial).map;
+    const tc = ((c.children[0] as any).material as MeshStandardMaterial).emissiveMap;
     expect(ta).toBe(tb);
     expect(tb).toBe(tc);
   });
@@ -147,10 +159,11 @@ describe('createVideoAsteroidMesh', () => {
     expect(stash).toBeDefined();
     expect(stash.video).toBeInstanceOf(HTMLVideoElement);
     expect(stash.texture).toBeInstanceOf(VideoTexture);
-    // The stash texture must match the material map (same singleton).
+    // The stash texture must match the material's emissiveMap (same singleton).
+    // Phase 7h v5: texture lives in emissiveMap, not the diffuse `map` slot.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const matMap = ((mesh.children[0] as any).material as MeshStandardMaterial).map;
-    expect(stash.texture).toBe(matMap);
+    const matEmissiveMap = ((mesh.children[0] as any).material as MeshStandardMaterial).emissiveMap;
+    expect(stash.texture).toBe(matEmissiveMap);
   });
 
   it('produces meshes sized identically to SIZE_RADIUS for every AsteroidSize', () => {
@@ -216,8 +229,9 @@ describe('per-mesh disposal (asteroid.ts disposeAsteroidMesh contract)', () => {
     (a.userData as any).videoAsteroid = undefined;
 
     // The other mesh still references the same shared texture.
+    // Phase 7h v5: texture lives in emissiveMap, not the diffuse `map` slot.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const bMatMap = ((b.children[0] as any).material as MeshStandardMaterial).map;
-    expect(bMatMap).toBeInstanceOf(VideoTexture);
+    const bMatEmissiveMap = ((b.children[0] as any).material as MeshStandardMaterial).emissiveMap;
+    expect(bMatEmissiveMap).toBeInstanceOf(VideoTexture);
   });
 });

@@ -2,31 +2,34 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Phase 7h v4 Emissive Self-Illumination Screenshots
+// My Rules — Phase 7h v5 EmissiveMap-Only Screenshots
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose:  Verify the v4 fix for "video only covers one side of the
-//           asteroid" — the material now has emissive=0xffffff + emissiveIntensity=1
-//           so the video-textured sphere self-illuminates. The lit and unlit
-//           hemispheres should both show the video color, with PBR shading
-//           still adding depth/contour.
+// Purpose:  Verify the v5 fix for "all white asteroid" — the material now
+//           routes the video through emissiveMap ONLY (with `color: 0x000000`
+//           to zero diffuse contribution). Both hemispheres should read the
+//           video color at full saturation, no additive overshoot to white.
 //
 // Setup:    Boot the game, wait for a natural targeted-asteroid spawn
 //           (every 4th spawn is targeted — see game.ts:2424), screenshot
 //           the canvas when one is on screen.
 //
-// Issues:   v3 shipped with emissive=0x000000 and the back hemisphere
-//           appeared dark even though every face WAS sampling the texture.
-//           User reported "It only covers one side of the asteroid".
-//           v4 boosts emissive to fix.
+// Issues:   v3 had clustered UVs (IcosahedronGeometry). v4 fixed dark-side
+//           but overshot — lit hemisphere saturated to white because the
+//           texture was double-counted (outgoingLight from `map` +
+//           totalEmissiveRadiance from emissive). v5 routes video through
+//           emissiveMap only and zeroes diffuse so lit hemisphere reads the
+//           video color at full saturation (no double-count).
 //
-// Fix:      2026-06-27 — capture v4 visual confirmation before push.
+// Fix:      2026-06-27 — capture v5 visual confirmation. Scene-walker now
+//           probes for `material.emissiveMap.isVideoTexture === true` (NOT
+//           `material.map`, which is null under v5).
 //
 // Gotchas:  The targeted spawn rate is 1 in 4. On a fresh game the
 //           spawn cadence takes ~2-4 seconds before the first targeted
 //           asteroid appears. We poll up to 20 seconds. We probe the scene
 //           for a Group whose first child is a Mesh with a SphereGeometry
-//           AND a material whose map is a VideoTexture — this is the
-//           exact signature of the v4 createVideoAsteroidMesh output.
+//           AND a material whose emissiveMap is a VideoTexture — this is
+//           the exact signature of the v5 createVideoAsteroidMesh output.
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function bootGame(page: Page): Promise<void> {
@@ -61,14 +64,19 @@ async function findVideoAsteroidPosition(page: Page): Promise<{ x: number; y: nu
       if (!node || typeof node !== 'object') return null;
       const n = node as {
         type?: string;
-        material?: { map?: { isVideoTexture?: boolean } };
+        material?: {
+          map?: { isVideoTexture?: boolean };
+          emissiveMap?: { isVideoTexture?: boolean };
+        };
         geometry?: { type?: string };
         children?: unknown[];
         position?: { x: number; y: number };
         parent?: unknown;
       };
+      // Phase 7h v5: video lives in emissiveMap, not the diffuse `map` slot.
+      // Probing `material.map` would never match (it's null under v5).
       if (
-        n.material?.map?.isVideoTexture === true &&
+        n.material?.emissiveMap?.isVideoTexture === true &&
         n.geometry?.type === 'SphereGeometry' &&
         n.position
       ) {
@@ -86,7 +94,7 @@ async function findVideoAsteroidPosition(page: Page): Promise<{ x: number; y: nu
   });
 }
 
-test.describe('Phase 7h v4 — emissive boost visual verification', () => {
+test.describe('Phase 7h v5 — emissiveMap-only channel routing visual verification', () => {
   test('video-textured asteroid appears (natural 1-in-4 spawn)', async ({ page }) => {
     test.setTimeout(60000);
     await bootGame(page);
@@ -105,9 +113,9 @@ test.describe('Phase 7h v4 — emissive boost visual verification', () => {
     // video to start playing visible frames.
     await page.waitForTimeout(800);
     await page.locator('canvas#game-canvas').screenshot({
-      path: '.test-artifacts/phase-7h-v4-targeted-asteroid.png',
+      path: '.test-artifacts/phase-7h-v5-targeted-asteroid.png',
     });
     // eslint-disable-next-line no-console
-    console.log('v4 visual: targeted asteroid at', position);
+    console.log('v5 visual: targeted asteroid at', position);
   });
 });

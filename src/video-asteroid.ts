@@ -77,6 +77,38 @@ import { SIZE_RADIUS } from './asteroid';
 //          self-illuminated PBR pattern: emissive drives color, light
 //          only adds shading on top.
 //
+//          Phase 7h v5 — user reported "it look like an all white
+//          astroid .. it didnt work" on the v4 result. Root cause: v4
+//          kept the texture in BOTH the diffuse `map` slot AND the
+//          emissive slot. The Three.js MeshStandardMaterial shader does
+//          `finalColor = outgoingLight + totalEmissiveRadiance`
+//          (see three.js src/renderers/shaders/ShaderLib/meshphysical.glsl.js,
+//          output_fragment chunk). With v4's `map: texture` (white
+//          diffuse on the lit hemisphere) + `emissive: 0xffffff` +
+//          `emissiveIntensity: 1.0`, the lit side computed:
+//            outgoingLight ≈ directional * (white map) ≈ 1.0
+//            totalEmissiveRadiance = 1.0
+//            finalColor ≈ 2.0  →  tone-mapped to 1.0 = pure white
+//          i.e. v4 fixed the dark hemisphere but blew out the lit
+//          hemisphere to pure white. The v4 screenshot showed a pale
+//          washed-out sphere with no readable video content.
+//
+//          v5 fixes both hemispheres by routing the video through
+//          `emissiveMap` ONLY and setting `color: 0x000000`. With no
+//          diffuse map AND a zero color, `outgoingLight ≈ 0` on every
+//          face (no BRDF contribution at all). The texture drives
+//          `totalEmissiveRadiance` exclusively, and both hemispheres
+//          read the video color at full saturation — no additive
+//          overshoot, no double-counting.
+//
+//          Trade-off: no PBR contour from the directional light. The
+//          surface reads as a flat video wrap. This is the correct
+//          intent for a self-illuminated asteroid (similar pattern to
+//          signs, holograms, and CRT screens). The slight loss of
+//          silhouette depth is acceptable because the video itself
+//          provides the visual interest — we don't need the light to
+//          add fake shading on top.
+//
 // Gotchas:
 //  - The <video> element must be `muted=true` + `playsinline=true` +
 //    `loop=true`. Modern browsers refuse to autoplay audio, and we don't
@@ -215,15 +247,30 @@ export function createVideoAsteroidMesh(size: AsteroidSize): Group {
 
   const geometry = new SphereGeometry(radius, 16, 12);
   const material = new MeshStandardMaterial({
-    map: texture,
-    // The video provides the color. We boost emissive to match so the
-    // asteroid self-illuminates — without this, PBR lighting dims the
-    // back hemisphere (away from the directional light) and the video
-    // appears to "only cover one side" even though the texture IS being
-    // sampled on every face. Phase 7h v4 fix.
-    color: 0xffffff,
+    // Phase 7h v5: route the video texture through emissiveMap ONLY, not
+    // the diffuse `map` slot. The standard material shader does
+    //   finalColor = outgoingLight + totalEmissiveRadiance
+    // (see three.js src/renderers/shaders/ShaderLib/meshphysical.glsl.js,
+    // output_fragment chunk). With v4's `map: texture` + `emissive: 0xffffff`
+    // + `emissiveIntensity: 1.0`, the lit hemisphere received:
+    //   outgoingLight ≈ directional * (white map) ≈ 1.0
+    //   totalEmissiveRadiance = 1.0
+    //   finalColor ≈ 2.0  →  tonemapped to 1.0 = pure white
+    // i.e. v4 overshot — fixed the dark side but blew out the lit side.
+    //
+    // v5 fixes both: `map` stays null (no diffuse contribution at all),
+    // `emissiveMap: texture` + `emissive: 0xffffff` + `emissiveIntensity: 1`
+    // drive the entire pixel color from the video. PBR lighting still
+    // applies BUT `color: 0x000000` zeroes diffuse so `outgoingLight ≈ 0`
+    // on both sides, and `totalEmissiveRadiance = texture sample` is the
+    // only contribution. The video reads as-is everywhere — no lit-side
+    // saturation, no dark-side washout. Trade-off: no PBR contour from
+    // the directional light (the surface reads as a flat video wrap),
+    // which is the correct intent for a self-illuminated asteroid.
+    color: 0x000000,
     emissive: 0xffffff,
     emissiveIntensity: 1.0,
+    emissiveMap: texture,
     flatShading: true,
     // Roughness 0.85 keeps the surface matte — space rock, not polished chrome.
     roughness: 0.85,
