@@ -113,10 +113,15 @@ describe('createVideoAsteroidMesh', () => {
     const material = (inner as any).material as MeshStandardMaterial;
     expect(material).toBeInstanceOf(MeshStandardMaterial);
     expect(material.map).toBeInstanceOf(VideoTexture);
-    // Color white (so the video texture isn't tinted) and emissive black
-    // (so the asteroid doesn't glow — we want video-on-rock, not neon).
-    expect(material.emissive.getHex()).toBe(0x000000);
+    // Phase 7h v4: emissive is set to white with intensity 1 so the
+    // material self-illuminates. Without this, the unlit hemisphere of
+    // the PBR-shaded sphere appears dark even though every face IS
+    // sampling the texture — the player reads this as "video only on
+    // one side". Self-illuminated PBR keeps texture color consistent
+    // around the full sphere; directional light still adds contour.
     expect(material.color.getHex()).toBe(0xffffff);
+    expect(material.emissive.getHex()).toBe(0xffffff);
+    expect(material.emissiveIntensity).toBe(1);
   });
 
   it('shares one VideoTexture across multiple asteroids (singleton video)', () => {

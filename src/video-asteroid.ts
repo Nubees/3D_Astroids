@@ -58,6 +58,25 @@ import { SIZE_RADIUS } from './asteroid';
 //          camera distance the difference is barely perceptible, and the
 //          video coverage is now complete.
 //
+//          Phase 7h v4 — user reported "It only covers one side of the
+//          asteroid". Diagnosis: PBR `MeshStandardMaterial` with
+//          `emissive: 0x000000` shades the back hemisphere (away from the
+//          directional light) dark even though every face IS sampling
+//          the texture. Playwright in-browser pixel sampling confirmed:
+//          UV coverage spans full 0-1 range, video brightness is roughly
+//          equal across L/M/R at every sampled frame, texture wrap is
+//          ClampToEdgeWrapping but the left/right columns of the source
+//          MP4 are nearly identical pixels so clamp seams aren't the
+//          dominant problem. The visual dark-side is the unlit PBR
+//          hemisphere. Fix: boost `emissive` to `0xffffff` with
+//          `emissiveIntensity: 1.0` so the material self-illuminates and
+//          the video color reads on both sides of the asteroid. PBR
+//          shading from the directional light still adds depth/contour
+//          to the silhouette, but the back side now reads the texture
+//          color regardless of camera/light angle. Standard
+//          self-illuminated PBR pattern: emissive drives color, light
+//          only adds shading on top.
+//
 // Gotchas:
 //  - The <video> element must be `muted=true` + `playsinline=true` +
 //    `loop=true`. Modern browsers refuse to autoplay audio, and we don't
@@ -197,11 +216,14 @@ export function createVideoAsteroidMesh(size: AsteroidSize): Group {
   const geometry = new SphereGeometry(radius, 16, 12);
   const material = new MeshStandardMaterial({
     map: texture,
-    // The video provides the color; emissive stays at 0 so the asteroid
-    // doesn't glow. We want it to look like a video projected on a rock,
-    // not a glowing crystal.
+    // The video provides the color. We boost emissive to match so the
+    // asteroid self-illuminates — without this, PBR lighting dims the
+    // back hemisphere (away from the directional light) and the video
+    // appears to "only cover one side" even though the texture IS being
+    // sampled on every face. Phase 7h v4 fix.
     color: 0xffffff,
-    emissive: 0x000000,
+    emissive: 0xffffff,
+    emissiveIntensity: 1.0,
     flatShading: true,
     // Roughness 0.85 keeps the surface matte — space rock, not polished chrome.
     roughness: 0.85,
