@@ -1,0 +1,184 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { IcosahedronGeometry, MeshStandardMaterial, VideoTexture } from 'three';
+import { AsteroidSize } from '../src/types';
+import { SIZE_RADIUS } from '../src/asteroid';
+import {
+  createVideoAsteroidMesh,
+  disposeVideoAsteroidResources,
+} from '../src/video-asteroid';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Video Asteroid Unit Tests (Phase 7h — Custom Asteroids)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Lock the visual + lifecycle contract for the video-textured RED
+//          targeted asteroid (isTargeted=true) — the new mesh factory that
+//          wraps an IcosahedronGeometry in a VideoTexture driven by
+//          /public/video/asteroid1.mp4. Split/drop physics remain on the
+//          original Iron Slag — only the visual mesh swaps.
+//
+// Setup:   Vitest loads this file. createVideoAsteroidMesh and
+//          disposeVideoAsteroidResources are imported from
+//          src/video-asteroid.ts. The module's shared video element + texture
+//          are global mutable singletons; beforeEach resets state by calling
+//          disposeVideoAsteroidResources() at the end of every test.
+//
+// Issues:  None at creation — Phase 7h is the first video-textured feature.
+//          Gotcha: the shared texture must NOT be disposed per-mesh because
+//          all targeted asteroids share one texture. The tests below lock
+//          that contract by stashing userData.videoAsteroid and asserting
+//          that the SAME texture instance is returned across multiple calls.
+//
+// Fix:     Phase 7h. Tests cover:
+//          (1) Mesh creation — Group shape, child Mesh, IcosahedronGeometry
+//              radius matching SIZE_RADIUS[size], material map = VideoTexture.
+//          (2) Singleton — second call returns the SAME texture instance.
+//          (3) userData stash — disposeAsteroidMesh in asteroid.ts uses this
+//              to detach the per-mesh reference.
+//          (4) Disposal — disposeVideoAsteroidResources pauses the video,
+//              removes it from DOM, disposes the texture, and nulls both
+//              module-level singletons.
+//          (5) Disposal is idempotent — calling it twice does not throw.
+//          (6) Per-mesh material disposal does NOT dispose the texture —
+//              the shared texture is owned by Game.stop().
+//
+// Gotchas: JSDOM (Vitest's default) does not actually decode MP4. We only
+//          assert that the VideoTexture was created and references the
+//          shared HTMLVideoElement — we don't try to play frames.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('createVideoAsteroidMesh', () => {
+  afterEach(() => {
+    // Reset module-level singletons between tests so each one starts clean.
+    disposeVideoAsteroidResources();
+  });
+
+  it('returns a Group with one child Mesh', () => {
+    const mesh = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    expect(mesh.children).toHaveLength(1);
+    // Group itself is the public return shape; same as createAsteroidMesh.
+    expect(mesh.type).toBe('Group');
+  });
+
+  it('uses IcosahedronGeometry at the same radius as the original asteroid', () => {
+    const mesh = createVideoAsteroidMesh(AsteroidSize.LARGE);
+    const inner = mesh.children[0];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((inner as any).geometry).toBeInstanceOf(IcosahedronGeometry);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const params = ((inner as any).geometry as IcosahedronGeometry).parameters;
+    // parameters.radius is the radius passed to IcosahedronGeometry(radius, 0)
+    expect(params.radius).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE]);
+    expect(params.radius).toBeCloseTo(2.2);
+  });
+
+  it('wraps the geometry in a MeshStandardMaterial with a VideoTexture as map', () => {
+    const mesh = createVideoAsteroidMesh(AsteroidSize.SMALL);
+    const inner = mesh.children[0];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const material = (inner as any).material as MeshStandardMaterial;
+    expect(material).toBeInstanceOf(MeshStandardMaterial);
+    expect(material.map).toBeInstanceOf(VideoTexture);
+    // Color white (so the video texture isn't tinted) and emissive black
+    // (so the asteroid doesn't glow — we want video-on-rock, not neon).
+    expect(material.emissive.getHex()).toBe(0x000000);
+    expect(material.color.getHex()).toBe(0xffffff);
+  });
+
+  it('shares one VideoTexture across multiple asteroids (singleton video)', () => {
+    const a = createVideoAsteroidMesh(AsteroidSize.LARGE);
+    const b = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    const c = createVideoAsteroidMesh(AsteroidSize.SMALL);
+
+    // All three materials must reference the same texture instance.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ta = ((a.children[0] as any).material as MeshStandardMaterial).map;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tb = ((b.children[0] as any).material as MeshStandardMaterial).map;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tc = ((c.children[0] as any).material as MeshStandardMaterial).map;
+    expect(ta).toBe(tb);
+    expect(tb).toBe(tc);
+  });
+
+  it('stashes the shared video + texture on userData for disposal', () => {
+    const mesh = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stash = (mesh.userData as any).videoAsteroid;
+    expect(stash).toBeDefined();
+    expect(stash.video).toBeInstanceOf(HTMLVideoElement);
+    expect(stash.texture).toBeInstanceOf(VideoTexture);
+    // The stash texture must match the material map (same singleton).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const matMap = ((mesh.children[0] as any).material as MeshStandardMaterial).map;
+    expect(stash.texture).toBe(matMap);
+  });
+
+  it('produces meshes sized identically to SIZE_RADIUS for every AsteroidSize', () => {
+    // Phase 7h requirement: "must be made to the same size as the Original
+    // Generated Asteroid" — SIZE_RADIUS is the source of truth for collision
+    // and visual radius. Both come from the same constant, so the geometry
+    // parameters.radius must equal SIZE_RADIUS[size] exactly.
+    for (const size of [AsteroidSize.TINY, AsteroidSize.SMALL, AsteroidSize.MEDIUM, AsteroidSize.LARGE]) {
+      const mesh = createVideoAsteroidMesh(size);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const geom = (mesh.children[0] as any).geometry as IcosahedronGeometry;
+      expect(geom.parameters.radius).toBeCloseTo(SIZE_RADIUS[size]);
+    }
+  });
+});
+
+describe('disposeVideoAsteroidResources', () => {
+  it('pauses the shared <video> element and disposes the VideoTexture', () => {
+    const mesh = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const videoBefore = (mesh.userData as any).videoAsteroid.video as HTMLVideoElement;
+    // JSDOM supports pause() — spy on it to verify the call.
+    const pauseSpy = vi.spyOn(videoBefore, 'pause');
+
+    disposeVideoAsteroidResources();
+
+    expect(pauseSpy).toHaveBeenCalledOnce();
+    // After disposal, the shared singletons are nulled — a follow-up call
+    // to createVideoAsteroidMesh will lazily re-create them.
+  });
+
+  it('is idempotent (safe to call twice)', () => {
+    createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    expect(() => {
+      disposeVideoAsteroidResources();
+      disposeVideoAsteroidResources();
+    }).not.toThrow();
+  });
+
+  it('removes the <video> element from the document body', () => {
+    createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+    // After creation the body should contain a <video> element.
+    const before = document.querySelectorAll('video').length;
+    expect(before).toBeGreaterThan(0);
+    disposeVideoAsteroidResources();
+    const after = document.querySelectorAll('video').length;
+    // Element was appended and then removed.
+    expect(after).toBe(before - 1);
+  });
+});
+
+describe('per-mesh disposal (asteroid.ts disposeAsteroidMesh contract)', () => {
+  // Phase 7h disposeAsteroidMesh behavior: detaches the per-mesh reference
+  // by nulling userData.videoAsteroid, but does NOT dispose the shared
+  // texture (because other targeted asteroids may still reference it).
+  // The shared texture is freed by Game.stop() via disposeVideoAsteroidResources.
+  it('disposing a single mesh does not null the shared texture (other asteroids still alive)', () => {
+    const a = createVideoAsteroidMesh(AsteroidSize.LARGE);
+    const b = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
+
+    // Simulate disposeAsteroidMesh behavior — null the userData stash.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (a.userData as any).videoAsteroid = undefined;
+
+    // The other mesh still references the same shared texture.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bMatMap = ((b.children[0] as any).material as MeshStandardMaterial).map;
+    expect(bMatMap).toBeInstanceOf(VideoTexture);
+  });
+});

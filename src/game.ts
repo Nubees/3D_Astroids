@@ -42,6 +42,7 @@ import {
   splitSmallAsteroid,
   swapToFracturedMaterial,
 } from './asteroid';
+import { disposeVideoAsteroidResources } from './video-asteroid';
 import {
   MAX_SHARDS,
   SHARD_RADIUS,
@@ -655,6 +656,13 @@ export class Game {
       this.missileExplosionFactory.dispose();
       this.missileExplosionFactory = null;
     }
+
+    // Phase 7h — dispose the shared video <video> element + VideoTexture
+    // used by RED targeted asteroids. Per-asteroid disposal detaches the
+    // material reference but the texture itself stays alive (other
+    // targeted asteroids may still reference it); the explicit teardown
+    // pauses the video + frees the texture exactly once at stop() time.
+    disposeVideoAsteroidResources();
 
     // ═══════════════════════════════════════════════════════════════════════════
     // My Rules — Phase 7 HUD Cleanup

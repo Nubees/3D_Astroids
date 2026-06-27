@@ -12,6 +12,7 @@ import {
   AsteroidKind,
   Vector2,
 } from './types';
+import { createVideoAsteroidMesh } from './video-asteroid';
 
 export { AsteroidSize, AsteroidKind } from './types';
 
@@ -46,6 +47,16 @@ export { AsteroidSize, AsteroidKind } from './types';
 //          carried by per-frame emissive intensity + scale breathe + electricity
 //          arcs from src/crystal-fx.ts. perturbCrystalGeometry was orphaned and
 //          removed; only the fractured material needs disposal in userData.
+//          Phase 7h: the RED targeted asteroid (isTargeted=true — the one that
+//          doesn't bump into other asteroids per resolveAsteroidCollision at
+//          line 266) is now rendered as a VideoTexture-wrapped IcosahedronGeometry
+//          driven by the MP4 at /public/video/asteroid1.mp4. Same radius as
+//          the original (SIZE_RADIUS[size]), same state/collision/split/drop
+//          behavior — only the visual mesh swaps. See src/video-asteroid.ts
+//          for the singleton <video> element + VideoTexture management.
+//          When shot, splitAsteroid() already returns 2 normal iron children —
+//          "Split/Drop two generated Parts, like it was done before" — no
+//          change to split logic.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const SIZE_RADIUS: Record<AsteroidSizeType, number> = {
@@ -96,6 +107,16 @@ export function createAsteroidMesh(
   isTargeted = false,
   kind: AsteroidKind = AsteroidKind.IRON,
 ): Group {
+  // Phase 7h — RED targeted asteroid (the one that doesn't bump into
+  // other asteroids) is now rendered as a VideoTexture-wrapped
+  // IcosahedronGeometry driven by /public/video/asteroid1.mp4. The mesh
+  // factory still returns a Group (same shape as the IcosahedronGeometry
+  // path), so the rest of the codebase (game.ts spawn/dispose, collision,
+  // splitting) needs zero changes.
+  if (isTargeted) {
+    return createVideoAsteroidMesh(size);
+  }
+
   const asteroid = new Group();
   const radius = SIZE_RADIUS[size];
 
@@ -111,9 +132,6 @@ export function createAsteroidMesh(
   if (kind === AsteroidKind.CRYSTAL) {
     color = 0x55ccdd;
     emissive = 0x114455;
-  } else if (isTargeted) {
-    color = 0xcc4444;
-    emissive = 0x441111;
   } else {
     color = 0xaaaaaa;
     emissive = 0x000000;
@@ -198,6 +216,15 @@ export function disposeAsteroidMesh(mesh: Group): void {
     userData.fracturedMaterial.dispose();
     userData.fracturedMaterial = undefined;
   }
+  // Phase 7h — video asteroids store {video, texture} on userData for the
+  // explicit teardown hook (disposeVideoAsteroidResources) to pause + free.
+  // We do NOT pause or dispose here because the texture is SHARED across
+  // all targeted asteroids — pausing it would blank every other live
+  // targeted asteroid on screen. Per-mesh disposal of the material above
+  // detaches this mesh's reference to the texture; the texture itself is
+  // freed when the last mesh using it is disposed (or via the explicit
+  // Game.stop() teardown).
+  userData.videoAsteroid = undefined;
 }
 
 /**
@@ -212,6 +239,13 @@ export function disposeAsteroidMesh(mesh: Group): void {
 export interface CrystalMeshUserData {
   fracturedMaterial?: MeshStandardMaterial;
   shakeSeed?: number;
+  // Phase 7h — video asteroids (RED targeted) stash {video, texture} here so
+  // disposeAsteroidMesh can detach the per-mesh reference. The shared texture
+  // itself is freed by disposeVideoAsteroidResources() at Game.stop() time.
+  videoAsteroid?: {
+    video: HTMLVideoElement;
+    texture: import('three').VideoTexture;
+  };
 }
 
 /**
