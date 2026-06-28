@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MeshStandardMaterial, SphereGeometry, VideoTexture } from 'three';
+import { BoxGeometry, MeshStandardMaterial, VideoTexture } from 'three';
 import { AsteroidSize } from '../src/types';
 import { SIZE_RADIUS } from '../src/asteroid';
 import {
@@ -69,46 +69,97 @@ describe('createVideoAsteroidMesh', () => {
     expect(mesh.type).toBe('Group');
   });
 
-  it('uses SphereGeometry at the same radius as the original asteroid', () => {
+  it('uses BoxGeometry sized to the original asteroid diameter (side = 2 × radius)', () => {
+    // Phase 7h v6: BoxGeometry replaces SphereGeometry. Box side equals
+    // the diameter of the original IcosahedronGeometry asteroid (2 ×
+    // radius) so the world-space bounding extent is preserved across
+    // v3 (sphere), v4/v5 (sphere) and v6 (box). Collision in
+    // asteroid.ts:resolveAsteroidCollision still uses SIZE_RADIUS for
+    // the radius check; the box's bounding sphere matches the original
+    // Iron Slag's diameter exactly.
     const mesh = createVideoAsteroidMesh(AsteroidSize.LARGE);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((inner as any).geometry).toBeInstanceOf(SphereGeometry);
+    expect((inner as any).geometry).toBeInstanceOf(BoxGeometry);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const params = ((inner as any).geometry as SphereGeometry).parameters;
-    // SphereGeometry(radius, 16, 12) — parameters.radius is the first arg.
-    expect(params.radius).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE]);
-    expect(params.radius).toBeCloseTo(2.2);
+    const params = ((inner as any).geometry as BoxGeometry).parameters;
+    // BoxGeometry(width, height, depth) — all three equal the box side.
+    expect(params.width).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE] * 2);
+    expect(params.width).toBeCloseTo(4.4);
+    expect(params.height).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE] * 2);
+    expect(params.depth).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE] * 2);
   });
 
-  it('SphereGeometry UVs span the full 0-1 range so the video covers the whole asteroid', () => {
-    // Phase 7h v3 fix for the "video doesn't cover the whole asteroid" bug:
-    // SphereGeometry uses equirectangular UV projection, so every vertex's
-    // UV falls within [0,1]² and the video texture is sampled on every face.
-    // (Compare to IcosahedronGeometry at detail 0, where UVs cluster into 20
-    // tiny triangles and most of the texture is never sampled.)
+  it('BoxGeometry UVs are remapped to cube-cross layout — 6 faces, each unique 1/4 × 1/3 portion', () => {
+    // Phase 7h v6: replace SphereGeometry with BoxGeometry + custom UV
+    // remap so each flat face shows a DIFFERENT portion of the same video.
+    // Default BoxGeometry UVs put the full texture on every face (visible
+    // repetition). The cube-cross layout assigns each face a unique
+    // 1/4 × 1/3 cell of the [0,1]² texture:
+    //
+    //            [ +Y top ]    col 1, row 0
+    //   [ -X ][ +Z ][ +X ][ -Z ]   cols 0..3, row 1
+    //            [ -Y bot ]    col 1, row 2
+    //
+    // Test asserts the new invariant: every face has its own UV range,
+    // each face spans exactly 1/4 of U and 1/3 of V, no two faces have
+    // identical (uMin, uMax, vMin, vMax), and the 6 ranges together
+    // tile [0,1]² (union of U = [0,1], union of V = [0,1]).
     const mesh = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const geom = (inner as any).geometry as SphereGeometry;
+    const geom = (inner as any).geometry as BoxGeometry;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const uvAttr = (geom.attributes as any).uv;
-    expect(uvAttr).toBeDefined();
-    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
-    for (let i = 0; i < uvAttr.count; i++) {
-      const u = uvAttr.getX(i);
-      const v = uvAttr.getY(i);
-      if (u < minU) minU = u;
-      if (u > maxU) maxU = u;
-      if (v < minV) minV = v;
-      if (v > maxV) maxV = v;
+
+    // BoxGeometry has 24 UVs (6 faces × 4 vertices). Each face's 4 UVs
+    // should be at the 4 corners of its assigned cell.
+    expect(uvAttr.count).toBe(24);
+
+    const faceRanges: Array<{ uMin: number; uMax: number; vMin: number; vMax: number }> = [];
+    for (let face = 0; face < 6; face++) {
+      let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+      for (let v = 0; v < 4; v++) {
+        const idx = face * 4 + v;
+        const u = uvAttr.getX(idx);
+        const vt = uvAttr.getY(idx);
+        if (u < uMin) uMin = u;
+        if (u > uMax) uMax = u;
+        if (vt < vMin) vMin = vt;
+        if (vt > vMax) vMax = vt;
+      }
+      faceRanges.push({ uMin, uMax, vMin, vMax });
     }
-    // UVs should span nearly the full [0,1] range — there should be vertices
-    // near both U=0 and U=1 (top/bottom of sphere wraps around) and near
-    // both V=0 and V=1 (poles). A tight cluster would indicate a coverage
-    // regression like the Phase 7h v2 icosahedron bug.
-    expect(maxU - minU).toBeGreaterThan(0.5);
-    expect(maxV - minV).toBeGreaterThan(0.5);
+
+    // Each face spans exactly 1/4 of the U axis and 1/3 of the V axis.
+    for (const range of faceRanges) {
+      expect(range.uMax - range.uMin).toBeCloseTo(0.25, 5);
+      expect(range.vMax - range.vMin).toBeCloseTo(1 / 3, 3);
+    }
+
+    // No two faces have IDENTICAL (uMin, uMax, vMin, vMax). Different
+    // faces can share U or V in the cube-cross (top/bottom/front all
+    // share col 1 in U), but the cells must differ.
+    for (let i = 0; i < 6; i++) {
+      for (let j = i + 1; j < 6; j++) {
+        const a = faceRanges[i];
+        const b = faceRanges[j];
+        const identical =
+          a.uMin === b.uMin && a.uMax === b.uMax &&
+          a.vMin === b.vMin && a.vMax === b.vMax;
+        expect(identical).toBe(false);
+      }
+    }
+
+    // The 6 faces together tile the [0,1]×[0,1] texture with no gaps.
+    const allUMins = faceRanges.map(r => r.uMin);
+    const allUMaxs = faceRanges.map(r => r.uMax);
+    const allVMins = faceRanges.map(r => r.vMin);
+    const allVMaxs = faceRanges.map(r => r.vMax);
+    expect(Math.min(...allUMins)).toBeCloseTo(0, 5);
+    expect(Math.max(...allUMaxs)).toBeCloseTo(1, 5);
+    expect(Math.min(...allVMins)).toBeCloseTo(0, 5);
+    expect(Math.max(...allVMaxs)).toBeCloseTo(1, 5);
   });
 
   it('wraps the geometry in a MeshStandardMaterial with a VideoTexture as emissiveMap', () => {
@@ -166,16 +217,22 @@ describe('createVideoAsteroidMesh', () => {
     expect(stash.texture).toBe(matEmissiveMap);
   });
 
-  it('produces meshes sized identically to SIZE_RADIUS for every AsteroidSize', () => {
-    // Phase 7h requirement: "must be made to the same size as the Original
-    // Generated Asteroid" — SIZE_RADIUS is the source of truth for collision
-    // and visual radius. Both come from the same constant, so the geometry
-    // parameters.radius must equal SIZE_RADIUS[size] exactly.
+  it('produces box meshes with side = SIZE_RADIUS[size] × 2 for every AsteroidSize', () => {
+    // Phase 7h v6 requirement: "must be made to the same size as the
+    // Original Generated Asteroid". For a BoxGeometry, that means each
+    // side equals the diameter of the original sphere (2 × radius).
+    // Both collision (in asteroid.ts:resolveAsteroidCollision) and visual
+    // radius (in asteroid.ts:SIZE_RADIUS) are still keyed on `radius`,
+    // but the box's bounding extent matches the sphere's diameter for
+    // world-space parity with v3/v4/v5.
     for (const size of [AsteroidSize.TINY, AsteroidSize.SMALL, AsteroidSize.MEDIUM, AsteroidSize.LARGE]) {
       const mesh = createVideoAsteroidMesh(size);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const geom = (mesh.children[0] as any).geometry as SphereGeometry;
-      expect(geom.parameters.radius).toBeCloseTo(SIZE_RADIUS[size]);
+      const geom = (mesh.children[0] as any).geometry as BoxGeometry;
+      const expectedSide = SIZE_RADIUS[size] * 2;
+      expect(geom.parameters.width).toBeCloseTo(expectedSide);
+      expect(geom.parameters.height).toBeCloseTo(expectedSide);
+      expect(geom.parameters.depth).toBeCloseTo(expectedSide);
     }
   });
 });

@@ -1,9 +1,10 @@
 import {
+  BoxGeometry,
+  BufferAttribute,
   Group,
   LinearFilter,
   Mesh,
   MeshStandardMaterial,
-  SphereGeometry,
   VideoTexture,
 } from 'three';
 import { AsteroidSize } from './types';
@@ -109,6 +110,45 @@ import { SIZE_RADIUS } from './asteroid';
 //          provides the visual interest — we don't need the light to
 //          add fake shading on top.
 //
+//          Phase 7h v6 — User reported v5's sphere still doesn't read
+//          as a "real asteroid mesh" (it looks like a sphere with video
+//          projected on it). User explicitly requested "square shape .
+//          and the video is on each flat side" — we swap SphereGeometry
+//          for BoxGeometry and rewrite the UVs to a cube-cross layout
+//          so every face shows a UNIQUE 1/4 × 1/3 portion of the video
+//          instead of all 6 faces sampling the same texture (which is
+//          what default BoxGeometry UVs do — every face gets the full
+//          [0,1]² texture, causing visible repetition).
+//
+//          BoxGeometry face group order is `+X, -X, +Y, -Y, +Z, -Z`
+//          (X-first — verified from node_modules/three/src/geometries/
+//          BoxGeometry.js:76-81). Each face is a 4-vertex quad with
+//          default UVs `(0,1)-(1,1)-(0,0)-(1,0)` (full texture per
+//          face). We replace this with the per-face slice table in
+//          FACE_UV_RANGES below.
+//
+//          Cube-cross layout (4 columns × 3 rows):
+//                    [ +Y top ]    col 1, row 0
+//            [ -X ][ +Z ][ +X ][ -Z ]  cols 0..3, row 1
+//                    [ -Y bot ]    col 1, row 2
+//
+//          Size: side = SIZE_RADIUS[size] * 2. The original Iron Slag
+//          asteroid was IcosahedronGeometry(radius), giving a bounding
+//          extent of 2r in diameter. v3/v4/v5 SphereGeometry preserved
+//          this. A unit cube of side `s` has the same bounding extent
+//          as a sphere of radius `s/2`, so `side = 2*radius` keeps the
+//          visual size identical to v5. Collision in `asteroid.ts:
+//          resolveAsteroidCollision` still keys on `radius` via the
+//          SIZE_RADIUS lookup — box bounding sphere matches the
+//          original Iron Slag's diameter for world-space parity.
+//
+//          v5 channel routing (map: null, color: 0x000000, emissiveMap
+//          only) is UNCHANGED. The only delta from v5 is geometry
+//          class + UV remap. The v5 "no PBR contour from the
+//          directional light" trade-off becomes invisible — each
+//          box face is intrinsically flat, so the lack of
+//          inter-quad PBR smoothing doesn't read as a regression.
+//
 // Gotchas:
 //  - The <video> element must be `muted=true` + `playsinline=true` +
 //    `loop=true`. Modern browsers refuse to autoplay audio, and we don't
@@ -142,6 +182,21 @@ import { SIZE_RADIUS } from './asteroid';
 //    inline `require('three')` calls).
 //  - SphereGeometry's UV coverage is INTRINSIC — every face samples a
 //    proper portion of the texture. No need for manual UV remapping.
+//  - Phase 7h v6 — BoxGeometry face order is `+X, -X, +Y, -Y, +Z, -Z`
+//    (X-first, NOT Z-first). Locked by video-asteroid.test.ts.
+//  - Phase 7h v6 — Default BoxGeometry UVs put the FULL texture on every
+//    face. The cube-cross remap in remapBoxUVsToCubeCross MUST always
+//    run, otherwise the box shows the same video content 6 times.
+//  - Phase 7h v6 — Box side = SIZE_RADIUS[size] × 2 (diameter). The
+//    collision/visual radius constant stays the same; only the box
+//    geometry's world-space extent is doubled.
+//  - Phase 7h v6 — Material channel routing (v5 contract) is UNCHANGED:
+//    `map: null`, `color: 0x000000`, `emissiveMap: texture` only. Do not
+//    re-introduce the diffuse `map` slot or the v4 lit-hemisphere
+//    additive-overshoot regression returns.
+//  - Phase 7h v6 — UV remap uses `new BufferAttribute(arr, 2)` (matches
+//    the crystal-fx.ts:863-865 idiom in this project). Float32BufferAttribute
+//    is equivalent but not the project style.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Path to the MP4 asset — Vite serves /public/video/* at /video/*.
@@ -225,27 +280,88 @@ function getOrCreateVideo(): { video: HTMLVideoElement; texture: VideoTexture } 
 }
 
 /**
- * Build a Group containing a SphereGeometry wrapped with the shared video
- * texture. Same physical radius as the original generated asteroid
- * (via SIZE_RADIUS[size]).
+ * Cube-cross UV layout. Each of the 6 BoxGeometry faces gets a unique
+ * 1/4 × 1/3 portion of the [0,1]² texture. BoxGeometry group order is
+ * `+X, -X, +Y, -Y, +Z, -Z` (X-first, verified from
+ * node_modules/three/src/geometries/BoxGeometry.js:76-81), so this array
+ * is keyed by that exact order.
  *
- * SphereGeometry (16 width segments × 12 height segments) was chosen over
- * IcosahedronGeometry because SphereGeometry has natural equirectangular
- * UVs that span the full 0-1 range across the entire surface — every face
- * of the sphere samples a proper portion of the video texture. With
- * IcosahedronGeometry at detail 0, the UVs cluster into 20 tiny triangles
- * that only sample a small wedge of the texture, leaving most of the
- * asteroid showing material base color (black when unlit).
+ * Standard cross unwrap (4 columns × 3 rows):
+ *            [ +Y top ]    col 1, row 0
+ *   [ -X ][ +Z ][ +X ][ -Z ]   cols 0..3, row 1
+ *            [ -Y bot ]    col 1, row 2
  *
- * The 16×12 sphere has 192 triangles vs the icosahedron's 80, so the
- * silhouette is slightly rounder. At gameplay camera distance (≈20u from
- * a 2.2u radius asteroid) this is barely perceptible.
+ * Each entry is [uMin, uMax, vMin, vMax] — the corners of that face's
+ * cell in texture space. The remap expands each entry into 4 vertex
+ * UVs (one per face-quad corner) when writing the attribute.
+ */
+const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> = [
+  [0.50, 0.75, 0.333, 0.667], // group 0: +X (right)   — col 2, row 1
+  [0.00, 0.25, 0.333, 0.667], // group 1: -X (left)    — col 0, row 1
+  [0.25, 0.50, 0.667, 1.000], // group 2: +Y (top)     — col 1, row 0
+  [0.25, 0.50, 0.000, 0.333], // group 3: -Y (bottom)  — col 1, row 2
+  [0.25, 0.50, 0.333, 0.667], // group 4: +Z (front)   — col 1, row 1
+  [0.75, 1.00, 0.333, 0.667], // group 5: -Z (back)    — col 3, row 1
+];
+
+/**
+ * Rewrite the BoxGeometry's UV attribute so each of the 6 faces samples
+ * a unique 1/4 × 1/3 portion of the texture (cube-cross unwrap). Default
+ * BoxGeometry UVs put the FULL [0,1]² texture on every face — visible
+ * repetition if left unchanged. We replace the UV attribute with the
+ * per-face slice table above.
+ *
+ * Each BoxGeometry face is a 4-vertex quad. Three.js emits the 4 UVs
+ * per face in this order (BoxGeometry.js:139-140):
+ *   vertex 0 → UV (0, 1)  — top-left  in face-quad local space
+ *   vertex 1 → UV (1, 1)  — top-right
+ *   vertex 2 → UV (0, 0)  — bottom-left
+ *   vertex 3 → UV (1, 0)  — bottom-right
+ *
+ * So for face `g` with UV range [uMin, uMax, vMin, vMax]:
+ *   vertex 0 → (uMin, vMax)  top-left of slice
+ *   vertex 1 → (uMax, vMax)  top-right
+ *   vertex 2 → (uMin, vMin)  bottom-left
+ *   vertex 3 → (uMax, vMin)  bottom-right
+ *
+ * 24 UVs total (6 faces × 4 vertices × 2 floats). UV remap doesn't
+ * touch positions or indices — CCW winding from outside stays correct,
+ * backface culling still applies.
+ */
+function remapBoxUVsToCubeCross(geometry: BoxGeometry): void {
+  const uvs = new Float32Array(24);
+  for (let face = 0; face < 6; face++) {
+    const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[face];
+    const base = face * 8; // each face is 4 vertices × 2 floats = 8 floats
+    uvs[base + 0] = uMin;
+    uvs[base + 1] = vMax; // vertex 0 top-left
+    uvs[base + 2] = uMax;
+    uvs[base + 3] = vMax; // vertex 1 top-right
+    uvs[base + 4] = uMin;
+    uvs[base + 5] = vMin; // vertex 2 bottom-left
+    uvs[base + 6] = uMax;
+    uvs[base + 7] = vMin; // vertex 3 bottom-right
+  }
+  // Matches crystal-fx.ts:863-865 idiom: new BufferAttribute(arr, 2)
+  geometry.setAttribute('uv', new BufferAttribute(uvs, 2));
+}
+
+/**
+ * Build a Group containing a BoxGeometry wrapped with the shared video
+ * texture. Same physical bounding extent as the v3-v5 SphereGeometry
+ * (side = SIZE_RADIUS[size] × 2 = original IcosahedronGeometry's diameter).
+ *
+ * Each of the 6 box faces samples a unique 1/4 × 1/3 portion of the
+ * video via remapBoxUVsToCubeCross (see FACE_UV_RANGES for the cube-cross
+ * table). Default BoxGeometry UVs put the full texture on every face —
+ * the remap is mandatory to avoid 6× visible repetition.
  */
 export function createVideoAsteroidMesh(size: AsteroidSize): Group {
-  const radius = SIZE_RADIUS[size];
+  const side = SIZE_RADIUS[size] * 2;
   const { texture } = getOrCreateVideo();
 
-  const geometry = new SphereGeometry(radius, 16, 12);
+  const geometry = new BoxGeometry(side, side, side);
+  remapBoxUVsToCubeCross(geometry);
   const material = new MeshStandardMaterial({
     // Phase 7h v5: route the video texture through emissiveMap ONLY, not
     // the diffuse `map` slot. The standard material shader does
