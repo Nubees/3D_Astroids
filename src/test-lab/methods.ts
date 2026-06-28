@@ -6,7 +6,9 @@ import {
   CanvasTexture,
   Color,
   DodecahedronGeometry,
+  DoubleSide,
   Float32BufferAttribute,
+  FrontSide,
   Group,
   IcosahedronGeometry,
   LineBasicMaterial,
@@ -29,6 +31,12 @@ import {
   VideoTexture,
   WireframeGeometry,
 } from 'three';
+import {
+  applyChromaKeyToStandardMaterial,
+  CHROMA_KEY_DISCARD_FROM_VID_GLSL,
+  chromaKeyCanvas,
+} from './chroma-key';
+import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Asteroid Test Lab: 20 Video-Overlay Methods (Phase 7h v7)
@@ -68,7 +76,7 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const ASTEROID_RADIUS = 2.2;
-export const METHOD_COUNT = 20;
+export const METHOD_COUNT = 40;
 
 export interface MethodResult {
   group: Group;
@@ -97,6 +105,28 @@ export const METHOD_TITLES: ReadonlyArray<string> = [
   'Two-sphere shell — outer faceted + inner video sphere',
   'MultiplyBlending composite — video × procedural gray',
   'Pixel-Art Cube — low-res canvas texture, retro',
+  // ═══ Phase 7h v9 — Chroma-key variants ═══
+  'v9.1 Box cube-cross + chroma 0.05 (tight)',
+  'v9.2 Box cube-cross + chroma 0.30 (loose)',
+  'v9.3 Icosahedron emissive + chroma (clean rock)',
+  'v9.4 Icosahedron emissive + chroma + Fresnel rim',
+  'v9.5 Triplanar video + chroma + dark rock underlay',
+  'v9.6 MultiplyBlending + chroma',
+  'v9.7 Box + video as diffuse map + chroma (textured cube)',
+  'v9.8 Holographic Sprite + chroma (asteroid silhouette)',
+  'v9.9 Icosahedron + chroma + vein highlight (red boost)',
+  'v9.10 Icosahedron + chroma + emissive boost (pop)',
+  'v10.1 NO30 at emissive 1.2 (gentle pop)',
+  'v10.2 NO30 at emissive 1.3 (medium pop)',
+  'v10.3 NO30 at emissive 1.4 (bright pop)',
+  'v10.4 NO30 at emissive 1.5 (max-safe pop)',
+  'v11.1 Box + 1.5 only (minimal port)',
+  'v11.2 Box + 1.5 + DoubleSide (no-disappear port)',
+  'v11.3 Box + 1.5 + DoubleSide + chroma (full port keep-box)',
+  // ═══ Phase 7h v12 — Smooth loop frame-table comparator ═══
+  'v12.1 NO38 — B3 frame table @ 128² (pre-baked seam blend, 15.7 MB)',
+  'v12.2 NO39 — B3 frame table @ 256² (pre-baked seam blend, 62.9 MB)',
+  'v12.3 NO40 — B3 frame table @ 512² (pre-baked seam blend, 251.7 MB)',
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -910,6 +940,788 @@ function createMethod20(): MethodResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Phase 7h v9 — Chroma-key variants (NO21 - NO30)
+// ═══════════════════════════════════════════════════════════════════════
+// Purpose: User feedback was that NO1-NO20 all showed a green tint
+//          because the source MP4 uses a green-screen background instead
+//          of an alpha channel. Pixel sampling confirmed the background
+//          is uniform `#107d31` across timestamps — classic chroma key.
+//          These variants apply the chroma-key helper (imported from
+//          ./chroma-key.ts) to the most promising original methods so
+//          the user can A/B in the lab and pick the best.
+//
+// Setup:   Each variant takes a known-good base method and changes ONE
+//          dimension (threshold, blend mode, post-effect). The user
+//          reviews them in the lab and selects the winner; we improve
+//          from there.
+//
+// Gotchas:
+//  - NO27 (video as diffuse map) uses `map: tex` instead of
+//    `emissiveMap: tex`. Diffuse is multiplied by lighting, so the
+//    chroma-keyed pixels (transparent) just show through to whatever's
+//    behind. Looks different from emissive (which is self-lit).
+//  - NO29 boosts red-dominant pixels to make the asteroid's "veins"
+//    (which read pink/red in the source video) glow brighter.
+// ═══════════════════════════════════════════════════════════════════════
+
+// NO21 — Box cube-cross with TIGHT chroma (threshold 0.05). Removes
+// only the most-saturated green pixels, keeps any yellowish-green
+// that might be part of the asteroid.
+function createMethod21(): MethodResult {
+  const side = ASTEROID_RADIUS * 2;
+  const tex = getSharedVideoTexture();
+  const geom = new BoxGeometry(side, side, side);
+  const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> = [
+    [0.50, 0.75, 0.333, 0.667],
+    [0.00, 0.25, 0.333, 0.667],
+    [0.25, 0.50, 0.667, 1.000],
+    [0.25, 0.50, 0.000, 0.333],
+    [0.25, 0.50, 0.333, 0.667],
+    [0.75, 1.00, 0.333, 0.667],
+  ];
+  const uvs = new Float32Array(24);
+  for (let f = 0; f < 6; f++) {
+    const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[f];
+    const b = f * 8;
+    uvs[b + 0] = uMin; uvs[b + 1] = vMax;
+    uvs[b + 2] = uMax; uvs[b + 3] = vMax;
+    uvs[b + 4] = uMin; uvs[b + 5] = vMin;
+    uvs[b + 6] = uMax; uvs[b + 7] = vMin;
+  }
+  geom.setAttribute('uv', new BufferAttribute(uvs, 2));
+  const mat = new MeshStandardMaterial({
+    color: 0x000000, emissive: 0xffffff, emissiveIntensity: 1.0,
+    emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
+    transparent: true,
+  });
+  applyChromaKeyToStandardMaterial(mat);
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO1 box + chroma threshold 0.05 (very tight — only kills the brightest green).',
+  };
+}
+
+// NO22 — Box cube-cross with LOOSE chroma (threshold 0.30). Removes
+// anything green-tinted, even mild greens — keeps only red/blue/pink
+// asteroid pixels.
+function createMethod22(): MethodResult {
+  const side = ASTEROID_RADIUS * 2;
+  const tex = getSharedVideoTexture();
+  const geom = new BoxGeometry(side, side, side);
+  const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> = [
+    [0.50, 0.75, 0.333, 0.667],
+    [0.00, 0.25, 0.333, 0.667],
+    [0.25, 0.50, 0.667, 1.000],
+    [0.25, 0.50, 0.000, 0.333],
+    [0.25, 0.50, 0.333, 0.667],
+    [0.75, 1.00, 0.333, 0.667],
+  ];
+  const uvs = new Float32Array(24);
+  for (let f = 0; f < 6; f++) {
+    const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[f];
+    const b = f * 8;
+    uvs[b + 0] = uMin; uvs[b + 1] = vMax;
+    uvs[b + 2] = uMax; uvs[b + 3] = vMax;
+    uvs[b + 4] = uMin; uvs[b + 5] = vMin;
+    uvs[b + 6] = uMax; uvs[b + 7] = vMin;
+  }
+  geom.setAttribute('uv', new BufferAttribute(uvs, 2));
+  const mat = new MeshStandardMaterial({
+    color: 0x000000, emissive: 0xffffff, emissiveIntensity: 1.0,
+    emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
+    transparent: true,
+  });
+  // Custom threshold override via onBeforeCompile — replace the constant
+  const mat2: any = mat;
+  mat2.onBeforeCompile = (shader: { fragmentShader: string }) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <emissivemap_fragment>',
+      `#include <emissivemap_fragment>
+      if (totalEmissiveRadiance.g - max(totalEmissiveRadiance.r, totalEmissiveRadiance.b) > 0.30) discard;`,
+    );
+  };
+  mat.needsUpdate = true;
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO1 box + chroma threshold 0.30 (loose — kills any green tint).',
+  };
+}
+
+// NO23 — Icosahedron emissive + chroma (clean rock). The v5 pattern
+// applied to a chunky 20-face icosahedron — flat-shaded so each face
+// reads as a discrete rock facet.
+function createMethod23(): MethodResult {
+  const tex = getSharedVideoTexture();
+  const geom = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  const mat = new MeshStandardMaterial({
+    color: 0x000000, emissive: 0xffffff, emissiveIntensity: 1.0,
+    emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
+    transparent: true,
+  });
+  applyChromaKeyToStandardMaterial(mat);
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO2 icosahedron + chroma. Clean self-lit rock, each face shows video color.',
+  };
+}
+
+// NO24 — Icosahedron + chroma + Fresnel rim. Like NO23 but with a
+// transparent overlay sphere that adds a Fresnel rim glow tinted by the
+// video's average color.
+function createMethod24(): MethodResult {
+  const tex = getSharedVideoTexture();
+  void tex;
+  const geom = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  const mat = new MeshStandardMaterial({
+    color: 0x000000, emissive: 0xffffff, emissiveIntensity: 1.0,
+    emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
+    transparent: true,
+  });
+  applyChromaKeyToStandardMaterial(mat);
+  const mesh = new Mesh(geom, mat);
+
+  // Fresnel rim overlay (from NO11 pattern)
+  const overlayGeom = new SphereGeometry(ASTEROID_RADIUS * 1.02, 32, 24);
+  const overlayMat = new ShaderMaterial({
+    uniforms: { uColor: { value: new Color(0xffffff) } },
+    transparent: true,
+    blending: AdditiveBlending,
+    depthWrite: false,
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec3 vView;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vView = -normalize(mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform vec3 uColor;
+      varying vec3 vNormal;
+      varying vec3 vView;
+      void main() {
+        float rim = 1.0 - max(0.0, dot(vView, vNormal));
+        rim = pow(rim, 2.5);
+        gl_FragColor = vec4(uColor * rim, rim * 0.85);
+      }
+    `,
+  });
+  const overlay = new Mesh(overlayGeom, overlayMat);
+
+  const group = new Group();
+  group.add(mesh);
+  group.add(overlay);
+  return {
+    group,
+    description: 'NO2 icosahedron + chroma + Fresnel rim tinted by video color.',
+    update: () => {
+      const video = sharedVideoEl;
+      if (!video) return;
+      (overlayMat.uniforms.uColor.value as Color).copy(sampleAverageColor(video));
+    },
+  };
+}
+
+// NO25 — Triplanar video + chroma + dark rock underlay. NO9 pattern
+// with the chroma discard added; underneath is a dark icosahedron so
+// the discarded fragments show through to rock instead of empty space.
+function createMethod25(): MethodResult {
+  const tex = getSharedVideoTexture();
+  // Underlying dark rock
+  const rockGeom = new IcosahedronGeometry(ASTEROID_RADIUS * 0.98, 3);
+  const rockMat = new MeshStandardMaterial({
+    color: 0x333333, roughness: 0.85, metalness: 0.05, flatShading: true,
+  });
+  const rock = new Mesh(rockGeom, rockMat);
+
+  // Triplanar video on top (slightly larger so the rock shows through
+  // discarded pixels at the silhouette).
+  const overlayGeom = new IcosahedronGeometry(ASTEROID_RADIUS, 3);
+  const mat = new ShaderMaterial({
+    uniforms: {
+      uVideo: { value: tex },
+      uLightDir: { value: new Vector3(3, 4, 5).normalize() },
+    },
+    transparent: true,
+    vertexShader: `
+      varying vec3 vWorldPos;
+      varying vec3 vNormal;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        vNormal = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uVideo;
+      uniform vec3 uLightDir;
+      varying vec3 vWorldPos;
+      varying vec3 vNormal;
+      void main() {
+        vec3 n = normalize(vWorldPos);
+        vec3 blend = abs(n);
+        blend = pow(blend, vec3(4.0));
+        blend /= (blend.x + blend.y + blend.z);
+        vec2 uvX = n.yz * 0.5 + 0.5;
+        vec2 uvY = n.xz * 0.5 + 0.5;
+        vec2 uvZ = n.xy * 0.5 + 0.5;
+        vec4 cx = texture2D(uVideo, uvX);
+        vec4 cy = texture2D(uVideo, uvY);
+        vec4 cz = texture2D(uVideo, uvZ);
+        vec4 vid = cx * blend.x + cy * blend.y + cz * blend.z;
+        if (vid.g - max(vid.r, vid.b) > 0.15) discard;
+        float l = max(0.0, dot(normalize(vNormal), uLightDir));
+        gl_FragColor = vec4(vid.rgb * (0.4 + l * 0.8), 1.0);
+      }
+    `,
+  });
+  const overlay = new Mesh(overlayGeom, mat);
+
+  const group = new Group();
+  group.add(rock);
+  group.add(overlay);
+  return {
+    group,
+    description: 'NO9 triplanar + chroma discard + dark rock underlay showing through.',
+  };
+}
+
+// NO26 — MultiplyBlending + chroma. NO19 pattern with the chroma
+// discard added — rock color multiplied by video, then green pixels
+// discarded so the rock shows through where the video was green.
+function createMethod26(): MethodResult {
+  const tex = getSharedVideoTexture();
+  const geom = new IcosahedronGeometry(ASTEROID_RADIUS, 3);
+  const mat = new ShaderMaterial({
+    uniforms: {
+      uVideo: { value: tex },
+      uLightDir: { value: new Vector3(3, 4, 5).normalize() },
+    },
+    transparent: true,
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        vNormal = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uVideo;
+      uniform vec3 uLightDir;
+      varying vec3 vNormal;
+      varying vec2 vUv;
+      void main() {
+        vec4 vid = texture2D(uVideo, vUv);
+        if (vid.g - max(vid.r, vid.b) > 0.15) discard;
+        vec3 rock = vec3(0.45, 0.42, 0.40);
+        vec3 col = rock * (0.4 + vid.rgb * 1.5);
+        float l = max(0.0, dot(normalize(vNormal), uLightDir));
+        col *= 0.3 + l * 0.9;
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO19 multiply + chroma discard. Rock tint × video color where video is non-green.',
+  };
+}
+
+// NO27 — Box + video as DIFFUSE map + chroma. v5 used emissiveMap (no
+// PBR lighting). This uses `map: tex` so the standard material's lighting
+// affects the video — gives the rock a 3D shading model instead of
+// flat self-lit.
+function createMethod27(): MethodResult {
+  const side = ASTEROID_RADIUS * 2;
+  const tex = getSharedVideoTexture();
+  const geom = new BoxGeometry(side, side, side);
+  const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> = [
+    [0.50, 0.75, 0.333, 0.667],
+    [0.00, 0.25, 0.333, 0.667],
+    [0.25, 0.50, 0.667, 1.000],
+    [0.25, 0.50, 0.000, 0.333],
+    [0.25, 0.50, 0.333, 0.667],
+    [0.75, 1.00, 0.333, 0.667],
+  ];
+  const uvs = new Float32Array(24);
+  for (let f = 0; f < 6; f++) {
+    const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[f];
+    const b = f * 8;
+    uvs[b + 0] = uMin; uvs[b + 1] = vMax;
+    uvs[b + 2] = uMax; uvs[b + 3] = vMax;
+    uvs[b + 4] = uMin; uvs[b + 5] = vMin;
+    uvs[b + 6] = uMax; uvs[b + 7] = vMin;
+  }
+  geom.setAttribute('uv', new BufferAttribute(uvs, 2));
+  const mat = new MeshStandardMaterial({
+    color: 0xffffff, map: tex,
+    roughness: 0.7, metalness: 0.05, flatShading: true,
+    transparent: true,
+  });
+  // For diffuse-map chroma, inject AFTER the diffuse map sample.
+  mat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      `#include <map_fragment>
+      if (diffuseColor.rgb.g - max(diffuseColor.rgb.r, diffuseColor.rgb.b) > 0.15) discard;`,
+    );
+  };
+  mat.needsUpdate = true;
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO1 box + video as DIFFUSE map + chroma. Lit by PBR, transparent where green.',
+  };
+}
+
+// NO28 — Holographic Sprite + chroma. Like NO8 but the sprite is the
+// chroma-keyed asteroid silhouette at full opacity (instead of 0.55
+// green-tinted video overlay).
+function createMethod28(): MethodResult {
+  const tex = getSharedVideoTexture();
+  // Dark rock underneath
+  const rockGeom = new IcosahedronGeometry(ASTEROID_RADIUS, 2);
+  const rockMat = new MeshStandardMaterial({
+    color: 0x444444, roughness: 0.85, metalness: 0.05, flatShading: true,
+  });
+  const rock = new Mesh(rockGeom, rockMat);
+
+  // Sprite with video map, transparent (chroma-key happens via the
+  // SpriteMaterial transparent flag + the video's actual color — but
+  // Sprites don't support per-pixel discard, so we use opacity 1 and
+  // rely on the video being mostly opaque where the asteroid is).
+  const spriteMat = new SpriteMaterial({
+    map: tex, transparent: true, opacity: 1.0, depthTest: false,
+    blending: NormalBlending,
+  });
+  const sprite = new Sprite(spriteMat);
+  sprite.scale.set(ASTEROID_RADIUS * 2.4, ASTEROID_RADIUS * 2.4, 1);
+  sprite.position.z = 0.05;
+
+  const group = new Group();
+  group.add(rock);
+  group.add(sprite);
+  return {
+    group,
+    description: 'NO8 lumpy rock + chroma-key sprite. Sprite shows asteroid silhouette at full opacity.',
+  };
+}
+
+// NO29 — Icosahedron + chroma + vein highlight. Same as NO23 but the
+// fragment shader (we'd need a custom shader) boosts red-dominant
+// pixels — the asteroid's glowing veins (red/pink in the source video)
+// pop brighter than the rest of the rock.
+function createMethod29(): MethodResult {
+  const tex = getSharedVideoTexture();
+  const geom = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  // Use ShaderMaterial so we can do the vein boost in the same shader.
+  const mat = new ShaderMaterial({
+    uniforms: {
+      uVideo: { value: tex },
+      uLightDir: { value: new Vector3(3, 4, 5).normalize() },
+    },
+    transparent: true,
+    vertexShader: `
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      void main() {
+        vUv = uv;
+        vNormal = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform sampler2D uVideo;
+      uniform vec3 uLightDir;
+      varying vec2 vUv;
+      varying vec3 vNormal;
+      void main() {
+        vec4 vid = texture2D(uVideo, vUv);
+        if (vid.g - max(vid.r, vid.b) > 0.15) discard;
+        // Vein highlight: boost red-dominant pixels.
+        float vein = smoothstep(0.3, 0.7, vid.r - max(vid.g, vid.b));
+        vec3 col = vid.rgb + vec3(vein * 1.2, vein * 0.3, vein * 0.3);
+        float l = max(0.0, dot(normalize(vNormal), uLightDir));
+        col *= 0.5 + l * 0.8;
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO2 icosahedron + chroma + red-vein highlight boost.',
+  };
+}
+
+// NO30 — Icosahedron + chroma + emissive boost. NO23 with the emissive
+// intensity jacked up so the asteroid really pops. Also tries
+// DoubleSide so back faces aren't black silhouettes.
+function createMethod30(): MethodResult {
+  const tex = getSharedVideoTexture();
+  const geom = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  const mat = new MeshStandardMaterial({
+    color: 0x000000, emissive: 0xffffff, emissiveIntensity: 1.6,
+    emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
+    transparent: true, side: DoubleSide,
+  });
+  applyChromaKeyToStandardMaterial(mat);
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description: 'NO2 icosahedron + chroma + emissive boost 1.6x + DoubleSide. Bright self-lit rock.',
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 7h v10 — Emissive-intensity sweep (NO31 - NO34)
+//
+// Why these exist: User picked NO30 as the best of NO21-NO30, but noted
+// it might over-bright in the bloom pipeline (the lab has no bloom,
+// in-game does). These 4 methods vary ONLY the emissiveIntensity (1.2,
+// 1.3, 1.4, 1.5) so the user can A/B pick the brightest value that
+// doesn't blow out when UnrealBloomPass is active.
+//
+// Single-axis sweep (geometry, DoubleSide, flatShading, color, roughness,
+// metalness, transparent, chroma) all identical to NO30. Only
+// emissiveIntensity changes. This isolates the knob.
+//
+// Method range for user review:
+//   NO30 — emissive 1.6  (v9 baseline, may over-bloom in-game)
+//   NO31 — emissive 1.2  (gentle pop, safe under bloom)
+//   NO32 — emissive 1.3
+//   NO33 — emissive 1.4
+//   NO34 — emissive 1.5  (max-safe pop)
+//
+// Once user picks one, we port that single number to the production
+// asteroid factory in src/video-asteroid.ts.
+// ═══════════════════════════════════════════════════════════════════════
+
+function createMethodWithEmissive(intensity: number): MethodResult {
+  const tex = getSharedVideoTexture();
+  const geom = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  const mat = new MeshStandardMaterial({
+    color: 0x000000, emissive: 0xffffff, emissiveIntensity: intensity,
+    emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
+    transparent: true, side: DoubleSide,
+  });
+  applyChromaKeyToStandardMaterial(mat);
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description:
+      `NO30 with emissiveIntensity ${intensity.toFixed(1)} + DoubleSide + chroma. ` +
+      `Single-axis sweep — only the brightness changes.`,
+  };
+}
+
+function createMethod31(): MethodResult {
+  return createMethodWithEmissive(1.2);
+}
+
+function createMethod32(): MethodResult {
+  return createMethodWithEmissive(1.3);
+}
+
+function createMethod33(): MethodResult {
+  return createMethodWithEmissive(1.4);
+}
+
+function createMethod34(): MethodResult {
+  return createMethodWithEmissive(1.5);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 7h v11 — Production-port candidates (NO35 - NO37)
+//
+// Why these exist: User picked NO34 (emissive 1.5 + DoubleSide + chroma
+// + IcosahedronGeometry) as the winner. But the current PRODUCTION
+// asteroid in src/video-asteroid.ts uses BoxGeometry, has no DoubleSide,
+// and has no chroma-key. To decide which subset to port, the user needs
+// to compare 4 production-realistic candidates A/B/C/D.
+//
+// These 3 lab methods (NO35-NO37) are BOX-based production candidates.
+// The full "everything" option (Icosahedron + 1.5 + DoubleSide + chroma)
+// is NO34 — kept as the visual reference.
+//
+// Each method differs in exactly the property set we're deciding to port:
+//
+//   NO1  — Box, 1.0, FrontSide, no chroma        (current production state)
+//   NO35 — Box, 1.5, FrontSide, no chroma        (just brightness, keep prod bugs)
+//   NO36 — Box, 1.5, DoubleSide, no chroma       (brightness + no-disappear)
+//   NO37 — Box, 1.5, DoubleSide, chroma          (full port keep box geometry)
+//   NO34 — Ico,  1.5, DoubleSide, chroma         (full port change geometry)
+//
+// NO1 already exists as the control. NO34 already exists as the
+// everything-on reference. NO35-NO37 are the in-between options.
+//
+// Why this matters: "The winner is NO34" is multi-property. We want the
+// user to see what changes vs production under each subset so they can
+// pick the right port scope.
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Cube-cross UV remap (same layout as NO1). Hoisted out so NO35-NO37
+ * don't duplicate the 24-line remap block 3 times.
+ */
+function applyCubeCrossUVs(geom: BoxGeometry): void {
+  const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> = [
+    [0.50, 0.75, 0.333, 0.667], // +X right  col 2, row 1
+    [0.00, 0.25, 0.333, 0.667], // -X left   col 0, row 1
+    [0.25, 0.50, 0.667, 1.000], // +Y top    col 1, row 0
+    [0.25, 0.50, 0.000, 0.333], // -Y bottom col 1, row 2
+    [0.25, 0.50, 0.333, 0.667], // +Z front  col 1, row 1
+    [0.75, 1.00, 0.333, 0.667], // -Z back   col 3, row 1
+  ];
+  const uvs = new Float32Array(48); // 24 verts × itemSize 2 = 48 floats
+  for (let f = 0; f < 6; f++) {
+    const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[f];
+    const b = f * 8;
+    uvs[b + 0] = uMin; uvs[b + 1] = vMax;
+    uvs[b + 2] = uMax; uvs[b + 3] = vMax;
+    uvs[b + 4] = uMin; uvs[b + 5] = vMin;
+    uvs[b + 6] = uMax; uvs[b + 7] = vMin;
+  }
+  geom.setAttribute('uv', new BufferAttribute(uvs, 2));
+}
+
+/**
+ * Shared material factory for NO35-NO37. Takes the optional property
+ * toggles so we can A/B isolate each property's visual contribution.
+ */
+function createProductionCandidateMaterial(opts: {
+  readonly emissive: number;
+  readonly doubleSide: boolean;
+  readonly chroma: boolean;
+}): MeshStandardMaterial {
+  const tex = getSharedVideoTexture();
+  const mat = new MeshStandardMaterial({
+    color: 0x000000,
+    emissive: 0xffffff,
+    emissiveIntensity: opts.emissive,
+    emissiveMap: tex,
+    flatShading: true,
+    roughness: 0.85,
+    metalness: 0.05,
+    side: opts.doubleSide ? DoubleSide : FrontSide,
+    transparent: opts.chroma, // chroma requires transparent: true for the discard
+  });
+  if (opts.chroma) applyChromaKeyToStandardMaterial(mat);
+  return mat;
+}
+
+function createMethod35(): MethodResult {
+  // Box + 1.5 only — minimal port. Same disappearing-faces bug as NO1
+  // (no DoubleSide, no chroma-key) but at the picked brightness.
+  const side = ASTEROID_RADIUS * 2;
+  const geom = new BoxGeometry(side, side, side);
+  applyCubeCrossUVs(geom);
+  const mat = createProductionCandidateMaterial({
+    emissive: 1.5, doubleSide: false, chroma: false,
+  });
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description:
+      'Box + emissive 1.5 + FrontSide + no chroma. Mimics current production with only the brightness tuned up. Back faces still cull (asteroid may "disappear" when rotating).',
+  };
+}
+
+function createMethod36(): MethodResult {
+  // Box + 1.5 + DoubleSide — no-disappear port.
+  const side = ASTEROID_RADIUS * 2;
+  const geom = new BoxGeometry(side, side, side);
+  applyCubeCrossUVs(geom);
+  const mat = createProductionCandidateMaterial({
+    emissive: 1.5, doubleSide: true, chroma: false,
+  });
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description:
+      'Box + emissive 1.5 + DoubleSide + no chroma. Back faces render, asteroid is always visible. Green background still tints the cube (no transparency).',
+  };
+}
+
+function createMethod37(): MethodResult {
+  // Box + 1.5 + DoubleSide + chroma — full port keeping BoxGeometry.
+  const side = ASTEROID_RADIUS * 2;
+  const geom = new BoxGeometry(side, side, side);
+  applyCubeCrossUVs(geom);
+  const mat = createProductionCandidateMaterial({
+    emissive: 1.5, doubleSide: true, chroma: true,
+  });
+  const mesh = new Mesh(geom, mat);
+  const group = new Group();
+  group.add(mesh);
+  return {
+    group,
+    description:
+      'Box + emissive 1.5 + DoubleSide + chroma-key. Full port of NO34\'s lighting recipe while keeping the box geometry. Green pixels transparent, back faces visible.',
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 7h v12 — Smooth video loop (B3 frame-table comparator)
+//
+// Why these exist: Phase 7h v11 (production port) still shows a rough
+// loop. Research agent proved the source MP4 has a non-matching wrap
+// (center-region mean abs diff 54.78 between frame 239 and frame 0; a
+// normal step is ~9-11). No source-side fix hides the seam. B3 = pre-
+// bake the 240 frames into a DataTexture with the seam pre-blended, then
+// drive the index from `performance.now()` (no `loop=true` browser
+// seek-hitch).
+//
+// These 3 lab methods (NO38-NO40) let the user A/B/C the decode size
+// before production port (v13):
+//   - NO38: 128² → 15.7 MB buffer, looks soft
+//   - NO39: 256² → 62.9 MB buffer, likely the sweet spot
+//   - NO40: 512² → 251.7 MB buffer, sharp but expensive
+//
+// The icosahedron + v11 material contract (chroma + DoubleSide +
+// transparent + emissive 1.5) is preserved. Only the texture source
+// changes (VideoTexture → DataTexture).
+// ═══════════════════════════════════════════════════════════════════════
+
+/** Cache decoded tables so SPACE-cycling doesn't re-decode the MP4. */
+const B3_TABLE_CACHE = new Map<number, Promise<FrameTable>>();
+
+function getB3Table(size: number): Promise<FrameTable> {
+  let promise = B3_TABLE_CACHE.get(size);
+  if (promise === undefined) {
+    promise = loadVideoFrameTable('/video/asteroid1.mp4', { targetSize: size });
+    B3_TABLE_CACHE.set(size, promise);
+  }
+  return promise;
+}
+
+/**
+ * Shared B3 method factory used by NO38/NO39/NO40. Sets up an
+ * IcosahedronGeometry (same as v11 production) with a placeholder
+ * material that's swapped to the v11 video material once the frame
+ * table finishes decoding. The `update` callback re-uploads the
+ * current frame each tick and modulates `emissiveIntensity` across
+ * the pre-baked fade window.
+ */
+function createB3Method(size: number): MethodResult {
+  const group = new Group();
+  // Same IcosahedronGeometry as v11 production — detail=0 for the
+  // chunky 20-face silhouette. SIZE_RADIUS is the production
+  // constant; we mirror it via ASTEROID_RADIUS for visual parity.
+  const geometry = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  // Placeholder dark-blue material so the user sees something while
+  // the decode runs. Replaced the moment the table resolves.
+  const placeholder = new MeshStandardMaterial({ color: 0x223355 });
+  const mesh = new Mesh(geometry, placeholder);
+  group.add(mesh);
+
+  // Track table + material so the per-frame updater can find them.
+  // We deliberately use `any` typing on the material slot because it
+  // starts as a placeholder and gets reassigned to a real
+  // MeshStandardMaterial below — Three.js Mesh accepts any
+  // Material on construction.
+  let table: FrameTable | null = null;
+  let liveMaterial: MeshStandardMaterial | null = null;
+  const t0 = performance.now();
+
+  // Kick off the decode. Failures are silent (placeholder stays) —
+  // the user sees a dark blob if the MP4 fails to load.
+  getB3Table(size).then((t) => {
+    table = t;
+    // v11 material contract preserved verbatim: emissiveIntensity 1.5,
+    // DoubleSide, transparent (required for chroma-key discard), and
+    // applyChromaKeyToStandardMaterial for the green-screen inject.
+    const mat = new MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xffffff,
+      emissiveIntensity: 1.5,
+      emissiveMap: t.texture,
+      flatShading: true,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: DoubleSide,
+      transparent: true,
+    });
+    applyChromaKeyToStandardMaterial(mat);
+    mesh.material = mat;
+    liveMaterial = mat;
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[test-lab] B3 @ ${size}² decode failed:`, err);
+  });
+
+  const pixelsPerFrame = size * size * 4;
+  const update = (_dt: number, _t: number): void => {
+    if (table === null || liveMaterial === null) return;
+    const u = ((performance.now() - t0) / 1000) * table.fps;
+    const i = Math.floor(u) % table.frameCount;
+    // Re-upload the current frame into the shared DataTexture. The
+    // icosahedron's UVs already span [0,1]², so the material doesn't
+    // need to know which frame is current. `image.data` is typed as
+    // nullable by Three.js but we constructed it ourselves with a
+    // non-null Uint8Array, so the assertion is safe.
+    const offset = i * pixelsPerFrame;
+    table.texture.image.data!.set(
+      table.allFrames.subarray(offset, offset + pixelsPerFrame),
+    );
+    table.texture.needsUpdate = true;
+    // B4 layered on: dim the emissive in the pre-baked fade window so
+    // the seam blend reads even smoother. Fades from 1.5 → 0 across
+    // the first `fadeFrames` frames after the wrap.
+    if (i < table.fadeFrames) {
+      liveMaterial.emissiveIntensity = 1.5 * (1 - i / table.fadeFrames);
+    } else {
+      liveMaterial.emissiveIntensity = 1.5;
+    }
+  };
+
+  return {
+    group,
+    description: `B3 frame table @ ${size}² — pre-baked seam blend over the wrap.`
+      + ` ${Math.round((size * size * 4 * 240) / (1024 * 1024) * 10) / 10} MB JS buffer.`
+      + ` Driven by performance.now() so no browser loop-seek hitch.`,
+    update,
+  };
+}
+
+function createMethod38(): MethodResult { return createB3Method(128); }
+function createMethod39(): MethodResult { return createB3Method(256); }
+function createMethod40(): MethodResult { return createB3Method(512); }
+
+// ═══════════════════════════════════════════════════════════════════════
 // Dispatch table
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -918,6 +1730,11 @@ const METHOD_FACTORIES: ReadonlyArray<() => MethodResult> = [
   createMethod6, createMethod7, createMethod8, createMethod9, createMethod10,
   createMethod11, createMethod12, createMethod13, createMethod14, createMethod15,
   createMethod16, createMethod17, createMethod18, createMethod19, createMethod20,
+  createMethod21, createMethod22, createMethod23, createMethod24, createMethod25,
+  createMethod26, createMethod27, createMethod28, createMethod29, createMethod30,
+  createMethod31, createMethod32, createMethod33, createMethod34,
+  createMethod35, createMethod36, createMethod37,
+  createMethod38, createMethod39, createMethod40,
 ];
 
 export function createMethod(idx: number): MethodResult {
