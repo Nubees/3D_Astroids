@@ -28,11 +28,15 @@
   pointer-events: auto;
 }
 
-/* My Rules — Ship Hangar launcher icon in the top-left of the overlay. */
-.ship-select-hangar-icon {
+/* My Rules — Ship Select toolbar icons (top-left launcher pair).
+   Phase 7h v8 added the Asteroid Lab icon next to the existing Ship
+   Hangar icon. Both buttons share the visual treatment (cyan border,
+   hex clip-path, 44x44, hover scale + glow) — they differ only in
+   position (left:18px for Hangar, left:74px for Lab) and SVG inside. */
+.ship-select-hangar-icon,
+.ship-select-lab-icon {
   position: absolute;
   top: 18px;
-  left: 18px;
   appearance: none;
   border: 1px solid rgba(0, 234, 255, 0.45);
   background: rgba(0, 20, 40, 0.75);
@@ -55,7 +59,17 @@
   transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
-.ship-select-hangar-icon:hover {
+.ship-select-hangar-icon {
+  left: 18px;
+}
+
+.ship-select-lab-icon {
+  /* Hangar (44px) + 12px gap + 18px page padding = 74px */
+  left: 74px;
+}
+
+.ship-select-hangar-icon:hover,
+.ship-select-lab-icon:hover {
   transform: scale(1.08);
   border-color: #00eaff;
   box-shadow: 0 0 18px rgba(0, 234, 255, 0.45);

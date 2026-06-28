@@ -124,16 +124,31 @@ export class ShipSelectScreen {
     overlay.className = 'ship-select-overlay';
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // My Rules — Ship Hangar Launcher Icon
+    // My Rules — Ship Select toolbar icons (top-left launcher pair)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Purpose: Give players a discoverable way to open the Ship Hangar so they
-    //          can tune exhaust flame position and color before flying.
-    // Setup: A small icon in the top-left of the overlay navigates to
-    //        /ships-inspector.html, which is now a production build entry point.
-    // Issues: The hangar was previously only reachable by typing the dev URL.
-    // Fix: Added a clickable wrench/rocket icon with a tooltip label.
-    // Gotchas: The icon must be pointer-events enabled on an otherwise disabled
-    //          overlay layer. Returning players use browser back to come back.
+    // Purpose: Give players a discoverable way to open the Ship Hangar
+    //          (tune exhaust flames) AND the Asteroid Lab (compare 20
+    //          video-textured asteroid methods, Phase 7h v7) before flying.
+    // Setup:   Two small icons in the top-left of the overlay, side by
+    //          side as a toolbar pair. The Hangar navigates to
+    //          /ships-inspector.html; the Lab navigates to
+    //          /test-lab/asteroid-lab.html. Both use the same cyan-bordered
+    //          hex clip-path visual treatment (see .ship-select-{hangar,
+    //          lab}-icon in ship-select.css) — only position differs.
+    // Issues:  Before Phase 7h v8 the hangar was the only launcher icon;
+    //          the test lab was reachable only via direct URL. Players
+    //          reviewing v6 / v7 / v8 video-asteroid methods had no
+    //          discoverable entry point.
+    // Fix:     Added the Lab icon immediately to the right of the
+    //          Hangar icon (Hangar at left:18px, Lab at left:74px —
+    //          44px button + 12px gap + 18px page padding).
+    // Gotchas: Both icons live on the ship-select overlay which is
+    //          pointer-events: none — the icons themselves must opt back
+    //          in with pointer-events: auto (handled by the shared CSS
+    //          class). Returning players use browser back to return.
+    //          publicDir is enabled in vite.config.ts so
+    //          public/test-lab/asteroid-lab.html ships to dist/ in
+    //          production builds alongside dist/ships-inspector.html.
     // ═══════════════════════════════════════════════════════════════════════════
     const hangarButton = document.createElement('button');
     hangarButton.className = 'ship-select-hangar-icon';
@@ -145,6 +160,22 @@ export class ShipSelectScreen {
       window.location.href = '/ships-inspector.html';
     });
     overlay.appendChild(hangarButton);
+
+    // Asteroid Lab — Phase 7h v7 test lab at /test-lab/asteroid-lab.html
+    // (20 numbered video-overlay methods, spacebar-cycled).
+    const labButton = document.createElement('button');
+    labButton.className = 'ship-select-lab-icon';
+    labButton.type = 'button';
+    labButton.setAttribute('aria-label', 'Open Asteroid Lab');
+    labButton.title = 'Open Asteroid Lab';
+    // Faceted asteroid outline + filled play-triangle inside (the
+    // triangle reads as "video" / "play" — the lab is for video-textured
+    // asteroid methods).
+    labButton.innerHTML = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 3.2 L19 7 L20.8 12 L18 17.5 L13 20.5 L7.5 19 L4 14.5 L5 8.5 L9.5 4.5 Z"/><path d="M10 9.5 L15 12 L10 14.5 Z" fill="currentColor" stroke="none"/></svg>`;
+    labButton.addEventListener('click', () => {
+      window.location.href = '/test-lab/asteroid-lab.html';
+    });
+    overlay.appendChild(labButton);
 
     const title = document.createElement('h1');
     title.className = 'ship-select-title';
