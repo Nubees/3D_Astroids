@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asteroid Test Lab — Video Methods</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #050510;
+      font-family: monospace;
+      color: #88ddff;
+    }
+    canvas#lab-canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px solid rgba(136, 221, 255, 0.4);
+      padding: 10px 14px;
+      border-radius: 4px;
+      font-size: 13px;
+      line-height: 1.5;
+      max-width: 480px;
+      pointer-events: none;
+      z-index: 10;
+    }
+    #hud .title {
+      color: #ffcc44;
+      font-weight: bold;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    #hud .desc {
+      color: #aaccee;
+      font-size: 11px;
+    }
+    #hud .hint {
+      margin-top: 8px;
+      color: #88ddff;
+      font-size: 11px;
+      opacity: 0.8;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="lab-canvas"></canvas>
+  <div id="hud">
+    <div class="title" id="hud-title">Method NO1</div>
+    <div class="desc" id="hud-desc">Loading...</div>
+    <div class="hint">[space] next method · [r] reset · [left/right] skip ±5</div>
+  </div>
+  <script type="module" src="/src/test-lab/lab.ts"></script>
+</body>
+</html>

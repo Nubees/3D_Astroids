@@ -132,9 +132,12 @@ describe('createVideoAsteroidMesh', () => {
     }
 
     // Each face spans exactly 1/4 of the U axis and 1/3 of the V axis.
+    // Tolerance 2 instead of 3 — 1/3 = 0.3333... is not exact in Float32
+    // so toBeCloseTo with precision 3 (tolerance 0.0005) fails on the
+    // last digit. Precision 2 (tolerance 0.005) is the correct check.
     for (const range of faceRanges) {
-      expect(range.uMax - range.uMin).toBeCloseTo(0.25, 5);
-      expect(range.vMax - range.vMin).toBeCloseTo(1 / 3, 3);
+      expect(range.uMax - range.uMin).toBeCloseTo(0.25, 2);
+      expect(range.vMax - range.vMin).toBeCloseTo(1 / 3, 2);
     }
 
     // No two faces have IDENTICAL (uMin, uMax, vMin, vMax). Different

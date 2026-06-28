@@ -197,6 +197,17 @@ import { SIZE_RADIUS } from './asteroid';
 //  - Phase 7h v6 — UV remap uses `new BufferAttribute(arr, 2)` (matches
 //    the crystal-fx.ts:863-865 idiom in this project). Float32BufferAttribute
 //    is equivalent but not the project style.
+//  - Phase 7h v7 — CRITICAL GOTCHA: BufferGeometry attributes are sized in
+//    FLOATS, not items. BoxGeometry has 24 unique vertices (one per
+//    face-corner, NOT shared across faces). With itemSize=2 (vec2 UVs),
+//    the Float32Array must be `24 × 2 = 48` floats long. An earlier
+//    mistake used `new Float32Array(24)` which produced only 12 UV
+//    entries (24/2 = 12) — Three.js then read past the buffer for the
+//    remaining 12 vertices, sampling garbage UVs (0,0 in adjacent memory)
+//    and rendering those faces with whatever texture pixel sits at
+//    `(0,0)` — likely a green-dominant region of the source MP4. This
+//    was the root cause of the v6 user report "the box is there, but
+//    it is all green .. no video". Fix: 48 floats, not 24.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Path to the MP4 asset — Vite serves /public/video/* at /video/*.
@@ -329,7 +340,13 @@ const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> =
  * backface culling still applies.
  */
 function remapBoxUVsToCubeCross(geometry: BoxGeometry): void {
-  const uvs = new Float32Array(24);
+  // BoxGeometry has 24 unique vertices (one per corner of each of the 6
+  // faces — vertices are NOT shared at face boundaries because each face
+  // has its own UV island in the cube-cross layout). With itemSize=2 we
+  // need 24 × 2 = 48 floats in the Float32Array, not 24 (which would only
+  // fill half the vertices with our remap and leave the rest sampling
+  // garbage UVs).
+  const uvs = new Float32Array(48);
   for (let face = 0; face < 6; face++) {
     const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[face];
     const base = face * 8; // each face is 4 vertices × 2 floats = 8 floats
