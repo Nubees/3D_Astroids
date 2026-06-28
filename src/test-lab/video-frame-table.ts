@@ -8,7 +8,7 @@ import {
 } from 'three';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Test Lab Frame-Table Loader (Phase 7h v12)
+// My Rules — Test Lab Frame-Table Loader (Phase 7h v12.1)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Decode /public/video/asteroid1.mp4 into a single re-uploadable
 //          DataTexture whose pixel buffer holds 240 pre-decoded frames in
@@ -35,6 +35,16 @@ import {
 //          the seam at the perception threshold. The fix has to live in
 //          the runtime path.
 //
+//          v12.0 ADDITIONAL ISSUE — detached video stall: `loadedmetadata`
+//          fires after the file header is parsed, but frame pixel data is
+//          still pending. A video element created via
+//          `document.createElement('video')` + `video.src = src` without
+//          DOM attachment or a `play()` call never advances Chrome's
+//          demuxer past metadata — the sequential seek loop in Step 3
+//          regresses (observed currentTime 6.82 → 4.30 → 4.07 over 90s)
+//          and the placeholder cube stays visible because the .then()
+//          callback never resolves.
+//
 // Fix:     Phase 7h v12 — Pre-bake a 240-frame table. For i in
 //          [0, fadeFrames), bake
 //              frame[i] = (1 - α) × frame[i] + α × frame[N - 1 - i]
@@ -46,6 +56,16 @@ import {
 //          the seam-blended head instead of a snap. The frame index is
 //          driven by `performance.now()` (not `video.currentTime`) so we
 //          sidestep the browser's `loop=true` autoplay-seek hitch.
+//
+//          v12.1 — Force the decode pipeline by appending the <video> to
+//          the DOM and calling play()/pause() after `loadedmetadata`.
+//          Wait for `canplaythrough` (10s safety timeout) to confirm the
+//          full buffer is decoded before starting the sequential seek.
+//          This mirrors the working pattern in methods.ts's
+//          getSharedVideoTexture() (which uses loop:true + autoplay:true)
+//          — without DOM attachment + play() kick, Chrome treats the
+//          video as "metadata-only" and seek operations on it are
+//          unreliable.
 //
 //          Per-tick: re-upload one frame via `image.data.set` +
 //          `needsUpdate = true`. Modulate `material.emissiveIntensity`
@@ -137,8 +157,16 @@ export async function loadVideoFrameTable(
     throw new Error(`video-frame-table: targetSize must be 16..1024, got ${targetSize}`);
   }
 
-  // Step 1 — load metadata via a hidden <video> element. We don't need to
-  // append it to the DOM; `loadedmetadata` fires once the src is parsed.
+  // Step 1 — load metadata via a hidden <video> element. `loadedmetadata`
+  // only signals the browser parsed the file header — frame pixel data is
+  // still pending. Detached videos (no DOM attachment, no play() call) stall
+  // on sequential seek: Chrome's demuxer never advances past metadata, so
+  // `seeked` either never fires or fires with stale positions (observed
+  // currentTime regressing 6.82 → 4.30 → 4.07 over 90s in v12.0).
+  //
+  // Phase 7h v12.1 fix: append to DOM + play()/pause() to force the full
+  // decode pipeline. Mirrors the working pattern in methods.ts's
+  // getSharedVideoTexture() (which uses loop:true + autoplay:true).
   const video = document.createElement('video');
   video.src = src;
   video.muted = true;
@@ -170,6 +198,28 @@ export async function loadVideoFrameTable(
       else signal.addEventListener('abort', onAbort, { once: true });
     }
   });
+
+  // Step 1b — attach to DOM + play/pause to kick Chrome into decoding the
+  // full buffer. Without this, the sequential seek loop in Step 3 stalls
+  // after a few iterations because the demuxer hasn't decoded past the
+  // metadata stage. The `canplaythrough` event signals enough data is
+  // buffered for uninterrupted playback. 10s safety timeout guards against
+  // the rare case where canplaythrough never fires (small mp4, cached, etc).
+  document.body.appendChild(video);
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+    video.addEventListener('canplaythrough', done, { once: true });
+    setTimeout(done, 10000);
+    const playPromise = video.play();
+    if (playPromise) playPromise.catch(() => done());
+  });
+  video.pause();
+  video.currentTime = 0;
 
   // Step 2 — compute frame count from duration. The asteroid1.mp4 source
   // is exactly 10.000s @ 24fps = 240 frames.
@@ -244,11 +294,13 @@ export async function loadVideoFrameTable(
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
 
-  // Step 6 — dispose the temp <video> element. The decoded frames are
-  // all in `allFrames` now; we don't need the <video> any more.
+  // Step 6 — dispose the <video> element. The decoded frames are all in
+  // `allFrames` now; we don't need the <video> any more. It was appended
+  // to the DOM in Step 1b to kick the decode pipeline — remove it now.
   video.pause();
-  video.src = '';
+  video.removeAttribute('src');
   video.load();
+  if (video.parentNode) video.parentNode.removeChild(video);
 
   return { texture, frameCount, fps, fadeFrames: fade, size: targetSize, allFrames };
 }
