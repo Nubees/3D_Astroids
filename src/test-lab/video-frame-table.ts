@@ -113,6 +113,16 @@ export interface FrameTableOptions {
   fadeFrames?: number;
   /** Optional cancellation. Decoding stops at the next frame boundary. */
   signal?: AbortSignal;
+  /**
+   * Optional crop rectangle in source-pixel coordinates of the 1280×720
+   * MP4. When set, each frame is sampled from `cropRegion` of the source
+   * instead of the full frame. Used by lab method NO41 to crop out the
+   * green-screen border so the asteroid body fills the texture.
+   *
+   * Coordinates are in source pixels: x ∈ [0, 1280], y ∈ [0, 720].
+   * Defaults to full frame (no crop).
+   */
+  cropRegion?: { x: number; y: number; width: number; height: number };
 }
 
 export interface FrameTable {
@@ -242,6 +252,21 @@ export async function loadVideoFrameTable(
     throw new Error('video-frame-table: 2d context unavailable');
   }
 
+  // Optional crop — when set, sample a sub-rectangle of the source
+  // (default: full frame). The cropped content is rescaled into the
+  // targetSize² canvas. Used by NO41 to crop out the green-screen
+  // border so the asteroid body fills every frame.
+  const SOURCE_W = video.videoWidth;
+  const SOURCE_H = video.videoHeight;
+  const crop = opts.cropRegion ?? { x: 0, y: 0, width: SOURCE_W, height: SOURCE_H };
+  if (crop.x < 0 || crop.y < 0
+    || crop.x + crop.width > SOURCE_W
+    || crop.y + crop.height > SOURCE_H) {
+    video.src = '';
+    throw new Error(`video-frame-table: crop ${JSON.stringify(crop)}`
+      + ` exceeds source ${SOURCE_W}x${SOURCE_H}`);
+  }
+
   const pixelsPerFrame = targetSize * targetSize * 4;
   const allFrames = new Uint8Array(frameCount * pixelsPerFrame);
 
@@ -253,7 +278,14 @@ export async function loadVideoFrameTable(
     // Seek to the exact frame time. `seeked` fires once the browser has
     // decoded the requested frame and applied it to the <video> output.
     await seekTo(video, i / fps);
-    ctx.drawImage(video, 0, 0, targetSize, targetSize);
+    // Source rect (crop.x, crop.y, crop.width, crop.height) is rescaled
+    // into the targetSize² canvas. The asteroid body now fills the
+    // texture when crop is set to the asteroid bounding box.
+    ctx.drawImage(
+      video,
+      crop.x, crop.y, crop.width, crop.height,
+      0, 0, targetSize, targetSize,
+    );
     const imgData = ctx.getImageData(0, 0, targetSize, targetSize);
     allFrames.set(imgData.data, i * pixelsPerFrame);
   }

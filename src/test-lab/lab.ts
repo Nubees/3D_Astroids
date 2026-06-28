@@ -13,8 +13,8 @@ import { createMethod, METHOD_COUNT, METHOD_TITLES } from './methods';
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Asteroid Test Lab Cycle Driver
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Standalone test harness for the 20 video-textured asteroid
-//          methods. Press SPACE to cycle NO1 → NO2 → ... → NO20 → NO1.
+// Purpose: Standalone test harness for the video-textured asteroid
+//          methods. Press SPACE to cycle NO1 → NO2 → ... → NO30 → NO1.
 //          Each method is a self-contained factory in methods.ts that
 //          returns a Three.js Group + an update hook for per-frame logic.
 //
@@ -23,17 +23,20 @@ import { createMethod, METHOD_COUNT, METHOD_TITLES } from './methods';
 //          file is fully decoupled. The user can break methods freely
 //          without touching src/.
 //
-// Issues:  The user reported v6 (BoxGeometry cube-cross) "still doesn't
-//          look good" after 5 prior attempts (v1 Icosahedron → v3 Sphere
-//          → v4 emissive boost → v5 emissiveMap only → v6 cube-cross).
-//          Rather than guess at v7, this lab presents 20 distinct methods
-//          ranked by likely-solve-the-problem so the user can pick what
-//          reads as "asteroid" to their eye.
+// Issues:  Phase 7h v8 user feedback: NONE of NO1-NO20 looked any good.
+//          Root cause: the source MP4 uses a green-screen background
+//          (`#107d31`) instead of an alpha channel. All methods that
+//          use the video as `emissiveMap` or `map` end up tinting the
+//          asteroid green.
 //
-// Fix:     Phase 7h v7 — Test lab cycle. Each method is small, isolated,
-//          and disposes its own resources on switch. Methods share the
-//          singleton VideoTexture from methods.ts so we don't decode MP4
-//          20 times.
+// Fix:     Phase 7h v9 — Added NO21-NO30 as chroma-keyed variants of
+//          the most promising base methods. Pixel-sampling the source
+//          video confirmed a uniform `#107d31` background → threshold
+//          `G - max(R, B) > 0.15` cleanly discards background pixels
+//          while keeping the asteroid (whose red/pink/blue pixels have
+//          negative greenness). NO21 tests threshold 0.05 (tight),
+//          NO22 tests 0.30 (loose); NO23-NO30 explore different
+//          base geometries and post-effects with the 0.15 default.
 //
 // Gotchas:
 //  - The HUD shows the current method number + title so the user always
@@ -42,6 +45,8 @@ import { createMethod, METHOD_COUNT, METHOD_TITLES } from './methods';
 //  - Press R to reset to NO1.
 //  - Press Left/Right to skip ±5 methods.
 //  - No game-loop overhead — just requestAnimationFrame spinning a clock.
+//  - When user finds the best variant, we improve from there — not from
+//    a pre-decided "winner".
 // ═══════════════════════════════════════════════════════════════════════════
 
 const canvas = document.getElementById('lab-canvas') as HTMLCanvasElement;

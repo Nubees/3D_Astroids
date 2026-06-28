@@ -33,6 +33,7 @@ import {
 } from 'three';
 import {
   applyChromaKeyToStandardMaterial,
+  applySoftChromaKeyToStandardMaterial,
   CHROMA_KEY_DISCARD_FROM_VID_GLSL,
   chromaKeyCanvas,
 } from './chroma-key';
@@ -76,7 +77,7 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const ASTEROID_RADIUS = 2.2;
-export const METHOD_COUNT = 40;
+export const METHOD_COUNT = 43;
 
 export interface MethodResult {
   group: Group;
@@ -127,6 +128,10 @@ export const METHOD_TITLES: ReadonlyArray<string> = [
   'v12.1 NO38 — B3 frame table @ 128² (pre-baked seam blend, 15.7 MB)',
   'v12.2 NO39 — B3 frame table @ 256² (pre-baked seam blend, 62.9 MB)',
   'v12.3 NO40 — B3 frame table @ 512² (pre-baked seam blend, 251.7 MB)',
+  // ═══ Phase 7h v12.4 — "half round" fix variants ═══
+  'v12.4 NO41 — B3 + cropped frames (256², crop to asteroid body)',
+  'v12.5 NO42 — B3 + UV remap (256², icosahedron UVs constrained to asteroid region)',
+  'v12.6 NO43 — B3 + soft chroma-key (256², alpha fade instead of discard)',
 ];
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1616,14 +1621,29 @@ function createMethod37(): MethodResult {
 // changes (VideoTexture → DataTexture).
 // ═══════════════════════════════════════════════════════════════════════
 
-/** Cache decoded tables so SPACE-cycling doesn't re-decode the MP4. */
-const B3_TABLE_CACHE = new Map<number, Promise<FrameTable>>();
+/**
+ * Cache decoded tables so SPACE-cycling doesn't re-decode the MP4.
+ * Keyed by size + cropRegion so NO41 (with crop) and NO38/NO39/NO40
+ * (without) don't share entries. NO42 and NO43 use the same no-crop
+ * cache as the size-matched NO39 entry.
+ */
+const B3_TABLE_CACHE = new Map<string, Promise<FrameTable>>();
 
-function getB3Table(size: number): Promise<FrameTable> {
-  let promise = B3_TABLE_CACHE.get(size);
+function getB3Table(
+  size: number,
+  opts: { cropRegion?: { x: number; y: number; width: number; height: number } } = {},
+): Promise<FrameTable> {
+  const key = opts.cropRegion
+    ? `${size}|crop=${opts.cropRegion.x},${opts.cropRegion.y},`
+      + `${opts.cropRegion.width},${opts.cropRegion.height}`
+    : `${size}|full`;
+  let promise = B3_TABLE_CACHE.get(key);
   if (promise === undefined) {
-    promise = loadVideoFrameTable('/video/asteroid1.mp4', { targetSize: size });
-    B3_TABLE_CACHE.set(size, promise);
+    promise = loadVideoFrameTable('/video/asteroid1.mp4', {
+      targetSize: size,
+      ...opts,
+    });
+    B3_TABLE_CACHE.set(key, promise);
   }
   return promise;
 }
@@ -1722,6 +1742,292 @@ function createMethod39(): MethodResult { return createB3Method(256); }
 function createMethod40(): MethodResult { return createB3Method(512); }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Phase 7h v12.4 — "half round" fix variants (NO41 / NO42 / NO43)
+// ═══════════════════════════════════════════════════════════════════════
+// Purpose: User reported the B3 asteroid "appears to be more a half round
+//          shape" — root cause is that the icosahedron's auto UVs span
+//          [0, 1.088] × [0.176, 0.824] of the texture, but the asteroid
+//          itself only occupies ~39% × 77% of the frame (sampled from the
+//          1280×720 MP4). Most triangles sample the green-screen border,
+//          the chroma-key discards those fragments, and the asteroid
+//          looks like a crescent.
+//
+//          Three independent fixes, each added as a separate lab method
+//          so the user can compare side by side and pick the winner:
+//
+//          NO41 — Crop at decode time: loadVideoFrameTable now accepts a
+//          cropRegion in source pixels. The cropped sub-frame is rescaled
+//          to targetSize². The icosahedron's full UV range then samples
+//          the asteroid body, not the green border. Cleanest approach
+//          because it doesn't touch the geometry or the shader.
+//
+//          NO42 — Remap the icosahedron UVs to a tight centered region
+//          after construction. Keeps the full 1280×720 frame table but
+//          constrains the UV sampling. Doesn't reduce memory but
+//          addresses the same root cause via geometry mutation.
+//
+//          NO43 — Replace the hard `discard` chroma-key with a soft
+//          alpha fade. Pixels with greenness < 0.10 stay opaque; pixels
+//          > 0.20 fade to transparent; the 0.10-0.20 band is smoothstep.
+//          The asteroid body stays solid; green edges softly dissolve.
+//          Most invasive — affects the shader, not the geometry/data.
+//
+//          Pick the winner and we'll port it to v13 production.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Asteroid bounding box in the 1280×720 source MP4 (sampled by Playwright
+// during v12.4 investigation): x=396→896 (width 500), y=52→608 (height
+// 556). Padded slightly inward so we don't crop the silhouette edges.
+const ASTEROID_CROP_REGION = { x: 380, y: 40, width: 540, height: 580 } as const;
+
+// Tight UV region for NO42's icosahedron remap. Maps the auto UVs that
+// span [0, 1.088] × [0.176, 0.824] into a centered 70% × 70% of the
+// texture so triangles sample only the asteroid body, not the border.
+const ASTEROID_UV_REGION = { uMin: 0.15, uMax: 0.85, vMin: 0.15, vMax: 0.85 } as const;
+
+/**
+ * Remap an IcosahedronGeometry's UVs from their auto-generated range
+ * `[0, 1.088] × [0.176, 0.824]` to a tight target region. Used by lab
+ * method NO42 to constrain the asteroid sampling to the centered region
+ * of the video where the actual rock is.
+ *
+ * Mutates `geom.attributes.uv` in place. Caller is responsible for
+ * ensuring `geom` is actually an IcosahedronGeometry (any geometry whose
+ * auto UVs fit the [0, ~1.1] × [0.176, ~0.824] box would work, but the
+ * math is calibrated for the icosahedron's specific layout).
+ */
+function remapIcosahedronUVs(
+  geom: IcosahedronGeometry,
+  uMin: number,
+  uMax: number,
+  vMin: number,
+  vMax: number,
+): void {
+  // Auto UV bounds for IcosahedronGeometry(_, 0) — see Node dump in
+  // v12.4 investigation notes. u spans [0, 1.088] (note the overshoot
+  // past 1.0 on one cluster) and v spans [0.176, 0.824].
+  const SRC_U_MIN = 0;
+  const SRC_U_MAX = 1.088;
+  const SRC_V_MIN = 0.176;
+  const SRC_V_MAX = 0.824;
+  const uRange = SRC_U_MAX - SRC_U_MIN;
+  const vRange = SRC_V_MAX - SRC_V_MIN;
+  const uScale = (uMax - uMin) / uRange;
+  const vScale = (vMax - vMin) / vRange;
+
+  const uv = geom.attributes.uv;
+  for (let i = 0; i < uv.count; i++) {
+    const u = uv.getX(i);
+    const v = uv.getY(i);
+    const uNew = uMin + (u - SRC_U_MIN) * uScale;
+    const vNew = vMin + (v - SRC_V_MIN) * vScale;
+    uv.setXY(i, uNew, vNew);
+  }
+  uv.needsUpdate = true;
+}
+
+/**
+ * NO41 — B3 with cropped source frames. The frame table samples only
+ * the asteroid bounding box from each MP4 frame, so the icosahedron's
+ * UVs (which span [0, 1.088] × [0.176, 0.824]) only ever touch asteroid
+ * pixels. Memory cost is the same as NO39 — only the SOURCE content
+ * changes, not the target texture dimensions.
+ */
+function createB3CroppedMethod(size: number): MethodResult {
+  const group = new Group();
+  const placeholder = new MeshStandardMaterial({ color: 0x223355 });
+  const mesh = new Mesh(new IcosahedronGeometry(ASTEROID_RADIUS, 0), placeholder);
+  group.add(mesh);
+
+  let table: FrameTable | null = null;
+  let liveMaterial: MeshStandardMaterial | null = null;
+  const t0 = performance.now();
+  getB3Table(size, { cropRegion: ASTEROID_CROP_REGION }).then((t) => {
+    table = t;
+    const mat = new MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xffffff,
+      emissiveIntensity: 1.5,
+      emissiveMap: t.texture,
+      flatShading: true,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: DoubleSide,
+      transparent: true,
+    });
+    applyChromaKeyToStandardMaterial(mat);
+    mesh.material = mat;
+    liveMaterial = mat;
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[test-lab] B3-cropped @ ${size}² decode failed:`, err);
+  });
+
+  const pixelsPerFrame = size * size * 4;
+  const update = (_dt: number, _t: number): void => {
+    if (table === null || liveMaterial === null) return;
+    const u = ((performance.now() - t0) / 1000) * table.fps;
+    const i = Math.floor(u) % table.frameCount;
+    const offset = i * pixelsPerFrame;
+    table.texture.image.data!.set(
+      table.allFrames.subarray(offset, offset + pixelsPerFrame),
+    );
+    table.texture.needsUpdate = true;
+    if (i < table.fadeFrames) {
+      liveMaterial.emissiveIntensity = 1.5 * (1 - i / table.fadeFrames);
+    } else {
+      liveMaterial.emissiveIntensity = 1.5;
+    }
+  };
+
+  return {
+    group,
+    description: `B3 @ ${size}² + cropped source frames — frames rescaled from`
+      + ` ${ASTEROID_CROP_REGION.width}×${ASTEROID_CROP_REGION.height} asteroid bbox.`
+      + ` Icosahedron UVs now sample asteroid body, not green border.`,
+    update,
+  };
+}
+
+/**
+ * NO42 — B3 with remapped icosahedron UVs. The geometry is built
+ * normally, then `remapIcosahedronUVs` constrains the UV range to a
+ * centered 70% × 70% region of the texture so triangles only sample
+ * the asteroid body. Full frame table preserved (no source crop).
+ */
+function createB3UVRemapMethod(size: number): MethodResult {
+  const group = new Group();
+  const geometry = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  // Remap BEFORE the mesh is constructed so the geometry's UV attribute
+  // is correct from the first render frame.
+  remapIcosahedronUVs(
+    geometry,
+    ASTEROID_UV_REGION.uMin, ASTEROID_UV_REGION.uMax,
+    ASTEROID_UV_REGION.vMin, ASTEROID_UV_REGION.vMax,
+  );
+  const placeholder = new MeshStandardMaterial({ color: 0x223355 });
+  const mesh = new Mesh(geometry, placeholder);
+  group.add(mesh);
+
+  let table: FrameTable | null = null;
+  let liveMaterial: MeshStandardMaterial | null = null;
+  const t0 = performance.now();
+  getB3Table(size).then((t) => {
+    table = t;
+    const mat = new MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xffffff,
+      emissiveIntensity: 1.5,
+      emissiveMap: t.texture,
+      flatShading: true,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: DoubleSide,
+      transparent: true,
+    });
+    applyChromaKeyToStandardMaterial(mat);
+    mesh.material = mat;
+    liveMaterial = mat;
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[test-lab] B3-uvremap @ ${size}² decode failed:`, err);
+  });
+
+  const pixelsPerFrame = size * size * 4;
+  const update = (_dt: number, _t: number): void => {
+    if (table === null || liveMaterial === null) return;
+    const u = ((performance.now() - t0) / 1000) * table.fps;
+    const i = Math.floor(u) % table.frameCount;
+    const offset = i * pixelsPerFrame;
+    table.texture.image.data!.set(
+      table.allFrames.subarray(offset, offset + pixelsPerFrame),
+    );
+    table.texture.needsUpdate = true;
+    if (i < table.fadeFrames) {
+      liveMaterial.emissiveIntensity = 1.5 * (1 - i / table.fadeFrames);
+    } else {
+      liveMaterial.emissiveIntensity = 1.5;
+    }
+  };
+
+  return {
+    group,
+    description: `B3 @ ${size}² + UV remap — icosahedron UVs constrained to`
+      + ` [${ASTEROID_UV_REGION.uMin}, ${ASTEROID_UV_REGION.uMax}]`
+      + ` × [${ASTEROID_UV_REGION.vMin}, ${ASTEROID_UV_REGION.vMax}]`
+      + ` so triangles only sample the asteroid body.`,
+    update,
+  };
+}
+
+/**
+ * NO43 — B3 with SOFT chroma-key. Same B3 decode + same geometry as
+ * NO39, but the chroma-key is alpha-fade instead of hard discard. Edge
+ * pixels of the asteroid body that bleed green will softly dissolve
+ * rather than punch a hard hole. The asteroid should look more "whole"
+ * even when backfaces sample green border regions of the video.
+ */
+function createB3SoftKeyMethod(size: number): MethodResult {
+  const group = new Group();
+  const placeholder = new MeshStandardMaterial({ color: 0x223355 });
+  const mesh = new Mesh(new IcosahedronGeometry(ASTEROID_RADIUS, 0), placeholder);
+  group.add(mesh);
+
+  let table: FrameTable | null = null;
+  let liveMaterial: MeshStandardMaterial | null = null;
+  const t0 = performance.now();
+  getB3Table(size).then((t) => {
+    table = t;
+    const mat = new MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xffffff,
+      emissiveIntensity: 1.5,
+      emissiveMap: t.texture,
+      flatShading: true,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: DoubleSide,
+      transparent: true,
+    });
+    applySoftChromaKeyToStandardMaterial(mat);
+    mesh.material = mat;
+    liveMaterial = mat;
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[test-lab] B3-softkey @ ${size}² decode failed:`, err);
+  });
+
+  const pixelsPerFrame = size * size * 4;
+  const update = (_dt: number, _t: number): void => {
+    if (table === null || liveMaterial === null) return;
+    const u = ((performance.now() - t0) / 1000) * table.fps;
+    const i = Math.floor(u) % table.frameCount;
+    const offset = i * pixelsPerFrame;
+    table.texture.image.data!.set(
+      table.allFrames.subarray(offset, offset + pixelsPerFrame),
+    );
+    table.texture.needsUpdate = true;
+    if (i < table.fadeFrames) {
+      liveMaterial.emissiveIntensity = 1.5 * (1 - i / table.fadeFrames);
+    } else {
+      liveMaterial.emissiveIntensity = 1.5;
+    }
+  };
+
+  return {
+    group,
+    description: `B3 @ ${size}² + soft chroma-key — alpha fades for`
+      + ` green-dominant pixels (smoothstep 0.10-0.20).`
+      + ` No hard discard, edges softly dissolve.`,
+    update,
+  };
+}
+
+function createMethod41(): MethodResult { return createB3CroppedMethod(256); }
+function createMethod42(): MethodResult { return createB3UVRemapMethod(256); }
+function createMethod43(): MethodResult { return createB3SoftKeyMethod(256); }
+
+// ═══════════════════════════════════════════════════════════════════════
 // Dispatch table
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -1735,6 +2041,7 @@ const METHOD_FACTORIES: ReadonlyArray<() => MethodResult> = [
   createMethod31, createMethod32, createMethod33, createMethod34,
   createMethod35, createMethod36, createMethod37,
   createMethod38, createMethod39, createMethod40,
+  createMethod41, createMethod42, createMethod43,
 ];
 
 export function createMethod(idx: number): MethodResult {
