@@ -2,35 +2,41 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Phase 7h v6 BoxGeometry + Cube-Cross UV Screenshots
+// My Rules — Phase 7h v11 IcosahedronGeometry + DoubleSide + Chroma-Key Screenshots
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose:  Verify the v6 visual change — the RED targeted asteroid is now
-//           a BoxGeometry with cube-cross UV remap (6 faces, each unique
-//           1/4 × 1/3 portion of the video). Material channel routing from
-//           v5 is unchanged (`emissiveMap` only, `color: 0x000000`).
+// Purpose:  Verify the v11 visual change — the RED targeted asteroid is now
+//           an IcosahedronGeometry(radius, 0) with DoubleSide + chroma-key,
+//           at emissiveIntensity 1.5. The lab-winning NO34 stack from the
+//           Asteroid Test Lab (/test-lab/asteroid-lab.html) is the
+//           production port.
 //
 // Setup:    Boot the game, wait for a natural targeted-asteroid spawn
 //           (every 4th spawn is targeted — see game.ts:2424), screenshot
 //           the canvas when one is on screen.
 //
-// Issues:   v3 SphereGeometry had equirectangular UVs but the user
-//           reported "not completly wraping the astroid .. maybe we can
-//           make it like square shape . and the video is on each flat
-//           side". v6 fixes the visual contract: BoxGeometry replaces
-//           SphereGeometry and UVs are remapped to a cube-cross layout
-//           so every flat face shows a DIFFERENT portion of the video.
+// Issues:   v6 used BoxGeometry with cube-cross UV remap so every flat
+//           face showed a unique 1/4 × 1/3 portion of the video. The user
+//           tested 37 methods in the Asteroid Lab and picked NO34 as the
+//           production winner — chunky icosahedron + emissive 1.5 +
+//           DoubleSide + chroma-key. v11 swaps BoxGeometry for
+//           IcosahedronGeometry (the user explicitly preferred NO30's
+//           icosahedron silhouette over NO23's sphere because "30 Is
+//           Better as it doesnt dissapear as it rotates and is always
+//           viewable" — DoubleSide was the deciding factor).
 //
-// Fix:      2026-06-27 — capture v6 visual confirmation. Scene-walker now
-//           probes for `geometry.type === 'BoxGeometry'` (was
-//           'SphereGeometry' in v3-v5) AND `material.emissiveMap.isVideoTexture
-//           === true` (v5 channel routing — kept unchanged).
+// Fix:      2026-06-28 — capture v11 visual confirmation. Scene-walker
+//           now probes for `geometry.type === 'IcosahedronGeometry'` (was
+//           'BoxGeometry' in v6 / 'SphereGeometry' in v3-v5) AND
+//           `material.emissiveMap.isVideoTexture === true` (v5 channel
+//           routing — kept unchanged through v11).
 //
 // Gotchas:  The targeted spawn rate is 1 in 4. On a fresh game the
 //           spawn cadence takes ~2-4 seconds before the first targeted
 //           asteroid appears. We poll up to 20 seconds. We probe the scene
-//           for a Group whose first child is a Mesh with a BoxGeometry
-//           AND a material whose emissiveMap is a VideoTexture — this is
-//           the exact signature of the v6 createVideoAsteroidMesh output.
+//           for a Group whose first child is a Mesh with an
+//           IcosahedronGeometry AND a material whose emissiveMap is a
+//           VideoTexture — this is the exact signature of the v11
+//           createVideoAsteroidMesh output.
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function bootGame(page: Page): Promise<void> {
@@ -74,13 +80,14 @@ async function findVideoAsteroidPosition(page: Page): Promise<{ x: number; y: nu
         position?: { x: number; y: number };
         parent?: unknown;
       };
-      // Phase 7h v6: BoxGeometry (was SphereGeometry in v3-v5). Probing
-      // 'SphereGeometry' would never match under v6.
+      // Phase 7h v11: IcosahedronGeometry (was BoxGeometry in v6,
+      // SphereGeometry in v3-v5). Probing 'BoxGeometry' or
+      // 'SphereGeometry' would never match under v11.
       // Phase 7h v5: video lives in emissiveMap, not the diffuse `map` slot.
       // Probing `material.map` would never match (it's null under v5).
       if (
         n.material?.emissiveMap?.isVideoTexture === true &&
-        n.geometry?.type === 'BoxGeometry' &&
+        n.geometry?.type === 'IcosahedronGeometry' &&
         n.position
       ) {
         return { x: n.position.x, y: n.position.y };
@@ -97,8 +104,8 @@ async function findVideoAsteroidPosition(page: Page): Promise<{ x: number; y: nu
   });
 }
 
-test.describe('Phase 7h v6 — BoxGeometry + cube-cross UV visual verification', () => {
-  test('video-textured box asteroid appears (natural 1-in-4 spawn)', async ({ page }) => {
+test.describe('Phase 7h v11 — IcosahedronGeometry + DoubleSide + chroma-key visual verification', () => {
+  test('video-textured icosahedron asteroid appears (natural 1-in-4 spawn)', async ({ page }) => {
     test.setTimeout(60000);
     await bootGame(page);
 
@@ -116,9 +123,9 @@ test.describe('Phase 7h v6 — BoxGeometry + cube-cross UV visual verification',
     // video to start playing visible frames.
     await page.waitForTimeout(800);
     await page.locator('canvas#game-canvas').screenshot({
-      path: '.test-artifacts/phase-7h-v6-targeted-asteroid.png',
+      path: '.test-artifacts/phase-7h-v11-targeted-asteroid.png',
     });
     // eslint-disable-next-line no-console
-    console.log('v6 visual: targeted asteroid at', position);
+    console.log('v11 visual: targeted asteroid at', position);
   });
 });

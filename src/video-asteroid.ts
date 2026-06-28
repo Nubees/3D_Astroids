@@ -1,7 +1,7 @@
 import {
-  BoxGeometry,
-  BufferAttribute,
+  DoubleSide,
   Group,
+  IcosahedronGeometry,
   LinearFilter,
   Mesh,
   MeshStandardMaterial,
@@ -9,6 +9,7 @@ import {
 } from 'three';
 import { AsteroidSize } from './types';
 import { SIZE_RADIUS } from './asteroid';
+import { applyChromaKeyToStandardMaterial } from './chroma-key';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Video Asteroid (Phase 7h — Custom Asteroids)
@@ -208,6 +209,71 @@ import { SIZE_RADIUS } from './asteroid';
 //    `(0,0)` — likely a green-dominant region of the source MP4. This
 //    was the root cause of the v6 user report "the box is there, but
 //    it is all green .. no video". Fix: 48 floats, not 24.
+//
+//          Phase 7h v11 — User accepted NO34 from the Asteroid Lab as the
+//    production port. NO34 = IcosahedronGeometry + emissiveIntensity 1.5
+//    + DoubleSide + chroma-key. This is the full port: geometry class
+//    swap, brightness boost, two-sided rendering, and green-screen
+//    removal all land together.
+//
+//    Geometry: IcosahedronGeometry(radius, 0) replaces BoxGeometry. The
+//    icosahedron's UVs are still clustered (PolyhedronGeometry spherical
+//    projection → 20 tiny UV triangles), but with DoubleSide + chroma-
+//    key we don't care — the back hemisphere now renders (was culled
+//    under FrontSide), and the green-screen pixels are discarded before
+//    they reach the framebuffer. The user picked NO34 specifically
+//    because DoubleSide prevents the asteroid from "disappearing" when
+//    rotating past the camera — a real bug in v3-v10 that the user
+//    explicitly called out as the deciding factor ("30 Is Better as it
+//    doesnt dissapear as it rotates and is always viewable").
+//
+//    Brightness: emissiveIntensity 1.0 → 1.5. The Asteroid Lab single-
+//    axis sweep (NO31 = 1.2, NO32 = 1.3, NO33 = 1.4, NO34 = 1.5, NO30
+//    was 1.0) tested each value against the UnrealBloomPass pipeline.
+//    1.5 reads as "clearly bright but not over-bloomed". 1.6 (the next
+//    step up) starts saturating into white via bloom + tonemap. 1.5 is
+//    the max-safe value.
+//
+//    DoubleSide: replaces the default FrontSide. With FrontSide the
+//    Three.js renderer culls back faces, so when the asteroid rotates
+//    and its back hemisphere points at the camera, nothing renders —
+//    the asteroid visually "disappears". DoubleSide renders both sides
+//    of every triangle, so the silhouette is always present regardless
+//    of rotation. The icosahedron's 20 flat faces make this read as a
+//    chunky faceted rock that catches highlights from any angle.
+//
+//    Chroma-key: applyChromaKeyToStandardMaterial(mat) injects a discard
+//    for green-dominant pixels via onBeforeCompile, hooked after the
+//    <emissivemap_fragment> include in the standard material's fragment
+//    shader. The MP4 source video has a flat #107d31 (16,125,48)
+//    background — without chroma-keying the entire asteroid reads as a
+//    green-tinted rock. The threshold `G - max(R, B) > 0.15` separates
+//    background (greenness ≈ 77) from asteroid pixels (greenness ≈ -91)
+//    with a wide margin. The helper lives in src/chroma-key.ts
+//    (production home, Phase 7h v11) and is also consumed by the test
+//    lab at src/test-lab/methods.ts.
+//
+//    Transparent: `transparent: true` is REQUIRED alongside the chroma
+//    inject. Otherwise the discarded fragments would still occlude
+//    what's behind the asteroid (no blending happens for fully-opaque
+//    geometry with `discard` in the fragment shader — the depth buffer
+//    is already written for those fragments by the time the fragment
+//    shader runs, so they block sight through the asteroid even though
+//    nothing is drawn). With `transparent: true` the renderer keeps
+//    discarded fragments from blocking depth-tested geometry behind them.
+//
+//    v11 DELTA FROM v6:
+//      - Geometry: BoxGeometry → IcosahedronGeometry
+//      - emissiveIntensity: 1.0 → 1.5
+//      - side: FrontSide (default) → DoubleSide
+//      - transparent: false (default) → true
+//      - applyChromaKeyToStandardMaterial(mat) called after construction
+//      - DELETE FACE_UV_RANGES + remapBoxUVsToCubeCross (~55 lines) —
+//        icosahedron doesn't need cube-cross UV remap because (a)
+//        DoubleSide makes every face visible so the cluster-UV issue
+//        reads as "chunky rock with video patches" not "broken box",
+//        and (b) chroma-key discards background pixels so any UV
+//        stretching outside the texture's green region is invisible.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Path to the MP4 asset — Vite serves /public/video/* at /video/*.
@@ -291,124 +357,60 @@ function getOrCreateVideo(): { video: HTMLVideoElement; texture: VideoTexture } 
 }
 
 /**
- * Cube-cross UV layout. Each of the 6 BoxGeometry faces gets a unique
- * 1/4 × 1/3 portion of the [0,1]² texture. BoxGeometry group order is
- * `+X, -X, +Y, -Y, +Z, -Z` (X-first, verified from
- * node_modules/three/src/geometries/BoxGeometry.js:76-81), so this array
- * is keyed by that exact order.
+ * Build a Group containing an IcosahedronGeometry wrapped with the shared
+ * video texture. Phase 7h v11 — replaces v6's BoxGeometry + cube-cross UV
+ * remap with the lab-winning NO34 stack:
+ *   - IcosahedronGeometry(radius, 0) — chunky 20-face faceted rock
+ *   - emissiveIntensity 1.5 — max-safe brightness (1.6 over-blooms)
+ *   - side: DoubleSide — back hemisphere always renders (no rotation
+ *     disappearance)
+ *   - transparent: true + applyChromaKeyToStandardMaterial — discards
+ *     the green-screen background pixels from the MP4
  *
- * Standard cross unwrap (4 columns × 3 rows):
- *            [ +Y top ]    col 1, row 0
- *   [ -X ][ +Z ][ +X ][ -Z ]   cols 0..3, row 1
- *            [ -Y bot ]    col 1, row 2
- *
- * Each entry is [uMin, uMax, vMin, vMax] — the corners of that face's
- * cell in texture space. The remap expands each entry into 4 vertex
- * UVs (one per face-quad corner) when writing the attribute.
- */
-const FACE_UV_RANGES: ReadonlyArray<readonly [number, number, number, number]> = [
-  [0.50, 0.75, 0.333, 0.667], // group 0: +X (right)   — col 2, row 1
-  [0.00, 0.25, 0.333, 0.667], // group 1: -X (left)    — col 0, row 1
-  [0.25, 0.50, 0.667, 1.000], // group 2: +Y (top)     — col 1, row 0
-  [0.25, 0.50, 0.000, 0.333], // group 3: -Y (bottom)  — col 1, row 2
-  [0.25, 0.50, 0.333, 0.667], // group 4: +Z (front)   — col 1, row 1
-  [0.75, 1.00, 0.333, 0.667], // group 5: -Z (back)    — col 3, row 1
-];
-
-/**
- * Rewrite the BoxGeometry's UV attribute so each of the 6 faces samples
- * a unique 1/4 × 1/3 portion of the texture (cube-cross unwrap). Default
- * BoxGeometry UVs put the FULL [0,1]² texture on every face — visible
- * repetition if left unchanged. We replace the UV attribute with the
- * per-face slice table above.
- *
- * Each BoxGeometry face is a 4-vertex quad. Three.js emits the 4 UVs
- * per face in this order (BoxGeometry.js:139-140):
- *   vertex 0 → UV (0, 1)  — top-left  in face-quad local space
- *   vertex 1 → UV (1, 1)  — top-right
- *   vertex 2 → UV (0, 0)  — bottom-left
- *   vertex 3 → UV (1, 0)  — bottom-right
- *
- * So for face `g` with UV range [uMin, uMax, vMin, vMax]:
- *   vertex 0 → (uMin, vMax)  top-left of slice
- *   vertex 1 → (uMax, vMax)  top-right
- *   vertex 2 → (uMin, vMin)  bottom-left
- *   vertex 3 → (uMax, vMin)  bottom-right
- *
- * 24 UVs total (6 faces × 4 vertices × 2 floats). UV remap doesn't
- * touch positions or indices — CCW winding from outside stays correct,
- * backface culling still applies.
- */
-function remapBoxUVsToCubeCross(geometry: BoxGeometry): void {
-  // BoxGeometry has 24 unique vertices (one per corner of each of the 6
-  // faces — vertices are NOT shared at face boundaries because each face
-  // has its own UV island in the cube-cross layout). With itemSize=2 we
-  // need 24 × 2 = 48 floats in the Float32Array, not 24 (which would only
-  // fill half the vertices with our remap and leave the rest sampling
-  // garbage UVs).
-  const uvs = new Float32Array(48);
-  for (let face = 0; face < 6; face++) {
-    const [uMin, uMax, vMin, vMax] = FACE_UV_RANGES[face];
-    const base = face * 8; // each face is 4 vertices × 2 floats = 8 floats
-    uvs[base + 0] = uMin;
-    uvs[base + 1] = vMax; // vertex 0 top-left
-    uvs[base + 2] = uMax;
-    uvs[base + 3] = vMax; // vertex 1 top-right
-    uvs[base + 4] = uMin;
-    uvs[base + 5] = vMin; // vertex 2 bottom-left
-    uvs[base + 6] = uMax;
-    uvs[base + 7] = vMin; // vertex 3 bottom-right
-  }
-  // Matches crystal-fx.ts:863-865 idiom: new BufferAttribute(arr, 2)
-  geometry.setAttribute('uv', new BufferAttribute(uvs, 2));
-}
-
-/**
- * Build a Group containing a BoxGeometry wrapped with the shared video
- * texture. Same physical bounding extent as the v3-v5 SphereGeometry
- * (side = SIZE_RADIUS[size] × 2 = original IcosahedronGeometry's diameter).
- *
- * Each of the 6 box faces samples a unique 1/4 × 1/3 portion of the
- * video via remapBoxUVsToCubeCross (see FACE_UV_RANGES for the cube-cross
- * table). Default BoxGeometry UVs put the full texture on every face —
- * the remap is mandatory to avoid 6× visible repetition.
+ * Public API signature unchanged from v3/v4/v5/v6 — collision radius
+ * (SIZE_RADIUS[size]) and userData shape are preserved so call sites in
+ * createAsteroidMesh / disposeAsteroidMesh don't need updates.
  */
 export function createVideoAsteroidMesh(size: AsteroidSize): Group {
-  const side = SIZE_RADIUS[size] * 2;
+  const radius = SIZE_RADIUS[size];
   const { texture } = getOrCreateVideo();
 
-  const geometry = new BoxGeometry(side, side, side);
-  remapBoxUVsToCubeCross(geometry);
+  // Phase 7h v11: IcosahedronGeometry replaces BoxGeometry. The icosahedron's
+  // UVs are clustered (PolyhedronGeometry spherical projection → 20 small UV
+  // triangles instead of the full texture), but with DoubleSide + chroma-key
+  // this reads as a chunky faceted rock, not as the "video missing on the
+  // back" bug from v3. Detail=0 → 60 vertices / 80 faces; matches the
+  // silhouette of the original Iron Slag asteroid that v3 swapped away from.
+  const geometry = new IcosahedronGeometry(radius, 0);
+
+  // Phase 7h v11 material: emissiveIntensity 1.5 + DoubleSide + transparent +
+  // chroma-key. The v5 channel-routing contract (map: null, color: 0x000000,
+  // emissiveMap only) is preserved from v6 — only intensity/side/transparency
+  // change, plus the chroma-key inject.
   const material = new MeshStandardMaterial({
-    // Phase 7h v5: route the video texture through emissiveMap ONLY, not
-    // the diffuse `map` slot. The standard material shader does
-    //   finalColor = outgoingLight + totalEmissiveRadiance
-    // (see three.js src/renderers/shaders/ShaderLib/meshphysical.glsl.js,
-    // output_fragment chunk). With v4's `map: texture` + `emissive: 0xffffff`
-    // + `emissiveIntensity: 1.0`, the lit hemisphere received:
-    //   outgoingLight ≈ directional * (white map) ≈ 1.0
-    //   totalEmissiveRadiance = 1.0
-    //   finalColor ≈ 2.0  →  tonemapped to 1.0 = pure white
-    // i.e. v4 overshot — fixed the dark side but blew out the lit side.
-    //
-    // v5 fixes both: `map` stays null (no diffuse contribution at all),
-    // `emissiveMap: texture` + `emissive: 0xffffff` + `emissiveIntensity: 1`
-    // drive the entire pixel color from the video. PBR lighting still
-    // applies BUT `color: 0x000000` zeroes diffuse so `outgoingLight ≈ 0`
-    // on both sides, and `totalEmissiveRadiance = texture sample` is the
-    // only contribution. The video reads as-is everywhere — no lit-side
-    // saturation, no dark-side washout. Trade-off: no PBR contour from
-    // the directional light (the surface reads as a flat video wrap),
-    // which is the correct intent for a self-illuminated asteroid.
+    // v5 channel routing: emissiveMap drives color, no diffuse contribution.
     color: 0x000000,
     emissive: 0xffffff,
-    emissiveIntensity: 1.0,
+    emissiveIntensity: 1.5,
     emissiveMap: texture,
     flatShading: true,
     // Roughness 0.85 keeps the surface matte — space rock, not polished chrome.
     roughness: 0.85,
     metalness: 0.05,
+    // v11: DoubleSide renders both faces of every triangle. Without this the
+    // back hemisphere culls out and the asteroid visually "disappears" when
+    // rotating past the camera — the deciding-factor bug NO34 was picked for.
+    side: DoubleSide,
+    // v11: transparent MUST be true so discarded fragments (from chroma-key)
+    // don't occlude geometry behind the asteroid. Without this, the depth
+    // buffer for discarded fragments is still written and blocks sight-through.
+    transparent: true,
   });
+  // v11: inject the green-screen discard into the standard material's
+  // fragment shader. After this call, any pixel where
+  // `G - max(R, B) > 0.15` is dropped before lighting runs.
+  applyChromaKeyToStandardMaterial(material);
+
   const mesh = new Mesh(geometry, material);
   const group = new Group();
   group.add(mesh);

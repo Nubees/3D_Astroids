@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BoxGeometry, MeshStandardMaterial, VideoTexture } from 'three';
+import {
+  DoubleSide,
+  IcosahedronGeometry,
+  MeshStandardMaterial,
+  VideoTexture,
+} from 'three';
 import { AsteroidSize } from '../src/types';
 import { SIZE_RADIUS } from '../src/asteroid';
 import {
@@ -12,48 +17,60 @@ import {
 // My Rules — Video Asteroid Unit Tests (Phase 7h — Custom Asteroids)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Lock the visual + lifecycle contract for the video-textured RED
-//          targeted asteroid (isTargeted=true) — the new mesh factory that
-//          wraps a SphereGeometry in a VideoTexture driven by
-//          /public/video/asteroid1.mp4. Split/drop physics remain on the
-//          original Iron Slag — only the visual mesh swaps.
+//          targeted asteroid (isTargeted=true). Phase 7h v11 swapped the
+//          geometry from BoxGeometry (v6 cube-cross UV remap) to
+//          IcosahedronGeometry (NO34 lab winner), with three additional
+//          material changes: emissiveIntensity 1.0 → 1.5, FrontSide →
+//          DoubleSide, and a chroma-key onBeforeCompile inject that
+//          discards the green-screen background pixels from the source
+//          MP4.
 //
 // Setup:   Vitest loads this file. createVideoAsteroidMesh and
 //          disposeVideoAsteroidResources are imported from
-//          src/video-asteroid.ts. The module's shared video element + texture
-//          are global mutable singletons; beforeEach resets state by calling
-//          disposeVideoAsteroidResources() at the end of every test.
+//          src/video-asteroid.ts. The module's shared video element +
+//          texture are global mutable singletons; afterEach resets state
+//          by calling disposeVideoAsteroidResources() at the end of every
+//          test.
 //
-// Issues:  Phase 7h v2 shipped with IcosahedronGeometry; user reported
-//          "video doesn't cover the whole asteroid". Root cause: the
-//          icosahedron's UVs cluster into 20 tiny triangles, so most faces
-//          sample an unused wedge of the texture and render as base material
-//          color. Phase 7h v3 fixed it by switching to SphereGeometry,
-//          which has natural equirectangular UVs that span the full 0-1
-//          range.
+// Issues:  v6 BoxGeometry had cube-cross UV remap so each face showed a
+//          different portion of the video. v11 abandons cube-cross in
+//          favor of IcosahedronGeometry because (a) DoubleSide makes the
+//          back hemisphere visible (the deciding-factor bug NO34 was
+//          picked for — "doesnt dissapear as it rotates"), (b) the
+//          chroma-key discards the green background so UV clustering
+//          in the icosahedron no longer reads as a "missing video"
+//          regression, and (c) the chunky 20-face icosahedron silhouette
+//          is what the user explicitly preferred in the lab.
 //
-// Fix:     Phase 7h v3 (geometry) + Phase 7h v5 (channel routing). Tests cover:
-//          (1) Mesh creation — Group shape, child Mesh, SphereGeometry
-//              radius matching SIZE_RADIUS[size], material emissiveMap =
-//              VideoTexture (NOT the diffuse `map` slot).
-//          (2) UV coverage — UVs span >50% of the 0-1 range in both U and V
-//              axes (locks the "video covers whole asteroid" guarantee).
-//          (3) Singleton — second call returns the SAME texture instance.
-//          (4) userData stash — disposeAsteroidMesh in asteroid.ts uses this
-//              to detach the per-mesh reference.
-//          (5) Disposal — disposeVideoAsteroidResources pauses the video,
-//              removes it from DOM, disposes the texture, and nulls both
+// Fix:     Phase 7h v11. Tests cover:
+//          (1) Mesh creation — Group shape, child Mesh, IcosahedronGeometry
+//              radius matching SIZE_RADIUS[size].
+//          (2) UV attribute present — IcosahedronGeometry has 60 unique
+//              vertices with built-in clustered UVs. We don't remap; we
+//              just assert the UV attribute exists (no missing-UV bug).
+//          (3) v11 material contract — emissiveMap is VideoTexture, color
+//              is 0x000000 (v5 channel routing preserved), emissiveIntensity
+//              is 1.5, side is DoubleSide, transparent is true, and
+//              onBeforeCompile has been wired (chroma-key inject).
+//          (4) Singleton — second call returns the SAME texture instance.
+//          (5) userData stash — disposeAsteroidMesh in asteroid.ts uses
+//              this to detach the per-mesh reference.
+//          (6) Per-size radius — every AsteroidSize maps to its SIZE_RADIUS.
+//          (7) Disposal — disposeVideoAsteroidResources pauses the video,
+//              removes it from DOM, disposes the texture, nulls both
 //              module-level singletons.
-//          (6) Disposal is idempotent — calling it twice does not throw.
-//          (7) Per-mesh material disposal does NOT dispose the texture —
-//              the shared texture is owned by Game.stop().
-//          (8) v5 channel routing — material.map is null and material.color
-//              is 0x000000 so the lit hemisphere does not double-count the
-//              texture (outgoingLight + totalEmissiveRadiance would saturate
-//              to white). Video lives ONLY in emissiveMap.
+//          (8) Disposal is idempotent — calling it twice does not throw.
+//          (9) Per-mesh disposal does NOT dispose the texture — the
+//              shared texture is owned by Game.stop().
 //
 // Gotchas: JSDOM (Vitest's default) does not actually decode MP4. We only
 //          assert that the VideoTexture was created and references the
 //          shared HTMLVideoElement — we don't try to play frames.
+//          onBeforeCompile wiring check inspects `material.onBeforeCompile`
+//          as a function — Three.js calls this on first program build,
+//          so we don't actually compile shaders in the test (no GL
+//          context). The function reference existing is sufficient proof
+//          the chroma-key was injected.
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('createVideoAsteroidMesh', () => {
@@ -69,124 +86,91 @@ describe('createVideoAsteroidMesh', () => {
     expect(mesh.type).toBe('Group');
   });
 
-  it('uses BoxGeometry sized to the original asteroid diameter (side = 2 × radius)', () => {
-    // Phase 7h v6: BoxGeometry replaces SphereGeometry. Box side equals
-    // the diameter of the original IcosahedronGeometry asteroid (2 ×
-    // radius) so the world-space bounding extent is preserved across
-    // v3 (sphere), v4/v5 (sphere) and v6 (box). Collision in
-    // asteroid.ts:resolveAsteroidCollision still uses SIZE_RADIUS for
-    // the radius check; the box's bounding sphere matches the original
-    // Iron Slag's diameter exactly.
+  it('uses IcosahedronGeometry at SIZE_RADIUS[size] (v11 swap from BoxGeometry)', () => {
+    // Phase 7h v11: IcosahedronGeometry replaces v6's BoxGeometry. The
+    // icosahedron has detail=0 → 20 flat triangular faces, 60 vertices,
+    // 80 triangles. The radius matches SIZE_RADIUS[size] (same as the
+    // original Iron Slag IcosahedronGeometry that this whole module
+    // swapped away from in v2 — v11 returns to it). Collision in
+    // asteroid.ts:resolveAsteroidCollision keys on SIZE_RADIUS so the
+    // bounding sphere of the new geometry matches the original exactly.
     const mesh = createVideoAsteroidMesh(AsteroidSize.LARGE);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect((inner as any).geometry).toBeInstanceOf(BoxGeometry);
+    expect((inner as any).geometry).toBeInstanceOf(IcosahedronGeometry);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const params = ((inner as any).geometry as BoxGeometry).parameters;
-    // BoxGeometry(width, height, depth) — all three equal the box side.
-    expect(params.width).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE] * 2);
-    expect(params.width).toBeCloseTo(4.4);
-    expect(params.height).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE] * 2);
-    expect(params.depth).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE] * 2);
+    const params = ((inner as any).geometry as IcosahedronGeometry).parameters;
+    // IcosahedronGeometry(radius, detail). Detail=0 means 20 flat faces —
+    // exactly the chunky faceted rock silhouette the user picked NO34 for.
+    expect(params.radius).toBeCloseTo(SIZE_RADIUS[AsteroidSize.LARGE]);
+    expect(params.radius).toBeCloseTo(2.2);
+    expect(params.detail).toBe(0);
   });
 
-  it('BoxGeometry UVs are remapped to cube-cross layout — 6 faces, each unique 1/4 × 1/3 portion', () => {
-    // Phase 7h v6: replace SphereGeometry with BoxGeometry + custom UV
-    // remap so each flat face shows a DIFFERENT portion of the same video.
-    // Default BoxGeometry UVs put the full texture on every face (visible
-    // repetition). The cube-cross layout assigns each face a unique
-    // 1/4 × 1/3 cell of the [0,1]² texture:
+  it('IcosahedronGeometry has a UV attribute (no remap required under v11)', () => {
+    // Phase 7h v11: we no longer rewrite the UV attribute. The icosahedron's
+    // PolyhedronGeometry spherical projection produces clustered UVs (20
+    // tiny triangles in UV space — most of the texture is un-sampled by
+    // any face), but with DoubleSide + chroma-key this reads as a chunky
+    // rock with video patches on the front, not as the "video missing on
+    // the back" v3 regression. The lab explicitly tested this — NO30
+    // (icosahedron at emissive 1.0) read as a "good" rock, and the user
+    // picked NO34 (icosahedron at 1.5) as the production winner.
     //
-    //            [ +Y top ]    col 1, row 0
-    //   [ -X ][ +Z ][ +X ][ -Z ]   cols 0..3, row 1
-    //            [ -Y bot ]    col 1, row 2
-    //
-    // Test asserts the new invariant: every face has its own UV range,
-    // each face spans exactly 1/4 of U and 1/3 of V, no two faces have
-    // identical (uMin, uMax, vMin, vMax), and the 6 ranges together
-    // tile [0,1]² (union of U = [0,1], union of V = [0,1]).
+    // Test: assert the UV attribute is present and has at least one
+    // vertex worth of data. We don't lock specific UV ranges — the
+    // icosahedron's UV projection is an internal Three.js detail that
+    // can change between versions without affecting the visual contract
+    // (chroma-key + DoubleSide are what make v11 work, not the UVs).
     const mesh = createVideoAsteroidMesh(AsteroidSize.MEDIUM);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const geom = (inner as any).geometry as BoxGeometry;
+    const geom = (inner as any).geometry as IcosahedronGeometry;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const uvAttr = (geom.attributes as any).uv;
-
-    // BoxGeometry has 24 UVs (6 faces × 4 vertices). Each face's 4 UVs
-    // should be at the 4 corners of its assigned cell.
-    expect(uvAttr.count).toBe(24);
-
-    const faceRanges: Array<{ uMin: number; uMax: number; vMin: number; vMax: number }> = [];
-    for (let face = 0; face < 6; face++) {
-      let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-      for (let v = 0; v < 4; v++) {
-        const idx = face * 4 + v;
-        const u = uvAttr.getX(idx);
-        const vt = uvAttr.getY(idx);
-        if (u < uMin) uMin = u;
-        if (u > uMax) uMax = u;
-        if (vt < vMin) vMin = vt;
-        if (vt > vMax) vMax = vt;
-      }
-      faceRanges.push({ uMin, uMax, vMin, vMax });
-    }
-
-    // Each face spans exactly 1/4 of the U axis and 1/3 of the V axis.
-    // Tolerance 2 instead of 3 — 1/3 = 0.3333... is not exact in Float32
-    // so toBeCloseTo with precision 3 (tolerance 0.0005) fails on the
-    // last digit. Precision 2 (tolerance 0.005) is the correct check.
-    for (const range of faceRanges) {
-      expect(range.uMax - range.uMin).toBeCloseTo(0.25, 2);
-      expect(range.vMax - range.vMin).toBeCloseTo(1 / 3, 2);
-    }
-
-    // No two faces have IDENTICAL (uMin, uMax, vMin, vMax). Different
-    // faces can share U or V in the cube-cross (top/bottom/front all
-    // share col 1 in U), but the cells must differ.
-    for (let i = 0; i < 6; i++) {
-      for (let j = i + 1; j < 6; j++) {
-        const a = faceRanges[i];
-        const b = faceRanges[j];
-        const identical =
-          a.uMin === b.uMin && a.uMax === b.uMax &&
-          a.vMin === b.vMin && a.vMax === b.vMax;
-        expect(identical).toBe(false);
-      }
-    }
-
-    // The 6 faces together tile the [0,1]×[0,1] texture with no gaps.
-    const allUMins = faceRanges.map(r => r.uMin);
-    const allUMaxs = faceRanges.map(r => r.uMax);
-    const allVMins = faceRanges.map(r => r.vMin);
-    const allVMaxs = faceRanges.map(r => r.vMax);
-    expect(Math.min(...allUMins)).toBeCloseTo(0, 5);
-    expect(Math.max(...allUMaxs)).toBeCloseTo(1, 5);
-    expect(Math.min(...allVMins)).toBeCloseTo(0, 5);
-    expect(Math.max(...allVMaxs)).toBeCloseTo(1, 5);
+    expect(uvAttr).toBeDefined();
+    // IcosahedronGeometry at detail=0 has 60 unique vertices → 60 UVs.
+    expect(uvAttr.count).toBeGreaterThan(0);
   });
 
-  it('wraps the geometry in a MeshStandardMaterial with a VideoTexture as emissiveMap', () => {
+  it('wraps the geometry in a MeshStandardMaterial with v11 contract', () => {
+    // Phase 7h v11 material contract:
+    //   - emissiveMap: VideoTexture (v5 channel routing — preserved)
+    //   - color: 0x000000 (v5 — zeroes diffuse contribution)
+    //   - emissive: 0xffffff (v5 — drives totalEmissiveRadiance)
+    //   - emissiveIntensity: 1.5 (v11 — was 1.0 in v6)
+    //   - side: DoubleSide (v11 — was FrontSide default in v6)
+    //   - transparent: true (v11 — required for chroma-key discard to
+    //     work; depth buffer would otherwise block sight-through for
+    //     discarded fragments)
+    //   - onBeforeCompile: wired (v11 — chroma-key inject)
     const mesh = createVideoAsteroidMesh(AsteroidSize.SMALL);
     const inner = mesh.children[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const material = (inner as any).material as MeshStandardMaterial;
     expect(material).toBeInstanceOf(MeshStandardMaterial);
-    // Phase 7h v5: video lives in emissiveMap (post-lighting additive slot),
-    // NOT the diffuse `map` slot. v4 routed it through both `map` AND
-    // emissive, which double-counted on the lit hemisphere:
-    //   outgoingLight ≈ directional * (white map) ≈ 1.0
-    //   totalEmissiveRadiance = 1.0
-    //   finalColor ≈ 2.0  →  tonemapped to 1.0 = pure white ("all white asteroid")
-    // v5 keeps the texture only in emissiveMap and sets `color: 0x000000`
-    // so `outgoingLight ≈ 0` on every face. Lit and unlit hemispheres both
-    // read the video color at full saturation, no additive overshoot.
-    // Trade-off: no PBR contour from the directional light — surface reads
-    // as a flat video wrap. Correct intent for a self-illuminated asteroid.
+    // v5 channel routing (UNCHANGED in v11): video lives in emissiveMap
+    // only. v4 routed it through both `map` and `emissive`, which double-
+    // counted on the lit hemisphere (outgoingLight + totalEmissiveRadiance
+    // ≈ 2.0 → tonemapped to pure white).
     expect(material.map).toBeNull();
     expect(material.emissiveMap).toBeInstanceOf(VideoTexture);
     expect(material.color.getHex()).toBe(0x000000);
     expect(material.emissive.getHex()).toBe(0xffffff);
-    expect(material.emissiveIntensity).toBe(1);
+    // v11 brightness: 1.5 was the max-safe value in the lab's single-axis
+    // sweep (1.6 over-blooms via UnrealBloomPass → tonemapped to white).
+    expect(material.emissiveIntensity).toBe(1.5);
+    // v11 DoubleSide: back faces render. The deciding-factor bug NO34
+    // was picked for — without this the asteroid disappears when rotating.
+    expect(material.side).toBe(DoubleSide);
+    // v11 transparent: required for chroma-key discard (see Gotchas in
+    // src/chroma-key.ts). Without this, the depth buffer blocks sight-
+    // through for discarded fragments.
+    expect(material.transparent).toBe(true);
+    // v11 chroma-key: onBeforeCompile is set. We don't actually compile
+    // shaders here (no GL context) — checking the function exists is
+    // sufficient proof the inject was wired.
+    expect(typeof material.onBeforeCompile).toBe('function');
   });
 
   it('shares one VideoTexture across multiple asteroids (singleton video)', () => {
@@ -220,22 +204,19 @@ describe('createVideoAsteroidMesh', () => {
     expect(stash.texture).toBe(matEmissiveMap);
   });
 
-  it('produces box meshes with side = SIZE_RADIUS[size] × 2 for every AsteroidSize', () => {
-    // Phase 7h v6 requirement: "must be made to the same size as the
-    // Original Generated Asteroid". For a BoxGeometry, that means each
-    // side equals the diameter of the original sphere (2 × radius).
-    // Both collision (in asteroid.ts:resolveAsteroidCollision) and visual
-    // radius (in asteroid.ts:SIZE_RADIUS) are still keyed on `radius`,
-    // but the box's bounding extent matches the sphere's diameter for
-    // world-space parity with v3/v4/v5.
+  it('produces icosahedron meshes at SIZE_RADIUS[size] for every AsteroidSize', () => {
+    // Phase 7h requirement: "must be made to the same size as the Original
+    // Generated Asteroid". The original was IcosahedronGeometry(radius),
+    // and v11 returns to exactly that — IcosahedronGeometry(radius, 0)
+    // at radius = SIZE_RADIUS[size]. Collision keys on radius via the
+    // SIZE_RADIUS lookup, so the bounding sphere matches the original
+    // exactly for every AsteroidSize.
     for (const size of [AsteroidSize.TINY, AsteroidSize.SMALL, AsteroidSize.MEDIUM, AsteroidSize.LARGE]) {
       const mesh = createVideoAsteroidMesh(size);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const geom = (mesh.children[0] as any).geometry as BoxGeometry;
-      const expectedSide = SIZE_RADIUS[size] * 2;
-      expect(geom.parameters.width).toBeCloseTo(expectedSide);
-      expect(geom.parameters.height).toBeCloseTo(expectedSide);
-      expect(geom.parameters.depth).toBeCloseTo(expectedSide);
+      const geom = (mesh.children[0] as any).geometry as IcosahedronGeometry;
+      expect(geom.parameters.radius).toBeCloseTo(SIZE_RADIUS[size]);
+      expect(geom.parameters.detail).toBe(0);
     }
   });
 });
