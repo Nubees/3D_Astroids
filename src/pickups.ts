@@ -442,7 +442,7 @@ export const BOMB_STRIKE_DAMAGE = 10;
 //          convenient because the test file already imports from here.
 // ═══════════════════════════════════════════════════════════════════════════
 
-export type KillSource = 'BULLET' | 'BOMB' | 'MISSILE' | 'WALL' | 'SHARD';
+export type KillSource = 'BULLET' | 'BOMB' | 'MISSILE' | 'WALL' | 'SHARD' | 'DRONE';
 
 export { CRYSTAL_HEALTH as CRYSTAL_HEALTH_FOR_TEST } from './asteroid';
 

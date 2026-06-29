@@ -48,6 +48,14 @@ export interface Projectile {
   velocity: Vector2;
   lifetime: number;
   readonly maxLifetime: number;
+  // Phase 7i Sprint 2 — tagged kill-source on projectiles so drone-fired shots
+  // can be distinguished from player blaster shots. Defaults to 'BULLET'
+  // when omitted so existing call sites that build projectiles via
+  // createProjectile(spawn, dir) continue to compile unchanged. Game's
+  // fireDroneProjectile passes 'DRONE' through this field so the kill
+  // pipeline (handleCollisions → destroyAsteroid → TagSource → sparks)
+  // knows the projectile came from a drone.
+  source?: 'BULLET' | 'BOMB' | 'DRONE';
 }
 
 export enum AsteroidSize {

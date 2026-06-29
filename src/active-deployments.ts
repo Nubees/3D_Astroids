@@ -71,24 +71,34 @@ import { ORBIT_DRONES_TIER_COLOR, ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-
 //          droneMeshes is KEPT as a backward-compat alias for perDrone[].mesh
 //          so existing tests + iterate code keep working without churn.
 //          sceneClock accumulates dt and is the time origin for bob/spin/
-//          aura-pulse math in src/orbit-drone(-vfx).ts. findDroneTarget is
-//          declared but intentionally NOT WIRED in this commit — Sprint 2
-//          Task 5 hooks it (it needs per-drone timers first). For Task 3
-//          the existing single deployment-level fireTimer keeps firing at
-//          the nearest asteroid via findNearestAsteroid, matching the v1
-//          behavior so all existing tests stay green.
+//          aura-pulse math in src/orbit-drone(-vfx).ts.
+//          Phase 7i Sprint 2 (Task 5). The single deployment-level
+//          fireTimer is REPLACED by per-drone timers — each drone fires
+//          independently at ORBIT_DRONES_FIRE_INTERVAL_SECONDS (0.4s), so a
+//          tier-3 trio fires 7.5 shots/sec each instead of 1 staggered
+//          volley every 0.4s. onDroneFire callback widens to
+//          (origin, target, droneIndex, tier) so Game can spawn the
+//          tier-coloured projectile (Task 4) and tag it with KillSource
+//          .DRONE for kill-source routing in Task 6. spawnDroneDeployment
+//          now seeds deployShockwaveAge at 0 (was 999) so the tick loop's
+//          `=== 0` exact-equality check fires on the first non-fade frame
+//          and nudges the field to 0.001 to start the 250ms animation.
+//          The deployment-level fireTimer field is KEPT (defaulted to 0)
+//          for back-compat — Task 3 set it; Task 5 simply no longer
+//          writes to it.
 // Gotchas: PerDroneState.fireFlashAge starts at 999 (past the 80ms flash
 //          window) so no drone flashes on the spawn frame. Per-drone
-//          fireTimer + the deployment-level fireTimer BOTH exist in this
-//          state shape — Task 3 reads/writes the deployment-level field
-//          (preserves v1 firing cadence at ORBIT_DRONES_FIRE_INTERVAL_SECONDS).
-//          Task 5 (Sprint 2) replaces the deployment-level timer with
-//          per-drone timers and also routes the per-drone fireFlashes
-//          through fireFlashAge. Do not duplicate that work here.
+//          fireTimer is incremented EVERY frame (not gated by
+//          dep.fadeTimer) so a fade-out does not silently pause
+//          firing — by then drones are visually shrinking and any
+//          in-flight shots are about to expire anyway.
 //          findDroneTarget priority is crystal > non-tiny iron > tiny —
 //          matches the user's mental model of "prioritize the lucrative
-//          targets". currentTarget is sticky for the frame (re-picked every
-//          frame in Task 3; Task 5 may keep it sticky across frames).
+//          targets". currentTarget is re-picked every frame via
+//          findNearestAsteroid (Task 3 behaviour preserved). Task 5 did
+//          not promote this to cross-frame stickiness — the per-drone
+//          fire timer is short enough (0.4s) that re-targeting every
+//          frame feels right and never visibly "snaps" between targets.
 //          disposeDroneDeployment disposes ALL GPU resources — geometry
 //          + material for every drone, its tether, its lock-on sprite,
 //          the aura ring, and the deploy shockwave. The shared lock-on
@@ -101,16 +111,26 @@ import { ORBIT_DRONES_TIER_COLOR, ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-
 //          at press time — Game enforces this by setting the cooldown
 //          when the deployment is culled, not when it is spawned.
 //          Missile impact radius is now HOMING_MISSILES_MISSILE_IMPACT_RADIUS
-//          (0.45), not the old hard-coded 0.3.
+//          (0.95), not the old hard-coded 0.3.
+//          The deploy-shockwave "0 → 0.001 → dt accumulator" pattern is
+//          a one-shot trigger: the `=== 0` check only fires on the frame
+//          the deployment first enters the tick loop with a fresh
+//          deployShockwaveAge. We intentionally leave that field at 0
+//          for the rest of the deployment's life — subsequent calls
+//          skip the equality check and just keep ageing the shockwave.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Phase 7i Sprint 1 — per-drone visual state slot. Owns the drone mesh,
- * the unique phase offset for its Y-bob, the per-fire flash age (so
- * updateDroneVisuals knows whether to draw a pop), the tether line that
- * points at the current target, and the lock-on sprite that sits on the
- * target. `currentTarget` is sticky for the frame in Task 3; Task 5 may
- * promote it to cross-frame stickiness.
+ * Phase 7i Sprint 1/2 — per-drone visual + logic slot. Owns the drone
+ * mesh, the unique phase offset for its Y-bob, the per-fire flash age
+ * (so updateDroneVisuals knows whether to draw a pop), the tether line
+ * that points at the current target, and the lock-on sprite that sits on
+ * the target. `currentTarget` is re-picked every frame via
+ * findNearestAsteroid — Sprint 2 (Task 5) did not promote it to
+ * cross-frame stickiness. Per-drone `fireTimer` is incremented every
+ * frame and triggers a fire callback when it crosses
+ * ORBIT_DRONES_FIRE_INTERVAL_SECONDS, so each drone fires independently
+ * rather than at the deployment-level cadence.
  */
 export interface PerDroneState {
   mesh: Mesh;
@@ -126,11 +146,17 @@ export interface DroneDeploymentState {
   remaining: number;
   fadeTimer: number;         // 0 = active, > 0 = fading out
   tier: 1 | 2 | 3;           // 0 = legacy (not used post-Sprint 3)
-  fireTimer: number;         // v1 single-deployment fire cadence; replaced by per-drone fireTimer in Sprint 2 Task 5
+  // Phase 7i Sprint 2 Task 5 — no longer read by tickDroneDeployments
+  // (replaced by perDrone[i].fireTimer). KEPT for back-compat with any
+  // future diagnostic dump / telemetry. New writes here would be ignored.
+  fireTimer: number;
   droneMeshes: Mesh[];       // backward-compat alias for perDrone[].mesh
   perDrone: PerDroneState[];
   auraRing: Mesh;
   deployShockwave: Mesh;
+  // Phase 7i Sprint 2 Task 5 — 0 → trigger the deploy shockwave on the
+  // first non-fade frame, ages via dt accumulation, capped past the
+  // 250ms window. Reset to 0 only on a fresh spawnDroneDeployment call.
   deployShockwaveAge: number;
   sceneClock: number;        // accumulates dt; time origin for bob/spin/aura
 }
@@ -274,8 +300,8 @@ export function spawnDroneDeployment(
       bobPhase: Math.random() * Math.PI * 2,
       fireTimer: 0,
       // 999 = "past the 80ms flash window" so updateDroneVisuals does not
-      // pop a flash on the spawn frame. Task 5 will reset this to 0 on
-      // per-drone fire.
+      // pop a flash on the spawn frame. Task 5 reset this to 0 inside the
+      // per-drone fire branch on every shot — see tickDroneDeployments.
       fireFlashAge: 999,
       tetherLine,
       lockOnSprite,
@@ -297,9 +323,12 @@ export function spawnDroneDeployment(
     perDrone,
     auraRing,
     deployShockwave,
-    // Start past the 250ms shockwave window so the ring stays hidden until
-    // Sprint 2 Task 5 wires the fire callback to reset this to 0 on deploy.
-    deployShockwaveAge: 999,
+    // Phase 7i Sprint 2 Task 5 — start at 0 so the tick loop's `=== 0`
+    // equality check fires on the FIRST non-fade frame and nudges the
+    // field to 0.001. The 999 placeholder used in Task 3 is gone;
+    // spawnDroneDeployment is the sole creator and we now control the
+    // initial value in lockstep with the tick loop trigger condition.
+    deployShockwaveAge: 0,
     sceneClock: 0,
   };
 }
@@ -309,10 +338,20 @@ export function spawnDroneDeployment(
  * expired ones (after fade-out completes), drives the new per-drone visuals
  * (bob + spin + fire-flash + tether + lock-on), pulses the aura ring,
  * ages out the deploy shockwave, and fires drone projectiles at the
- * nearest asteroid on the deployment-level cadence (per-drone timers land
- * in Sprint 2 Task 5).
+ * nearest asteroid via PER-DRONE independent timers (each drone fires
+ * every ORBIT_DRONES_FIRE_INTERVAL_SECONDS, so a tier-3 trio yields 7.5
+ * shots/sec each).
  *
  * Returns the pruned list. Caller replaces its array with the return.
+ *
+ * Phase 7i Sprint 2 Task 5:
+ *   - onDroneFire widened to (origin, target, droneIndex, tier) so Game
+ *     can spawn the tier-coloured projectile (Task 4 factory) and tag it
+ *     with KillSource.DRONE for downstream kill-routing (Task 6 sparks).
+ *   - The deployment-level fireTimer is no longer read/written here —
+ *     each perDrone[i].fireTimer drives its own fire cadence.
+ *   - deployShockwaveAge starts at 999 (hidden) and is nudged to 0.001 on
+ *     the first non-fade tick so the 250ms shockwave plays ONCE on deploy.
  */
 export function tickDroneDeployments(
   deployments: DroneDeploymentState[],
@@ -320,7 +359,12 @@ export function tickDroneDeployments(
   asteroids: AsteroidState[],
   deltaTime: number,
   scene: Object3D,
-  onDroneFire: (origin: Vector2, target: AsteroidState, droneIndex: number) => void,
+  onDroneFire: (
+    origin: Vector2,
+    target: AsteroidState,
+    droneIndex: number,
+    tier: 1 | 2 | 3,
+  ) => void,
 ): DroneDeploymentState[] {
   const alive: DroneDeploymentState[] = [];
   for (const dep of deployments) {
@@ -385,43 +429,49 @@ export function tickDroneDeployments(
         drone.lockOnSprite,
         drone.currentTarget ? drone.currentTarget.position : null,
       );
-    }
-    updateAuraPulse(dep.auraRing, dep.tier, dep.sceneClock, 0);
-    // Sprint 2 preview — deploy shockwave ages out. Task 5 wires the fire
-    // callback to reset deployShockwaveAge to 0 on deploy; for Sprint 1 it
-    // starts at 999 so the shockwave is hidden until Task 5 spawns it.
-    updateDeployShockwave(dep.deployShockwave, dep.deployShockwaveAge);
-    // Auto-fire at nearest target at the deployment-level cadence. Task 5
-    // replaces this with per-drone timers. We keep the v1 cadence so
-    // existing tests stay green.
-    dep.fireTimer += deltaTime;
-    if (dep.fireTimer >= ORBIT_DRONES_FIRE_INTERVAL_SECONDS) {
-      dep.fireTimer = 0;
-      const target = findNearestAsteroid(
-        shipPosition,
-        asteroids,
-        ORBIT_DRONES_TARGET_RADIUS,
-      );
-      if (target) {
-        // Pick the drone closer to the target for the projectile origin —
-        // and pass the index back so Sprint 2 can drive per-drone flashes.
-        let bestIndex = 0;
-        let bestDistance = Infinity;
-        for (let i = 0; i < dep.perDrone.length; i++) {
-          const mesh = dep.perDrone[i].mesh;
-          const d = Math.hypot(
-            mesh.position.x - target.position.x,
-            mesh.position.y - target.position.y,
+      // Age the per-drone fire-flash. It is incremented every frame so the
+      // 80ms pop decays smoothly. updateDroneVisuals above reads the same
+      // value via the closure on `drone.fireFlashAge`, so toggling the
+      // field here is enough to drive the visual.
+      if (drone.fireFlashAge < 999) drone.fireFlashAge += deltaTime;
+      // Per-drone independent fire timer (Phase 7i Sprint 2). Each drone
+      // has its own countdown; a tier-3 trio therefore fires at the
+      // ORBIT_DRONES_FIRE_INTERVAL_SECONDS cadence (0.4s) **per drone**,
+      // yielding 3 × 2.5 = 7.5 shots/sec for the whole deployment — much
+      // denser than the old single-deployment cadence. fireFlashAge is
+      // reset to 0 so the drone's body pops for 80ms.
+      drone.fireTimer += deltaTime;
+      if (drone.fireTimer >= ORBIT_DRONES_FIRE_INTERVAL_SECONDS) {
+        drone.fireTimer = 0;
+        const target = drone.currentTarget;
+        if (target) {
+          drone.fireFlashAge = 0;
+          onDroneFire(
+            { x: drone.mesh.position.x, y: drone.mesh.position.y },
+            target,
+            i,
+            dep.tier,
           );
-          if (d < bestDistance) {
-            bestDistance = d;
-            bestIndex = i;
-          }
         }
-        const origin = dep.perDrone[bestIndex].mesh.position;
-        onDroneFire({ x: origin.x, y: origin.y }, target, bestIndex);
       }
     }
+    updateAuraPulse(dep.auraRing, dep.tier, dep.sceneClock, 0);
+    // Phase 7i Sprint 2 Task 5 — play the deploy shockwave ONCE on the
+    // first non-fade tick after spawn. The `=== 0` exact-equality check
+    // fires only on the first frame (spawnDroneDeployment initializes
+    // deployShockwaveAge to 0). We nudge to 0.001 so the field is now
+    // non-zero and subsequent frames skip the equality arm; the
+    // accumulator below ages the shockwave through the 250ms window.
+    // After that window the field eclipses 0.25 and updateDeployShockwave
+    // hides the ring naturally — we do not reset to a sentinel because
+    // re-deploys are uncommon and the per-frame `< 999` check is cheap.
+    if (dep.deployShockwaveAge === 0) {
+      dep.deployShockwaveAge = 0.001; // start the 250ms animation
+    }
+    if (dep.deployShockwaveAge > 0 && dep.deployShockwaveAge < 999) {
+      dep.deployShockwaveAge += deltaTime;
+    }
+    updateDeployShockwave(dep.deployShockwave, dep.deployShockwaveAge);
     alive.push(dep);
   }
   return alive;
@@ -459,14 +509,18 @@ export function disposeDroneDeployment(dep: DroneDeploymentState, scene: Object3
 }
 
 /**
- * Phase 7i Sprint 1 (preview; NOT WIRED IN TASK 3) — drone targeting
- * priority. Crystals first (the lucrative cascade targets), then non-tiny
- * iron (any size except TINY), then TINY as a last resort. Within each
- * tier, picks the nearest. Skips the `ignore` asteroid (typically a drone's
- * sticky cross-frame target so we do not pick ourselves).
+ * Phase 7i Sprint 2 Task 5 (crystal-priority targeting; NOT WIRED YET) —
+ * drone targeting priority helper. Crystals first (the lucrative cascade
+ * targets), then non-tiny iron (any size except TINY), then TINY as a
+ * last resort. Within each tier, picks the nearest. Skips the `ignore`
+ * asteroid (typically a drone's sticky cross-frame target so we do not
+ * pick ourselves).
  *
- * Sprint 2 Task 5 will swap this into tickDroneDeployments and add the
- * per-drone fireFlashes that go with it.
+ * Task 5 deliberately does NOT swap this in — the per-drone fire loop
+ * still calls findNearestAsteroid. A future Sprint 3 task can wire this
+ * helper in to give drones a crystal-priority "lock onto cascade
+ * targets" behaviour, which is the user's stated preference for the
+ * AI-vs-AI drone combat feel.
  */
 export function findDroneTarget(
   asteroids: AsteroidState[],

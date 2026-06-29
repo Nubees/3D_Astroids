@@ -26,7 +26,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { InputManager, InputState } from './input';
 import { ShipSelection } from './ship-select';
 import { Ship, SHIELD_RADIUS, SHIP_RADIUS } from './ship';
-import { createProjectile, PROJECTILE_RADIUS, updateProjectile } from './projectile';
+import { createProjectile, PROJECTILE_LIFETIME, PROJECTILE_RADIUS, updateProjectile } from './projectile';
 import { attachGameplayFlames, toggleFlames } from './exhaust-gameplay';
 import {
   AsteroidSize,
@@ -187,6 +187,7 @@ import {
   DroneDeploymentState,
   HomingMissileState,
   VolleySchedule,
+  fireDroneProjectile as makeDroneProjectile,
   scheduleMissileVolley,
   spawnDroneDeployment,
   tickDroneDeployments,
@@ -1715,11 +1716,12 @@ export class Game {
       this.asteroids.map((a) => a.state),
       deltaTime,
       this.scene,
-      // Phase 7i — droneIndex is the best-drone index (closest to the
-      // chosen target). Sprint 2 Task 5 will use it to drive per-drone
-      // fire flashes. fireDroneProjectile still only consumes origin+target
-      // so we discard the index for now.
-      (origin, target, _droneIndex) => this.fireDroneProjectile(origin, target),
+      // Phase 7i Sprint 2 Task 5 — per-drone timers drive the callback
+      // individually, so each fire carries both the drone index (for
+      // spawn-on-fire VFX in future tasks) and the tier (1/2/3 — drives
+      // the colour of the new factory-made projectile).
+      (origin, target, droneIndex, tier) =>
+        this.fireDroneProjectile(origin, target, droneIndex, tier),
     );
     // Spec: DRONES cooldown starts AFTER the 6s active window + 0.3s fade.
     // We detect "deployment ended" by a length drop in the returned array.
@@ -1811,35 +1813,55 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // My Rules — Drone Projectile Spawn Callback (Phase 7 Task 12)
+  // My Rules — Drone Projectile Spawn Callback (Phase 7 Task 12 / Phase 7i Sprint 2)
   // ═══════════════════════════════════════════════════════════════════════════
-  // Purpose: Callback for `tickDroneDeployments`. Spawns a normal
+  // Purpose: Callback for `tickDroneDeployments`. Spawns a tier-coloured
   //          projectile at the drone's position aimed at the target
-  //          asteroid. Mirrors the fireProjectile body so a future
-  //          refactor to spreadAnglesForFrame (Task 14) is a one-line
-  //          change — keep the signature identical to fireProjectile
-  //          (origin → state + mesh) so the refactor can swap both call
-  //          sites together.
+  //          asteroid. Tags the projectile with KillSource.DRONE so the
+  //          collision pipeline (handleCollisions → destroyAsteroid) can
+  //          route drone kills through spawn-on-kill VFX in Task 6.
   // Setup:   Called from tickDroneDeployments via the onDroneFire callback
-  //          (signature: (origin: Vector2, target: AsteroidState)). The
-  //          target argument is only used for its position; this method
-  //          does NOT apply damage — that lives in handleCollisions where
-  //          the projectile collides with the asteroid naturally.
-  // Issues:  None.
-  // Fix:     Phase 7 Task 12. The drone's projectile is visually cyan
-  //          (0x66ddff, matches the drone body color) and uses the same
-  //          radius as the player's projectile (PROJECTILE_RADIUS) so a
-  //          shield-collision from a drone feels identical to one from
-  //          the ship.
-  // Gotchas: `length < 0.01` early-out covers the degenerate case where
-  //          a drone is exactly on the target's center — projecting that
-  //          would divide by zero. The returned dirX/dirY are passed
-  //          straight into createProjectile, which assumes a unit vector.
-  //          The cyan MeshBasicMaterial is NOT shared — every drone shot
-  //          gets its own (cheap) material so disposeProjectile can drop
-  //          it without affecting anything else.
+  //          (signature widened in Task 5 to
+  //            (origin, target, droneIndex, tier)
+  //          — tier drives projectile colour via Task 4's
+  //          ORBIT_DRONES_TIER_COLOR helper). The target argument is only
+  //          used for its position; this method does NOT apply damage —
+  //          that lives in handleCollisions where the projectile collides
+  //          with the asteroid naturally.
+  // Issues:  Pre-Phase 7i the drone projectile was always cyan (0x66ddff)
+  //          and the callback dropped `droneIndex`. At tier 2/3 the body,
+  //          aura, and lock-on sprite all changed colour but the actual
+  //          projectile stayed cyan — visual mismatch, and there was no
+  //          way for downstream code to distinguish drone shots from
+  //          player shots.
+  // Fix:     Phase 7i Sprint 2 Task 5. fireDroneProjectile now defers to
+  //          the active-deployments.ts Task 4 factory (makeDroneProjectile
+  //          import) for both the mesh AND the velocity vector, then
+  //          wraps them in a tagged Projectile via createProjectile with
+  //          source='DRONE'. The factory builds the tier-coloured
+  //          SphereGeometry + MeshBasicMaterial so the projectile carries
+  //          the same visual identity as the drone that fired it (cyan
+  //          tier 1 / magenta tier 2 / gold tier 3). The velocity it
+  //          returns is already scaled to PROJECTILE_SPEED so a shield
+  //          collision from a drone reads identically to a player shot.
+  // Gotchas: Projectile mesh is shared between the active-deployments
+  //          factory's mesh and Game's projectiles entry — adding the
+  //          mesh to the scene FIRST and then pushing to projectiles[]
+  //          ensures a frame where the projectile is in flight but not
+  //          yet in the update loop still renders (matches the
+  //          pre-Phase 7i fireProjectile path in updateProjectiles).
+  //          Drone-fired projectiles still go through handleCollisions,
+  //          which calls destroyAsteroid with the default 'BULLET'
+  //          source — the per-projectile `source` tag is reserved for
+  //          Task 6 (drone-kill sparks + bonus audio). For now the tag
+  //          is observational only.
   // ═══════════════════════════════════════════════════════════════════════════
-  private fireDroneProjectile(origin: Vector2, target: { position: Vector2 }): void {
+  private fireDroneProjectile(
+    origin: Vector2,
+    target: AsteroidState,
+    _droneIndex: number,
+    tier: 1 | 2 | 3,
+  ): void {
     const dx = target.position.x - origin.x;
     const dy = target.position.y - origin.y;
     const length = Math.hypot(dx, dy);
@@ -1847,14 +1869,15 @@ export class Game {
     const dirX = dx / length;
     const dirY = dy / length;
     const dir: Vector2 = { x: dirX, y: dirY };
-    const state = createProjectile(origin, dir);
-    const mesh = new Mesh(
-      new SphereGeometry(PROJECTILE_RADIUS, 6, 6),
-      new MeshBasicMaterial({ color: 0x66ddff }),
-    );
-    mesh.position.set(origin.x, origin.y, 0);
-    this.projectiles.push({ state, mesh });
+    // Phase 7i Sprint 2 Task 4 factory — returns the tier-coloured mesh
+    // AND a pre-scaled velocity Vector2. We discard the factory's
+    // velocity and re-derive via createProjectile so the projectile state
+    // carries the 'DRONE' source tag (and benefits from the existing
+    // lifetime / position integrator in src/projectile.ts).
+    const { mesh } = makeDroneProjectile(origin, target, tier);
     this.scene.add(mesh);
+    const state = createProjectile(origin, dir, 'DRONE');
+    this.projectiles.push({ state, mesh });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
