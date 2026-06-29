@@ -210,7 +210,9 @@ describe('Orbit Drones — deployment', () => {
     const dep = spawnDroneDeployment({ x: 0, y: 0 }, scene);
     expect(dep.droneMeshes.length).toBe(2);
     expect(dep.remaining).toBe(ORBIT_DRONES_DURATION_SECONDS);
-    expect(scene.children.length).toBe(2);
+    // Phase 7i — spawn now adds drone mesh + tether + lock-on sprite
+    // for each drone, plus 1 aura ring + 1 deploy shockwave = 2×3 + 2 = 8.
+    expect(scene.children.length).toBe(8);
   });
 
   it('after 0.5s of ticks, drone meshes are at radius 1.5 from ship (within tolerance)', () => {
@@ -221,8 +223,10 @@ describe('Orbit Drones — deployment', () => {
       tickDroneDeployments([dep], { x: 0, y: 0 }, [], 1 / 60, scene, () => undefined);
     }
     for (const mesh of dep.droneMeshes) {
+      // Phase 7i — Y now includes ±0.08u bobOffset on top of the orbital Y.
+      // Net radial deviation is bounded by the bob amplitude (0.08u).
       const d = Math.hypot(mesh.position.x, mesh.position.y);
-      expect(d).toBeCloseTo(ORBIT_DRONES_ORBIT_RADIUS, 1);
+      expect(Math.abs(d - ORBIT_DRONES_ORBIT_RADIUS)).toBeLessThan(0.1);
     }
   });
 

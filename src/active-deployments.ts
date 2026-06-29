@@ -3,12 +3,15 @@ import {
   DoubleSide,
   Group,
   IcosahedronGeometry,
+  Line,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
+  Sprite,
+  SpriteMaterial,
 } from 'three';
-import { AsteroidSize, AsteroidState, Vector2 } from './types';
+import { AsteroidKind, AsteroidSize, AsteroidState, Vector2 } from './types';
 import {
   HOMING_MISSILES_DAMAGE,
   HOMING_MISSILES_MISSILE_IMPACT_RADIUS,
@@ -20,20 +23,30 @@ import {
   HOMING_MISSILES_VOLLEY_COUNT,
   HOMING_MISSILES_VOLLEY_STAGGER_MS,
   ORBIT_DRONES_DAMAGE,
-  ORBIT_DRONES_DRONE_COUNT,
   ORBIT_DRONES_DURATION_SECONDS,
   ORBIT_DRONES_FADE_OUT_SECONDS,
   ORBIT_DRONES_FIRE_INTERVAL_SECONDS,
   ORBIT_DRONES_ORBIT_PERIOD_SECONDS,
   ORBIT_DRONES_ORBIT_RADIUS,
   ORBIT_DRONES_TARGET_RADIUS,
-  PICKUP_COLOR,
-  PickupKind,
 } from './pickups';
 import { createMissileAssembly, emitMissileSmokeRear } from './missile-vfx';
+import {
+  createAuraRing,
+  createDeployShockwave,
+  createDroneMesh,
+  createLockOnSprite,
+  createTetherLine,
+  updateAuraPulse,
+  updateDeployShockwave,
+  updateDroneVisuals,
+  updateLockOnSprite,
+  updateTetherLine,
+} from './orbit-drone-vfx';
+import { ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-drone';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Active Deployments (Phase 7 DIAL-UP / Phase 7b Power-Up VFX)
+// My Rules — Active Deployments (Phase 7 DIAL-UP / Phase 7b Power-Up VFX / Phase 7i)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Owns the per-frame state for the 2 deployable active pickup
 //          kinds (Orbit Drones + Homing Missiles). Kept out of game.ts so
@@ -41,30 +54,83 @@ import { createMissileAssembly, emitMissileSmokeRear } from './missile-vfx';
 // Setup:   Game owns `activeDeployments`, `missileSchedules`, and
 //          `homingMissiles` arrays. Each frame, Game calls
 //          tickDroneDeployments + tickMissileVolleySchedules + tickHomingMissiles.
-// Issues:  None.
-// Fix:     Phase 7 DIAL-UP. Drones and missiles both reuse the existing
-//          fireProjectile path; the only new meshes are the satellite
-//          drones (IcosahedronGeometry + emissive cyan MeshStandardMaterial)
-//          and missile trails (MeshBasicMaterial).
-//          Phase 7b: missiles now spawn via a staggered VolleySchedule
-//          (0/180/360/540ms) drained by tickMissileVolleySchedules; each
-//          missile is a Group (body + flame cone) with per-frame flame
-//          pulse and an InstancedMesh smoke trail (see src/missile-vfx.ts).
-// Gotchas: Drone cooldown starts AFTER the 6s active window expires, not
-//          at press time — the Game enforces this by setting the cooldown
+// Issues:  Pre-Phase 7i the drones had no per-frame animation — they moved
+//          in a circle but never spun, bobbed, flashed, projected auras,
+//          tethered to targets, or had a deploy shockwave. The previous
+//          state held a bare Mesh[] (droneMeshes), one deployment-level
+//          fireTimer, and one fadeTimer.
+// Fix:     Phase 7 DIAL-UP + 7b. Drones and missiles reuse the existing
+//          fireProjectile path; missiles now spawn via a staggered
+//          VolleySchedule (0/180/360/540ms) drained by tickMissileVolleySchedules.
+//          Phase 7i Sprint 1 (Task 3). DroneDeploymentState gains a tier
+//          index (1/2/3), a perDrone[] of visual slots (mesh + bobPhase +
+//          fireTimer + fireFlashAge + tetherLine + lockOnSprite + sticky
+//          currentTarget), plus shared auraRing / deployShockwave layers.
+//          droneMeshes is KEPT as a backward-compat alias for perDrone[].mesh
+//          so existing tests + iterate code keep working without churn.
+//          sceneClock accumulates dt and is the time origin for bob/spin/
+//          aura-pulse math in src/orbit-drone(-vfx).ts. findDroneTarget is
+//          declared but intentionally NOT WIRED in this commit — Sprint 2
+//          Task 5 hooks it (it needs per-drone timers first). For Task 3
+//          the existing single deployment-level fireTimer keeps firing at
+//          the nearest asteroid via findNearestAsteroid, matching the v1
+//          behavior so all existing tests stay green.
+// Gotchas: PerDroneState.fireFlashAge starts at 999 (past the 80ms flash
+//          window) so no drone flashes on the spawn frame. Per-drone
+//          fireTimer + the deployment-level fireTimer BOTH exist in this
+//          state shape — Task 3 reads/writes the deployment-level field
+//          (preserves v1 firing cadence at ORBIT_DRONES_FIRE_INTERVAL_SECONDS).
+//          Task 5 (Sprint 2) replaces the deployment-level timer with
+//          per-drone timers and also routes the per-drone fireFlashes
+//          through fireFlashAge. Do not duplicate that work here.
+//          findDroneTarget priority is crystal > non-tiny iron > tiny —
+//          matches the user's mental model of "prioritize the lucrative
+//          targets". currentTarget is sticky for the frame (re-picked every
+//          frame in Task 3; Task 5 may keep it sticky across frames).
+//          disposeDroneDeployment disposes ALL GPU resources — geometry
+//          + material for every drone, its tether, its lock-on sprite,
+//          the aura ring, and the deploy shockwave. The shared lock-on
+//          CanvasTexture is module-scope so we DO NOT dispose it per
+//          deployment (mirrors the sprite-texture rule in src/missile-vfx.ts).
+//          FADE_FRAME_SCALE=0.95 means a 0.3s fade-out at 60fps scales
+//          drones down by 0.95^18 ≈ 0.4× → reads as a smooth shrink,
+//          not a pop.
+//          Drone cooldown starts AFTER the 6s active window expires, not
+//          at press time — Game enforces this by setting the cooldown
 //          when the deployment is culled, not when it is spawned.
-//          Missiles track the NEAREST asteroid in HOMING_MISSILES_TRACKING_RADIUS
-//          each frame; if none in range, they fly straight.
 //          Missile impact radius is now HOMING_MISSILES_MISSILE_IMPACT_RADIUS
 //          (0.45), not the old hard-coded 0.3.
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Phase 7i Sprint 1 — per-drone visual state slot. Owns the drone mesh,
+ * the unique phase offset for its Y-bob, the per-fire flash age (so
+ * updateDroneVisuals knows whether to draw a pop), the tether line that
+ * points at the current target, and the lock-on sprite that sits on the
+ * target. `currentTarget` is sticky for the frame in Task 3; Task 5 may
+ * promote it to cross-frame stickiness.
+ */
+export interface PerDroneState {
+  mesh: Mesh;
+  bobPhase: number;          // unique random phase offset for Y-bob
+  fireTimer: number;         // per-drone countdown (Sprint 2 — Task 5)
+  fireFlashAge: number;      // 0 = firing just happened, ramps to 0 over 80ms
+  tetherLine: Line;          // Phase 7i Sprint 1
+  lockOnSprite: Sprite;      // Phase 7i Sprint 1
+  currentTarget: AsteroidState | null;
+}
+
 export interface DroneDeploymentState {
   remaining: number;
-  droneMeshes: Mesh[];
-  phase: number;
-  fireTimer: number;
-  fadeTimer: number; // 0 = active, > 0 = fading out
+  fadeTimer: number;         // 0 = active, > 0 = fading out
+  tier: 1 | 2 | 3;           // 0 = legacy (not used post-Sprint 3)
+  fireTimer: number;         // v1 single-deployment fire cadence; replaced by per-drone fireTimer in Sprint 2 Task 5
+  droneMeshes: Mesh[];       // backward-compat alias for perDrone[].mesh
+  perDrone: PerDroneState[];
+  auraRing: Mesh;
+  deployShockwave: Mesh;
+  deployShockwaveAge: number;
+  sceneClock: number;        // accumulates dt; time origin for bob/spin/aura
 }
 
 export interface HomingMissileState {
@@ -189,35 +255,60 @@ export function knockbackAsteroid(
 export function spawnDroneDeployment(
   shipPosition: Vector2,
   scene: Object3D,
+  tier: 1 | 2 | 3 = 1,
 ): DroneDeploymentState {
-  const meshes: Mesh[] = [];
-  const cyanColor = PICKUP_COLOR[PickupKind.ORBIT_DRONES];
-  for (let i = 0; i < ORBIT_DRONES_DRONE_COUNT; i++) {
-    const geometry = new IcosahedronGeometry(0.12, 0);
-    const material = new MeshStandardMaterial({
-      color: cyanColor,
-      emissive: cyanColor,
-      emissiveIntensity: 0.8,
-      flatShading: true,
-    });
-    const mesh = new Mesh(geometry, material);
+  const droneCount = ORBIT_DRONES_TIER_DRONE_COUNT(tier);
+  const perDrone: PerDroneState[] = [];
+  const droneMeshes: Mesh[] = [];
+  for (let i = 0; i < droneCount; i++) {
+    const mesh = createDroneMesh(tier);
     mesh.position.set(shipPosition.x, shipPosition.y, 0);
     scene.add(mesh);
-    meshes.push(mesh);
+    droneMeshes.push(mesh);
+    const tetherLine = createTetherLine(tier);
+    const lockOnSprite = createLockOnSprite(tier);
+    perDrone.push({
+      mesh,
+      bobPhase: Math.random() * Math.PI * 2,
+      fireTimer: 0,
+      // 999 = "past the 80ms flash window" so updateDroneVisuals does not
+      // pop a flash on the spawn frame. Task 5 will reset this to 0 on
+      // per-drone fire.
+      fireFlashAge: 999,
+      tetherLine,
+      lockOnSprite,
+      currentTarget: null,
+    });
+    scene.add(tetherLine);
+    scene.add(lockOnSprite);
   }
+  const auraRing = createAuraRing(tier);
+  scene.add(auraRing);
+  const deployShockwave = createDeployShockwave(tier);
+  scene.add(deployShockwave);
   return {
     remaining: ORBIT_DRONES_DURATION_SECONDS,
-    droneMeshes: meshes,
-    phase: 0,
-    fireTimer: 0,
     fadeTimer: 0,
+    tier,
+    fireTimer: 0,
+    droneMeshes,
+    perDrone,
+    auraRing,
+    deployShockwave,
+    // Start past the 250ms shockwave window so the ring stays hidden until
+    // Sprint 2 Task 5 wires the fire callback to reset this to 0 on deploy.
+    deployShockwaveAge: 999,
+    sceneClock: 0,
   };
 }
 
 /**
  * Tick all live drone deployments. Mutates `deployments` in place: culls
- * expired ones (after fade-out completes), updates mesh positions, fires
- * drone projectiles at the nearest asteroid.
+ * expired ones (after fade-out completes), drives the new per-drone visuals
+ * (bob + spin + fire-flash + tether + lock-on), pulses the aura ring,
+ * ages out the deploy shockwave, and fires drone projectiles at the
+ * nearest asteroid on the deployment-level cadence (per-drone timers land
+ * in Sprint 2 Task 5).
  *
  * Returns the pruned list. Caller replaces its array with the return.
  */
@@ -227,25 +318,23 @@ export function tickDroneDeployments(
   asteroids: AsteroidState[],
   deltaTime: number,
   scene: Object3D,
-  onDroneFire: (origin: Vector2, target: AsteroidState) => void,
+  onDroneFire: (origin: Vector2, target: AsteroidState, droneIndex: number) => void,
 ): DroneDeploymentState[] {
   const alive: DroneDeploymentState[] = [];
   for (const dep of deployments) {
+    dep.sceneClock += deltaTime;
     if (dep.fadeTimer > 0) {
-      // Fading out — shrink and dispose after FADE_OUT_SECONDS.
-      for (const mesh of dep.droneMeshes) {
-        mesh.scale.multiplyScalar(FADE_FRAME_SCALE);
+      // Fading out — shrink meshes (tether/sprite/aura/shockwave all go
+      // away with their parent deployment via dispose) and dispose when
+      // the fade completes. We only touch the drone meshes here so we do
+      // not also dispose a deployment that is just starting to fade.
+      for (const drone of dep.perDrone) {
+        drone.mesh.scale.multiplyScalar(FADE_FRAME_SCALE);
       }
       dep.fadeTimer -= deltaTime;
       if (dep.fadeTimer <= 0) {
-        // Dispose meshes.
-        for (const mesh of dep.droneMeshes) {
-          scene.remove(mesh);
-          mesh.geometry.dispose();
-          const mat = mesh.material;
-          if (mat instanceof MeshStandardMaterial) mat.dispose();
-        }
-        continue; // do not push to alive — deployment is done
+        disposeDroneDeployment(dep, scene);
+        continue; // deployment is fully gone
       }
       alive.push(dep);
       continue;
@@ -257,40 +346,159 @@ export function tickDroneDeployments(
       alive.push(dep);
       continue;
     }
-    // Update orbital positions.
-    dep.phase += ORBIT_ANGULAR_SPEED * deltaTime;
-    for (let i = 0; i < dep.droneMeshes.length; i++) {
-      const offset = i * Math.PI; // opposite sides
-      const angle = dep.phase + offset;
-      const x = shipPosition.x + Math.cos(angle) * ORBIT_DRONES_ORBIT_RADIUS;
-      const y = shipPosition.y + Math.sin(angle) * ORBIT_DRONES_ORBIT_RADIUS;
-      dep.droneMeshes[i].position.set(x, y, 0);
+    // Phase 7i Sprint 1 — distribute drones evenly around the orbit (was
+    // "opposite sides" 180° offsets). phaseOffset[i] = i * (2π / droneCount).
+    // Larger tier counts naturally distribute on the same radius.
+    const droneCount = dep.perDrone.length;
+    for (let i = 0; i < droneCount; i++) {
+      const drone = dep.perDrone[i];
+      const angle = dep.sceneClock * ORBIT_ANGULAR_SPEED + i * (2 * Math.PI / droneCount);
+      drone.mesh.position.x = shipPosition.x + Math.cos(angle) * ORBIT_DRONES_ORBIT_RADIUS;
+      // Base Y is the orbital Y; updateDroneVisuals layers bobOffset on top
+      // so we save it locally and pass it back in.
+      const baseY = shipPosition.y + Math.sin(angle) * ORBIT_DRONES_ORBIT_RADIUS;
+      // Pick the target using current nearest (Task 5 may swap to
+      // findDroneTarget for crystal-priority). The bob offset has not been
+      // applied yet, so probe from the un-bobbed orbital point.
+      drone.currentTarget = findNearestAsteroid(
+        { x: drone.mesh.position.x, y: baseY },
+        asteroids,
+        ORBIT_DRONES_TARGET_RADIUS,
+      );
+      updateDroneVisuals(
+        drone.mesh,
+        dep.sceneClock,
+        drone.fireFlashAge,
+        drone.bobPhase,
+        baseY,
+      );
+      // Tether uses the post-update mesh position (which includes bob) so
+      // the line literally starts at the drone's exact screen position.
+      updateTetherLine(
+        drone.tetherLine,
+        { x: drone.mesh.position.x, y: drone.mesh.position.y },
+        drone.currentTarget ? drone.currentTarget.position : null,
+      );
+      updateLockOnSprite(
+        drone.lockOnSprite,
+        drone.currentTarget ? drone.currentTarget.position : null,
+      );
     }
-    // Auto-fire at nearest target.
+    updateAuraPulse(dep.auraRing, dep.tier, dep.sceneClock, 0);
+    // Sprint 2 preview — deploy shockwave ages out. Task 5 wires the fire
+    // callback to reset deployShockwaveAge to 0 on deploy; for Sprint 1 it
+    // starts at 999 so the shockwave is hidden until Task 5 spawns it.
+    updateDeployShockwave(dep.deployShockwave, dep.deployShockwaveAge);
+    // Auto-fire at nearest target at the deployment-level cadence. Task 5
+    // replaces this with per-drone timers. We keep the v1 cadence so
+    // existing tests stay green.
     dep.fireTimer += deltaTime;
     if (dep.fireTimer >= ORBIT_DRONES_FIRE_INTERVAL_SECONDS) {
       dep.fireTimer = 0;
-      const target = findNearestAsteroid(shipPosition, asteroids, ORBIT_DRONES_TARGET_RADIUS);
+      const target = findNearestAsteroid(
+        shipPosition,
+        asteroids,
+        ORBIT_DRONES_TARGET_RADIUS,
+      );
       if (target) {
-        // Pick the drone closer to the target for the projectile origin.
-        let bestDrone = dep.droneMeshes[0];
+        // Pick the drone closer to the target for the projectile origin —
+        // and pass the index back so Sprint 2 can drive per-drone flashes.
+        let bestIndex = 0;
         let bestDistance = Infinity;
-        for (const mesh of dep.droneMeshes) {
+        for (let i = 0; i < dep.perDrone.length; i++) {
+          const mesh = dep.perDrone[i].mesh;
           const d = Math.hypot(
             mesh.position.x - target.position.x,
             mesh.position.y - target.position.y,
           );
           if (d < bestDistance) {
             bestDistance = d;
-            bestDrone = mesh;
+            bestIndex = i;
           }
         }
-        onDroneFire({ x: bestDrone.position.x, y: bestDrone.position.y }, target);
+        const origin = dep.perDrone[bestIndex].mesh.position;
+        onDroneFire({ x: origin.x, y: origin.y }, target, bestIndex);
       }
     }
     alive.push(dep);
   }
   return alive;
+}
+
+/**
+ * Tear down all GPU resources owned by a drone deployment and detach every
+ * mesh/sprite/line from `scene`. Safe to call once at the end of the
+ * fade-out (current `tickDroneDeployments` use-site); calling it before the
+ * fade completes will also visually kill the deployment, so callers should
+ * only invoke it from the fade-end branch.
+ *
+ * The shared lock-on CanvasTexture is module-scope (see
+ * `getSharedLockOnTexture` in src/orbit-drone-vfx.ts), so we do NOT dispose
+ * it per-deployment — mirroring the shared sprite-texture rule in
+ * src/missile-vfx.ts.
+ */
+export function disposeDroneDeployment(dep: DroneDeploymentState, scene: Object3D): void {
+  for (const drone of dep.perDrone) {
+    scene.remove(drone.mesh);
+    drone.mesh.geometry.dispose();
+    (drone.mesh.material as MeshStandardMaterial).dispose();
+    scene.remove(drone.tetherLine);
+    drone.tetherLine.geometry.dispose();
+    (drone.tetherLine.material as MeshBasicMaterial).dispose();
+    scene.remove(drone.lockOnSprite);
+    (drone.lockOnSprite.material as SpriteMaterial).dispose();
+  }
+  scene.remove(dep.auraRing);
+  dep.auraRing.geometry.dispose();
+  (dep.auraRing.material as MeshBasicMaterial).dispose();
+  scene.remove(dep.deployShockwave);
+  dep.deployShockwave.geometry.dispose();
+  (dep.deployShockwave.material as MeshBasicMaterial).dispose();
+}
+
+/**
+ * Phase 7i Sprint 1 (preview; NOT WIRED IN TASK 3) — drone targeting
+ * priority. Crystals first (the lucrative cascade targets), then non-tiny
+ * iron (any size except TINY), then TINY as a last resort. Within each
+ * tier, picks the nearest. Skips the `ignore` asteroid (typically a drone's
+ * sticky cross-frame target so we do not pick ourselves).
+ *
+ * Sprint 2 Task 5 will swap this into tickDroneDeployments and add the
+ * per-drone fireFlashes that go with it.
+ */
+export function findDroneTarget(
+  asteroids: AsteroidState[],
+  position: Vector2,
+  ignore: AsteroidState | null = null,
+): AsteroidState | null {
+  let bestCrystal: AsteroidState | null = null;
+  let bestCrystalDist = Infinity;
+  let bestNonTiny: AsteroidState | null = null;
+  let bestNonTinyDist = ORBIT_DRONES_TARGET_RADIUS;
+  let bestTiny: AsteroidState | null = null;
+  let bestTinyDist = ORBIT_DRONES_TARGET_RADIUS;
+  for (const a of asteroids) {
+    if (a === ignore) continue;
+    const d = Math.hypot(a.position.x - position.x, a.position.y - position.y);
+    if (d > ORBIT_DRONES_TARGET_RADIUS) continue;
+    if (a.kind === AsteroidKind.CRYSTAL) {
+      if (d < bestCrystalDist) {
+        bestCrystal = a;
+        bestCrystalDist = d;
+      }
+    } else if (a.size !== AsteroidSize.TINY) {
+      if (d < bestNonTinyDist) {
+        bestNonTiny = a;
+        bestNonTinyDist = d;
+      }
+    } else {
+      if (d < bestTinyDist) {
+        bestTiny = a;
+        bestTinyDist = d;
+      }
+    }
+  }
+  return bestCrystal ?? bestNonTiny ?? bestTiny;
 }
 
 const VOLLEY_HALF_SPREAD = 0.06; // was 0.225 — narrower fan reads as a stream, not a shotgun

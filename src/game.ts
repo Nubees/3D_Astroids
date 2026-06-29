@@ -1478,7 +1478,7 @@ export class Game {
         this.activeAmmo[kind].cooldownRemaining = 0;
         return;
       }
-      this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene));
+      this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene, 1));
     } else if (spec.displayName === 'MISSILES') {
       // Phase 7b — push a VolleySchedule; the schedule is drained each frame
       // by tickMissileVolleySchedules inside updateActiveDeployments. The
@@ -1715,7 +1715,11 @@ export class Game {
       this.asteroids.map((a) => a.state),
       deltaTime,
       this.scene,
-      (origin, target) => this.fireDroneProjectile(origin, target),
+      // Phase 7i — droneIndex is the best-drone index (closest to the
+      // chosen target). Sprint 2 Task 5 will use it to drive per-drone
+      // fire flashes. fireDroneProjectile still only consumes origin+target
+      // so we discard the index for now.
+      (origin, target, _droneIndex) => this.fireDroneProjectile(origin, target),
     );
     // Spec: DRONES cooldown starts AFTER the 6s active window + 0.3s fade.
     // We detect "deployment ended" by a length drop in the returned array.
