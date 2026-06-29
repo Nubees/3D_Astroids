@@ -244,12 +244,21 @@ export function disposeAsteroidMesh(mesh: Group): void {
 export interface CrystalMeshUserData {
   fracturedMaterial?: MeshStandardMaterial;
   shakeSeed?: number;
-  // Phase 7h — video asteroids (RED targeted) stash {video, texture} here so
-  // disposeAsteroidMesh can detach the per-mesh reference. The shared texture
-  // itself is freed by disposeVideoAsteroidResources() at Game.stop() time.
+  // Phase 7h v13 — video asteroids (RED targeted) stash refs to the
+  // shared frame table + the swapped-in material here so
+  // `tickVideoAsteroid` (called from game.ts update loop) and
+  // `disposeAsteroidMesh` can find what they need. The shape changed
+  // from v11's `{video, texture: VideoTexture}` to v13's
+  // `{table, mesh, material, t0}` — the table is the source of truth
+  // (DataTexture + frame buffer), and we keep a ref to the material so
+  // the per-frame tick can modulate `emissiveIntensity` in the fade
+  // window without re-resolving it from the mesh tree.
   videoAsteroid?: {
-    video: HTMLVideoElement;
-    texture: import('three').VideoTexture;
+    table: import('./video-frame-table').FrameTable | null;
+    mesh: import('three').Mesh;
+    material: import('three').MeshStandardMaterial | null;
+    /** performance.now() at first tick — per-mesh clock origin. */
+    t0: number;
   };
 }
 

@@ -42,7 +42,7 @@ import {
   splitSmallAsteroid,
   swapToFracturedMaterial,
 } from './asteroid';
-import { disposeVideoAsteroidResources } from './video-asteroid';
+import { disposeVideoAsteroidResources, tickVideoAsteroid } from './video-asteroid';
 import {
   MAX_SHARDS,
   SHARD_RADIUS,
@@ -1208,6 +1208,12 @@ export class Game {
       asteroid.mesh.position.set(asteroid.state.position.x, asteroid.state.position.y, 0);
       asteroid.mesh.rotation.x += deltaTime * 0.2;
       asteroid.mesh.rotation.y += deltaTime * 0.3;
+      // Phase 7h v13 — re-upload current frame + modulate emissive in fade
+      // window for the targeted video asteroid. tickVideoAsteroid is a
+      // no-op for non-video asteroids (the userData.videoAsteroid stash is
+      // undefined) and for video asteroids whose frame table hasn't
+      // resolved yet (the placeholder material is still in place).
+      tickVideoAsteroid(asteroid.mesh);
 
       if (this.controller.isOutsideCullBounds(asteroid.state.position)) {
         this.scene.remove(asteroid.mesh);
