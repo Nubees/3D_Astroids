@@ -44,13 +44,33 @@ import {
 //            timeout) — mirrors the working pattern in
 //            methods.ts:getSharedVideoTexture().
 //
-//          v13 — production port of lab's NO40 (512²). The algorithm
-//          matches the v12 lab helper byte-for-byte (same seam blend
-//          formula, same DOM-attach trick, same canplaythrough wait).
-//          Production consumers don't pass `cropRegion` — v13 ships the
-//          full MP4 frame. The half-round silhouette is accepted by the
-//          user (NO41/NO42/NO43 cropped/UV/soft-key variants exist in
-//          the lab for a future v14 if desired).
+//          v15 DELTA FROM v14 — Half-round crop port (NO41 selected):
+//          - FrameTableOptions gains an optional `cropRegion` field
+//            (source-pixel rect). When set, `loadVideoFrameTable` decodes
+//            only the asteroid bbox from the source MP4 instead of the
+//            full 1280×720 frame. Resampled into the targetSize² canvas
+//            via 9-arg `ctx.drawImage`.
+//          - When unset, crop defaults to the full source frame — the
+//            5-arg `drawImage` shape is preserved verbatim for any
+//            callers that don't pass cropRegion.
+//          - Bounds check added: throws if crop exceeds source
+//            dimensions. Same error pattern as the lab's
+//            `src/test-lab/video-frame-table.ts:259-268`.
+//          - Mirrors the lab's `methods.ts:getB3Table` cache-key shape
+//            indirectly (no explicit cache here — production has only
+//            one shared table via `getOrCreateFrameTable`). Lab uses a
+//            keyed Map because it cycles through many crops.
+//
+//          v15 WHY (not UV remap, not soft-key):
+//          - NO41 selected over NO42/NO43 in v15.1 visual confirm.
+//          - NO41 cost is one-time at decode — the cropped source is
+//            rescaled ONCE into the frame table. NO42 costs per-frame
+//            UV reads during rotation (more texture samples).
+//          - NO43 introduces an alpha-blend pass that may bleed against
+//            bloom/particles — risky in the game's additive-blending
+//            environment (see feedback_additive_blending_whiteout.md).
+//          - NO41 is the safest visual fix: hard clean silhouette, no
+//            edge softness, no geometry distortion.
 //
 //          Memory math (from v12 research agent, corrected):
 //          - At 128²: 240 × 128 × 128 × 4 = 15.7 MB JS buffer.
@@ -94,6 +114,17 @@ export interface FrameTableOptions {
   fadeFrames?: number;
   /** Optional cancellation. Decoding stops at the next frame boundary. */
   signal?: AbortSignal;
+  /**
+   * Optional source-rect crop in source-pixel coordinates. When set, each
+   * frame is sampled from this sub-rectangle of the source MP4 and rescaled
+   * into the `targetSize`² canvas. Default: full frame. Used by v15 to
+   * crop out the green-screen border so the asteroid body fills every frame
+   * (kills the half-round silhouette from icosahedron auto-UV sampling).
+   *
+   * Coordinates are source pixels: x ∈ [0, videoWidth], y ∈ [0, videoHeight].
+   * Throws if the crop exceeds the source dimensions.
+   */
+  cropRegion?: { x: number; y: number; width: number; height: number };
 }
 
 export interface FrameTable {
@@ -224,6 +255,23 @@ export async function loadVideoFrameTable(
   const pixelsPerFrame = targetSize * targetSize * 4;
   const allFrames = new Uint8Array(frameCount * pixelsPerFrame);
 
+  // Phase 7h v15 — optional crop. When set, sample a sub-rectangle of the
+  // source (default: full frame). The cropped content is rescaled into the
+  // targetSize² canvas. Used by the production crop-frames port (v15.2-A)
+  // to crop out the green-screen border so the asteroid body fills every
+  // frame. Triangle UVs now sample asteroid pixels — kills the half-round
+  // silhouette without distorting geometry or shipping a soft-key fade.
+  const SOURCE_W = video.videoWidth;
+  const SOURCE_H = video.videoHeight;
+  const crop = opts.cropRegion ?? { x: 0, y: 0, width: SOURCE_W, height: SOURCE_H };
+  if (crop.x < 0 || crop.y < 0
+    || crop.x + crop.width > SOURCE_W
+    || crop.y + crop.height > SOURCE_H) {
+    video.src = '';
+    throw new Error(`video-frame-table: crop ${JSON.stringify(crop)}`
+      + ` exceeds source ${SOURCE_W}x${SOURCE_H}`);
+  }
+
   for (let i = 0; i < frameCount; i++) {
     if (signal?.aborted) {
       video.src = '';
@@ -232,7 +280,15 @@ export async function loadVideoFrameTable(
     // Seek to the exact frame time. `seeked` fires once the browser has
     // decoded the requested frame and applied it to the <video> output.
     await seekTo(video, i / fps);
-    ctx.drawImage(video, 0, 0, targetSize, targetSize);
+    // Phase 7h v15 — 9-arg drawImage overload when crop is set: scale the
+    // cropped source rect into the targetSize² canvas. When crop is unset
+    // (crop.x/y = 0, crop.w/h = SOURCE), this collapses to the 5-arg form
+    // semantically — the full source is rescaled into targetSize².
+    ctx.drawImage(
+      video,
+      crop.x, crop.y, crop.width, crop.height,
+      0, 0, targetSize, targetSize,
+    );
     const imgData = ctx.getImageData(0, 0, targetSize, targetSize);
     allFrames.set(imgData.data, i * pixelsPerFrame);
   }

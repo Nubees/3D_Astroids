@@ -11,7 +11,7 @@ import { applyChromaKeyToStandardMaterial } from './chroma-key';
 import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Video Asteroid (Phase 7h v14 — Halo + Flash Fixes)
+// My Rules — Video Asteroid (Phase 7h v15 — Half-Round Silhouette Fix)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Replace the v11 VideoTexture path for the RED targeted asteroid
 //          (isTargeted=true) with a pre-baked 240-frame DataTexture driven
@@ -105,6 +105,22 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 //          - Module-level constant: CHROMA_KEY_THRESHOLD = 0.10 added
 //            next to DECODE_SIZE for visibility in code review.
 //
+//          v15 DELTA FROM v14 (Phase 7h v15 — half-round silhouette fix):
+//          - TARGET_CROP_REGION constant added (380, 40, 540, 580) —
+//            the empirical asteroid bbox in the 1280×720 source MP4.
+//          - getOrCreateFrameTable now passes cropRegion: TARGET_CROP_REGION
+//            to loadVideoFrameTable. Every decoded frame is sampled from
+//            this sub-rectangle and rescaled into the 512² canvas.
+//          - Geometry/material/tick/disposal shapes UNCHANGED — only the
+//            source texture changes. Triangle UVs always sample asteroid
+//            pixels now (no border green), so the half-round silhouette
+//            problem disappears without UV remap or soft-key alpha fade.
+//          - v15 WHY: user picked NO41 (cropped frames) over NO42
+//            (UV remap) and NO43 (soft chroma-key) in v15.1 visual
+//            confirm. Cropping has the lowest runtime cost (one-time at
+//            decode) and the cleanest visual result (no edge softness,
+//            no geometry distortion).
+//
 //          v13+v11 contracts PRESERVED VERBATIM:
 //          - Frame-table decode: same loadVideoFrameTable singleton
 //          - Per-frame texture upload + fade modulation: same
@@ -183,6 +199,19 @@ const DECODE_SIZE = 512;
 // See src/chroma-key.ts My Rules block for the full envelope analysis.
 const CHROMA_KEY_THRESHOLD = 0.10;
 
+// Phase 7h v15 — half-round silhouette fix: NO41 (cropped frames) ported
+// from the lab. The asteroid body occupies ~39%×77% of the 1280×720 MP4
+// frame; IcosahedronGeometry auto-UVs span the full ~[0, 1.088] × [0.176,
+// 0.824] range. Triangle UVs land in the green border → chroma-key discards
+// → crescent silhouette. Cropping the source to the asteroid bounding box
+// means triangle UVs always sample asteroid pixels — full round, no
+// geometry distortion, no soft-edge alpha blend.
+//
+// Coordinates derived empirically by Playwright sampling across asteroid1.mp4
+// frames and identifying the tight bbox of non-green pixels. Same numbers as
+// the lab's `methods.ts:1946-1950`.
+const TARGET_CROP_REGION = { x: 380, y: 40, width: 540, height: 580 };
+
 /**
  * Singleton FrameTable shared across all targeted asteroids. Created
  * lazily on first call to `getOrCreateFrameTable()`. We share ONE
@@ -215,6 +244,10 @@ export function getOrCreateFrameTable(): Promise<FrameTable> {
   sharedTablePromise = loadVideoFrameTable(VIDEO_SRC, {
     targetSize: DECODE_SIZE,
     signal: sharedAbortController.signal,
+    // Phase 7h v15 — half-round fix. Crop the source MP4 to the asteroid
+    // bounding box so triangle UVs always sample asteroid pixels. See
+    // TARGET_CROP_REGION declaration above for the empirical source.
+    cropRegion: TARGET_CROP_REGION,
   }).then((table) => {
     sharedTable = table;
     sharedTablePromise = null;

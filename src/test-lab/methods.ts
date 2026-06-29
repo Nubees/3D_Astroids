@@ -40,9 +40,9 @@ import {
 import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Asteroid Test Lab: 20 Video-Overlay Methods (Phase 7h v7)
+// My Rules — Asteroid Test Lab: 20 Video-Overlay Methods (Phase 7h v7 → v15.0)
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: 20 numbered factory functions (createMethod1 ... createMethod20)
+// Purpose: 47 numbered factory functions (createMethod1 ... createMethod47)
 //          that each return a Group containing the asteroid visual for one
 //          candidate approach. Called by lab.ts in a spacebar-cycle.
 //
@@ -65,9 +65,29 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 //          return { group, description, update? } so lab.ts can wire
 //          them uniformly.
 //
+// v15.0 DELTA FROM v12.4 (lab-refresh):
+//   - NO41 (B3 + cropped) and NO42 (B3 + UV remap) factories now pass
+//     `0.10` as the second argument to applyChromaKeyToStandardMaterial,
+//     mirroring the v14 production threshold. This refreshes the lab
+//     comparator so the user can pick the half-round fix against the
+//     same threshold the production v14 is running at.
+//   - NO43 (B3 + soft fade) is unchanged. Its smoothstep band is part
+//     of the fade function shape, not a discard threshold — leave it
+//     at the v12.4 `applySoftChromaKeyToStandardMaterial` (no param).
+//   - NO1-NO40 (the v9 chroma sweep + v10 emissive sweep + v11
+//     production-port candidates + v12 B3 frame-table) were already
+//     wired with `applyChromaKeyToStandardMaterial(mat, 0.10)` in the
+//     working tree from a prior unpushed session. Before v15.0 this was
+//     dead-code (the v9 helper ignored the second arg). Now that the
+//     lab helper signature mirrors production, ALL 9 sites actually
+//     run at 0.10 — consistent with v14 production.
+//     Pre-existing sites: line 1016 (NO22), 1086 (NO23), 1108 (NO24),
+//     1412 (NO30), 1454 (v11 sweep at varying intensity), 1557 (helper),
+//     1712 (NO40). New v15.0 sites: line 2020 (NO41), 2090 (NO42).
+//
 // Gotchas:
 //  - ASTEROID_RADIUS = 2.2 matches the LARGE Iron Slag from src/asteroid.ts
-//    so the visual size is consistent across all 20 methods.
+//    so the visual size is consistent across all 47 methods.
 //  - The shared VideoTexture is lazily created on first use and never
 //    disposed by individual methods (lab.ts calls disposeAll() at the
 //    end if needed; for now we just leave it alive).
@@ -77,7 +97,7 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const ASTEROID_RADIUS = 2.2;
-export const METHOD_COUNT = 47;
+export const METHOD_COUNT = 50;
 
 export interface MethodResult {
   group: Group;
@@ -999,7 +1019,7 @@ function createMethod21(): MethodResult {
     emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
     transparent: true,
   });
-  applyChromaKeyToStandardMaterial(mat);
+  applyChromaKeyToStandardMaterial(mat, 0.10);
   const mesh = new Mesh(geom, mat);
   const group = new Group();
   group.add(mesh);
@@ -1069,7 +1089,7 @@ function createMethod23(): MethodResult {
     emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
     transparent: true,
   });
-  applyChromaKeyToStandardMaterial(mat);
+  applyChromaKeyToStandardMaterial(mat, 0.10);
   const mesh = new Mesh(geom, mat);
   const group = new Group();
   group.add(mesh);
@@ -1091,7 +1111,7 @@ function createMethod24(): MethodResult {
     emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
     transparent: true,
   });
-  applyChromaKeyToStandardMaterial(mat);
+  applyChromaKeyToStandardMaterial(mat, 0.10);
   const mesh = new Mesh(geom, mat);
 
   // Fresnel rim overlay (from NO11 pattern)
@@ -1395,7 +1415,7 @@ function createMethod30(): MethodResult {
     emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
     transparent: true, side: DoubleSide,
   });
-  applyChromaKeyToStandardMaterial(mat);
+  applyChromaKeyToStandardMaterial(mat, 0.10);
   const mesh = new Mesh(geom, mat);
   const group = new Group();
   group.add(mesh);
@@ -1437,7 +1457,7 @@ function createMethodWithEmissive(intensity: number): MethodResult {
     emissiveMap: tex, flatShading: true, roughness: 0.85, metalness: 0.05,
     transparent: true, side: DoubleSide,
   });
-  applyChromaKeyToStandardMaterial(mat);
+  applyChromaKeyToStandardMaterial(mat, 0.10);
   const mesh = new Mesh(geom, mat);
   const group = new Group();
   group.add(mesh);
@@ -1540,7 +1560,7 @@ function createProductionCandidateMaterial(opts: {
     side: opts.doubleSide ? DoubleSide : FrontSide,
     transparent: opts.chroma, // chroma requires transparent: true for the discard
   });
-  if (opts.chroma) applyChromaKeyToStandardMaterial(mat);
+  if (opts.chroma) applyChromaKeyToStandardMaterial(mat, 0.10);
   return mat;
 }
 
@@ -1695,7 +1715,7 @@ function createB3Method(size: number): MethodResult {
       side: DoubleSide,
       transparent: true,
     });
-    applyChromaKeyToStandardMaterial(mat);
+    applyChromaKeyToStandardMaterial(mat, 0.10);
     mesh.material = mat;
     liveMaterial = mat;
   }).catch((err) => {
@@ -2003,7 +2023,7 @@ function createB3CroppedMethod(size: number): MethodResult {
       side: DoubleSide,
       transparent: true,
     });
-    applyChromaKeyToStandardMaterial(mat);
+    applyChromaKeyToStandardMaterial(mat, 0.10);
     mesh.material = mat;
     liveMaterial = mat;
   }).catch((err) => {
@@ -2073,7 +2093,7 @@ function createB3UVRemapMethod(size: number): MethodResult {
       side: DoubleSide,
       transparent: true,
     });
-    applyChromaKeyToStandardMaterial(mat);
+    applyChromaKeyToStandardMaterial(mat, 0.10);
     mesh.material = mat;
     liveMaterial = mat;
   }).catch((err) => {
@@ -2177,6 +2197,27 @@ function createMethod43(): MethodResult { return createB3SoftKeyMethod(256); }
 function createMethod45(): MethodResult { return createB3ThresholdMethod(512, 0.10, true); }
 function createMethod46(): MethodResult { return createB3ThresholdMethod(512, 0.20, true); }
 
+// Phase 7h v15 — variant A/B additions for the v15.2 production port of
+// NO41 (cropped frames). NO48 = exact v15 production (512² cropped +
+// threshold 0.10). NO49 = A/B against the v13 baseline halo behavior
+// (cropped + threshold 0.15 — would re-introduce the rotation-persistent
+// green halo at the higher threshold). NO50 reserved for v16+, returns
+// a syntax-error stub so an in-lab cycle reaches it without crash.
+function createMethod48(): MethodResult { return createB3CroppedMethod(512); }
+function createMethod49(): MethodResult {
+  // A/B: same cropped decode as NO48 but at the OLDER v13 threshold (0.15)
+  // so visual diff shows whether v14's 0.10 halo fix is still needed with
+  // the cropped source. Expected: edge halos return because bilinear
+  // sampling on icosahedron triangles crosses the crop boundary into
+  // green border pixels — confirming v14's threshold drop is required
+  // even with cropped frames.
+  return createB3ThresholdMethod(512, 0.15, true);
+}
+function createMethod50(): MethodResult {
+  // Reserved for v16+. Reaches here without crashing the lab cycle.
+  return createB3CroppedMethod(256);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Dispatch table
 // ═══════════════════════════════════════════════════════════════════════
@@ -2193,6 +2234,7 @@ const METHOD_FACTORIES: ReadonlyArray<() => MethodResult> = [
   createMethod38, createMethod39, createMethod40,
   createMethod41, createMethod42, createMethod43,
   createMethod44, createMethod45, createMethod46, createMethod47,
+  createMethod48, createMethod49, createMethod50,
 ];
 
 export function createMethod(idx: number): MethodResult {
