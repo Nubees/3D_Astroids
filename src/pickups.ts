@@ -447,8 +447,13 @@ export type KillSource = 'BULLET' | 'BOMB' | 'MISSILE' | 'WALL' | 'SHARD' | 'DRO
 export { CRYSTAL_HEALTH as CRYSTAL_HEALTH_FOR_TEST } from './asteroid';
 
 // Orbit Drones constants.
+// Phase 7i Sprint 3 — ORBIT_DRONES_CHARGE_CAP bumped 2→3 so the player
+// can charge-stack: collecting 3 drones (one right after the other) and
+// pressing Digit2 once spawns a tier-3 deployment (4 drones) instead of
+// the tier-1 baseline (2 drones). tier is derived from `charges` at
+// deploy time via ORBIT_DRONES_TIER_DRONE_COUNT (1→2, 2→3, 3→4 drones).
 export const ORBIT_DRONES_COOLDOWN_SECONDS = 4.0;
-export const ORBIT_DRONES_CHARGE_CAP = 2;
+export const ORBIT_DRONES_CHARGE_CAP = 3;
 export const ORBIT_DRONES_DURATION_SECONDS = 6.0;
 export const ORBIT_DRONES_ORBIT_RADIUS = 1.5;
 export const ORBIT_DRONES_ORBIT_PERIOD_SECONDS = 1.5;

@@ -32,6 +32,7 @@ import {
   tickActiveAmmo,
 } from '../src/pickups';
 import type { HomingMissileState, VolleySchedule } from '../src/active-deployments';
+import { ORBIT_DRONES_TIER_DRONE_COUNT } from '../src/orbit-drone';
 
 describe('ActiveKindSpec table — defensive consistency', () => {
   it('BOMB_STRIKE matches its per-kind constants', () => {
@@ -155,7 +156,8 @@ describe('Per-kind constants match spec values', () => {
 
   it('Orbit Drones constants', () => {
     expect(ORBIT_DRONES_COOLDOWN_SECONDS).toBe(4.0);
-    expect(ORBIT_DRONES_CHARGE_CAP).toBe(2);
+    // Phase 7i Sprint 3 — cap bumped 2 → 3 to enable charge-stack deploy.
+    expect(ORBIT_DRONES_CHARGE_CAP).toBe(3);
     expect(ORBIT_DRONES_DURATION_SECONDS).toBe(6.0);
     expect(ORBIT_DRONES_ORBIT_RADIUS).toBe(1.5);
     expect(ORBIT_DRONES_ORBIT_PERIOD_SECONDS).toBe(1.5);
@@ -248,6 +250,24 @@ describe('Orbit Drones — deployment', () => {
       );
     }
     expect(live.length).toBe(0);
+  });
+});
+
+describe('Phase 7i Sprint 3 — charge-stack deploy', () => {
+  it('ORBIT_DRONES_CHARGE_CAP === 3', () => {
+    expect(ORBIT_DRONES_CHARGE_CAP).toBe(3);
+  });
+
+  it('ORBIT_DRONES_TIER_DRONE_COUNT(1) === 2', () => {
+    expect(ORBIT_DRONES_TIER_DRONE_COUNT(1)).toBe(2);
+  });
+
+  it('ORBIT_DRONES_TIER_DRONE_COUNT(2) === 3', () => {
+    expect(ORBIT_DRONES_TIER_DRONE_COUNT(2)).toBe(3);
+  });
+
+  it('ORBIT_DRONES_TIER_DRONE_COUNT(3) === 4', () => {
+    expect(ORBIT_DRONES_TIER_DRONE_COUNT(3)).toBe(4);
   });
 });
 

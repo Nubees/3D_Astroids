@@ -1498,7 +1498,15 @@ export class Game {
         this.activeAmmo[kind].cooldownRemaining = 0;
         return;
       }
-      this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene, 1));
+      // Phase 7i Sprint 3 — charge-stack deploy. consumeActiveCharge already
+      // decremented charges by 1 and set cooldown, so the CURRENT `charges`
+      // is the number we had BEFORE that decrement. We pass `charges` as
+      // tier (1/2/3) and then RESET charges to 0 — the player banked 3
+      // pickups but the cost is still one cooldown. Example: banked 3,
+      // pressed Digit2 → tier=3 deploy, charges=0, cooldown=4s.
+      const tier = this.activeAmmo[kind].charges as 1 | 2 | 3;
+      this.activeAmmo[kind].charges = 0;
+      this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene, tier));
     } else if (spec.displayName === 'MISSILES') {
       // Phase 7b — push a VolleySchedule; the schedule is drained each frame
       // by tickMissileVolleySchedules inside updateActiveDeployments. The
@@ -3552,6 +3560,22 @@ export class Game {
       icon.countLabel.textContent = `${ammo.charges}`;
       const onCooldown = ammo.cooldownRemaining > 0;
       const deployed = kind === PickupKind.ORBIT_DRONES && this.activeDeployments.length > 0;
+      // Phase 7i Sprint 3 — ORBIT_DRONES pill border tracks the charge stack
+      // so the player sees at a glance what tier the next deploy will be:
+      //   0 charges  → 0x444444 (dim grey — empty)
+      //   1 charge   → 0x66ddff (cyan — tier 1 = 2 drones)
+      //   2 charges  → 0xff66dd (magenta — tier 2 = 3 drones)
+      //   3 charges  → 0xffcc44 (gold — tier 3 = 4 drones)
+      // Matches ORBIT_DRONES_TIER_COLOR in src/orbit-drone.ts:54-60.
+      // BOMB_STRIKE and HOMING_MISSILES keep spec.color so their pills don't
+      // shift hue as charges accumulate (they don't have tier visuals).
+      if (kind === PickupKind.ORBIT_DRONES) {
+        const tierColor = ammo.charges >= 3 ? 0xffcc44
+          : ammo.charges >= 2 ? 0xff66dd
+          : ammo.charges >= 1 ? 0x66ddff
+          : 0x444444;
+        icon.container.style.border = `2px solid #${tierColor.toString(16).padStart(6, '0')}`;
+      }
       if (ammo.charges === 0 && !onCooldown) {
         icon.container.style.opacity = '0.3';
         icon.stateLabel.textContent = 'EMPTY';
