@@ -35,6 +35,23 @@
 //           headroom under Playwright headless Chrome — the rAF is
 //           throttled such that the deployShockwaveAge = 0 → 0.001 nudge
 //           can take longer than 50ms to land on the very first deploy.
+//
+//           ── Phase 7i Sprint 3 (Task 8) peak-tier paragraph ──
+//           Sprint 3 charges the player can bank 1/2/3 orbitDrrones pickups
+//           (ORBIT_DRONES_CHARGE_CAP=3 in src/pickups.ts:456). useActiveItem
+//           (src/game.ts:1507) reads `charges + 1` AFTER consumeActiveCharge
+//           decremented, so 3 banked charges → tier=3 deploy. The off-by-one
+//           was the Sprint 3 fix — pre-fix a player banking 3 charges would
+//           see only tier 2 (3 drones) because the field was read BEFORE
+//           consumeActiveCharge ran. Spawning 3 pickups adjacent to the ship
+//           and walking the ship through each one in order banks charges
+//           cleanly. Dropping them at offsets shipX+0.4 + i*0.15 means the
+//           ship walks to x=shipX+0.4 (charge 1), x=shipX+0.55 (charge 2),
+//           x=shipX+0.70 (charge 3) — each pickup collect step MUST fire
+//           before the next one or charges skip. The test waits 100ms between
+//           drops to let the per-frame collect logic catch up. With the
+//           off-by-one fix the post-Digit2 deployment reads perDrone.length=4
+//           and tier=3.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { expect, test } from '@playwright/test';
@@ -201,5 +218,90 @@ test.describe('Phase 7i Sprint 2 — drone deploy + shockwave', () => {
     expect(errs).toEqual([]);
 
     await page.screenshot({ path: '.test-artifacts/phase-7i-sprint2-shockwave.png' });
+  });
+
+  test('3/3 — peak tier: 3 charges → 4 drones + tier=3', async ({ page }) => {
+    test.setTimeout(60000);
+    await bootGame(page);
+
+    // Force-drop 3 orbit drone pickups adjacent to the ship and walk
+    // the ship through each one in turn so the collect logic banks
+    // 3 charges (ORBIT_DRONES_CHARGE_CAP=3 in src/pickups.ts:456).
+    const spawnResults = await page.evaluate(() => {
+      const w = window as unknown as {
+        __game: { ship: { state: { position: { x: number; y: number } } } };
+        __hooks: { spawnPickup: (kind: string, x: number, y: number) => boolean };
+      };
+      const shipPos = w.__game.ship.state.position;
+      const offsets = [0.4, 0.55, 0.7];
+      const oks: boolean[] = [];
+      for (const dx of offsets) {
+        const ok = w.__hooks.spawnPickup('orbitDrones', shipPos.x + dx, shipPos.y);
+        // Walk the ship into the pickup so isPickupCollected fires.
+        w.__game.ship.state.position = { x: shipPos.x + dx, y: shipPos.y };
+        oks.push(ok);
+      }
+      return { oks };
+    });
+    expect(spawnResults.oks.every((o) => o === true)).toBe(true);
+
+    // Wait a few frames for pickup collect + ammo state reconcile.
+    await page.waitForTimeout(150);
+
+    // Sanity: verify ammo banked 3 charges before pressing Digit2.
+    const preCharge = await page.evaluate(() => {
+      const g = (window as unknown as {
+        __game: {
+          pickups: unknown[];
+          activeAmmo: Record<string, { charges: number; cooldownRemaining: number }>;
+        };
+      }).__game;
+      return {
+        pickups: g.pickups.length,
+        orbitCharges: g.activeAmmo.orbitDrones?.charges ?? -1,
+      };
+    });
+    expect(preCharge.pickups).toBe(0); // all 3 collected
+    expect(preCharge.orbitCharges).toBe(3);
+
+    // Press Digit2 — keydown-only so the input Set retains it until the
+    // next update tick reads useActiveItem.
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { code: 'Digit2', key: '2', bubbles: true }),
+      );
+    });
+    await page.waitForTimeout(150);
+
+    // Verify tier=3 and 4 drones. The off-by-one fix in src/game.ts:1507
+    // reads `charges + 1` AFTER consumeActiveCharge decremented charges
+    // to 0, so 3 banked charges → tier=3 → ORBIT_DRONES_TIER_DRONE_COUNT(3)=4.
+    const postState = await page.evaluate(() => {
+      const g = (window as unknown as {
+        __game: {
+          activeDeployments: Array<{
+            tier?: number;
+            perDrone?: unknown[];
+          }>;
+        };
+      }).__game;
+      const dep = g.activeDeployments[0];
+      return {
+        deployments: g.activeDeployments.length,
+        tier: dep?.tier ?? -1,
+        droneCount: dep?.perDrone?.length ?? 0,
+      };
+    });
+    expect(postState.deployments).toBeGreaterThan(0);
+    expect(postState.tier).toBe(3);
+    expect(postState.droneCount).toBe(4);
+
+    // Verify no page errors fired.
+    const errs = await page.evaluate(() => {
+      return (window as unknown as { __pageErrors?: string[] }).__pageErrors ?? [];
+    });
+    expect(errs).toEqual([]);
+
+    await page.screenshot({ path: '.test-artifacts/phase-7i-sprint3-peak-tier.png' });
   });
 });
