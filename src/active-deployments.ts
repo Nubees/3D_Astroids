@@ -8,6 +8,7 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
+  SphereGeometry,
   Sprite,
   SpriteMaterial,
 } from 'three';
@@ -31,6 +32,7 @@ import {
   ORBIT_DRONES_TARGET_RADIUS,
 } from './pickups';
 import { createMissileAssembly, emitMissileSmokeRear } from './missile-vfx';
+import { PROJECTILE_RADIUS, PROJECTILE_SPEED } from './projectile';
 import {
   createAuraRing,
   createDeployShockwave,
@@ -43,7 +45,7 @@ import {
   updateLockOnSprite,
   updateTetherLine,
 } from './orbit-drone-vfx';
-import { ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-drone';
+import { ORBIT_DRONES_TIER_COLOR, ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-drone';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Active Deployments (Phase 7 DIAL-UP / Phase 7b Power-Up VFX / Phase 7i)
@@ -911,3 +913,71 @@ export function tickHomingMissiles(
   }
   return alive;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Drone Projectile Factory (Phase 7i Sprint 2)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Pure factory that returns a tier-colored Mesh + velocity for a
+//          drone-fired projectile. Game (Task 5) wires this into the onDroneFire
+//          callback defined in tickDroneDeployments. Kept as a pure factory
+//          here (vs. leaving the logic in Game) so the tier → color mapping
+//          can be unit-tested without spinning up a Three.js scene.
+// Setup:   Caller passes `origin` (drone world-space position), `target`
+//          (locked AsteroidState), and the deployment's `tier` (1/2/3).
+//          Caller is responsible for scene.add + per-frame tick — this
+//          function only constructs the mesh and computes the velocity.
+//          The `tier` is returned alongside the mesh so destroyAsteroid
+//          can route the kill through KillSource.DRONE (Task 5 Step 5).
+// Issues:  Pre-Phase 7i, drone projectiles in Game (fireDroneProjectile at
+//          src/game.ts:1842) hard-coded color 0x66ddff (tier-1 cyan). At
+//          tier 2/3 the body, aura, and lock-on sprite all changed color,
+//          but the actual projectile still glowed cyan — visual mismatch.
+// Fix:     Phase 7i Sprint 2 Task 4. Single factory takes `tier` and
+//          routes it through ORBIT_DRONES_TIER_COLOR (cyan/magenta/gold),
+//          so the projectile carries the same visual identity as the
+//          drone that fired it. Same SphereGeometry(0.12, 6, 6) + opaque
+//          MeshBasicMaterial construction as the existing fireDroneProjectile
+//          — unchanged silhouette, just recoloured. PROJECTILE_SPEED (28u/s)
+//          is used directly so drone projectiles travel at the same rate
+//          as the player's blaster, which keeps shield-collision feel
+//          identical to a player shot.
+// Gotchas: The `d || 1` fallback covers the degenerate case where origin
+//          == target. Projectile origin lives in z=0 — matches the drone
+//          orbital plane. Velocity is a Vector2 (not THREE.Vector3) so it
+//          can flow directly into the existing projectile integrator
+//          without a translation hop. KillSource.DRONE is added to the
+//          KillSource union in Task 5 Step 5; this factory does NOT
+//          touch it, but the JSDoc above calls out the caller
+//          responsibility so the wiring lands in one place.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Phase 7i Sprint 2 Task 4 — drone projectile factory. Returns a tier-colored
+ * Mesh + velocity for a drone-fired projectile. Caller is responsible for
+ * scene.add + per-frame tick + eventual disposal.
+ *
+ * The returned `tier` lets the caller (Game's fireDroneProjectile) tag
+ * destroyAsteroid with the correct KillSource once Task 5 Step 5 adds
+ * `'DRONE'` to the KillSource union.
+ */
+export function fireDroneProjectile(
+  origin: Vector2,
+  target: AsteroidState,
+  tier: 1 | 2 | 3,
+): { mesh: Mesh; velocity: Vector2; tier: 1 | 2 | 3 } {
+  const color = ORBIT_DRONES_TIER_COLOR(tier);
+  const mesh = new Mesh(
+    new SphereGeometry(PROJECTILE_RADIUS, 6, 6),
+    new MeshBasicMaterial({ color }),
+  );
+  mesh.position.set(origin.x, origin.y, 0);
+  const dx = target.position.x - origin.x;
+  const dy = target.position.y - origin.y;
+  const d = Math.hypot(dx, dy) || 1;
+  return {
+    mesh,
+    velocity: { x: (dx / d) * PROJECTILE_SPEED, y: (dy / d) * PROJECTILE_SPEED },
+    tier,
+  };
+}
+
