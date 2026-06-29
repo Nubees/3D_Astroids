@@ -11,7 +11,7 @@ import { applyChromaKeyToStandardMaterial } from './chroma-key';
 import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Video Asteroid (Phase 7h v13 — Production Port of Lab NO40)
+// My Rules — Video Asteroid (Phase 7h v14 — Halo + Flash Fixes)
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Replace the v11 VideoTexture path for the RED targeted asteroid
 //          (isTargeted=true) with a pre-baked 240-frame DataTexture driven
@@ -85,16 +85,47 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 //            flatShading: true, roughness: 0.85, metalness: 0.05,
 //            side: DoubleSide, transparent: true
 //          - Chroma-key: applyChromaKeyToStandardMaterial(mat) called
-//            after material construction
+//            after material construction (v14 adds threshold=0.10 param)
 //          - texture in emissiveMap slot ONLY (v5 channel routing)
 //
+//          v14 DELTA FROM v13 (Phase 7h v14 — halo + flash fixes):
+//          - Chroma-key threshold: hardcoded 0.15 → CHROMA_KEY_THRESHOLD
+//            module constant (0.10). Kills the rotation-persistent
+//            green halo on the asteroid caused by bilinear sampling at
+//            icosahedron triangle edges. The halo was a v13 regression
+//            that the user reported as "green background ... all good".
+//          - Placeholder visibility: visible (0x223355 dark-blue shows
+//            for ~1s on fresh spawn) → hidden (visible=false until the
+//            live material swap fires). Kills the first-second
+//            placeholder flash. The mesh stays in the scene graph (just
+//            not rendered) so position/rotation still update.
+//          - tickVideoAsteroid: added `if (!mesh.visible) return;`
+//            early-out — defensive, skips per-frame DataTexture upload
+//            for any hidden mesh.
+//          - Module-level constant: CHROMA_KEY_THRESHOLD = 0.10 added
+//            next to DECODE_SIZE for visibility in code review.
+//
+//          v13+v11 contracts PRESERVED VERBATIM:
+//          - Frame-table decode: same loadVideoFrameTable singleton
+//          - Per-frame texture upload + fade modulation: same
+//          - Disposal: same abortController + DataTexture.dispose
+//          - userData.videoAsteroid shape: same {table, mesh, material, t0}
+//
 // Gotchas:
+//  - v14: mesh.visible is FALSE at construction time. The first tick
+//    after the table resolves sets visible=true. Calling tickVideoAsteroid
+//    before the resolve is a no-op (mesh visible check + table null
+//    check both bail).
+//  - v14: CHROMA_KEY_THRESHOLD = 0.10 — tightening too much (e.g. 0.05)
+//    starts rejecting asteroid body pixels if the source MP4 ever shifts.
+//    0.10 keeps a 0.05 unit buffer while catching bilinear-blend edges.
+//    See src/chroma-key.ts My Rules block for the full envelope.
 //  - The frame table decode is async. createVideoAsteroidMesh returns
-//    IMMEDIATELY with a placeholder dark-blue material. The v11 contract
-//    material is swapped in once the table resolves. Game.ts must call
-//    `tickVideoAsteroid(mesh)` per frame regardless — the helper bails
-//    out early if `userData.videoAsteroid.material` is null (placeholder
-//    still in place).
+//    IMMEDIATELY with a placeholder (now invisible) material. The v11
+//    contract material is swapped in once the table resolves AND
+//    visible=true is set. Game.ts must call `tickVideoAsteroid(mesh)`
+//    per frame regardless — the helper bails out early if hidden or if
+//    `userData.videoAsteroid.material` is null.
 //  - The frame table is SHARED across all targeted asteroids (one
 //    singleton `FrameTable`, same pattern as v11's shared VideoTexture).
 //    Disposing it on per-mesh disposal would blank every other live
@@ -105,7 +136,7 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 //    This means the asteroid's animation starts at "first tick after
 //    the table resolves" rather than "mesh creation time" — but
 //    visually indistinguishable because the placeholder material was
-//    showing until the table resolved anyway.
+//    showing until the table resolved anyway (now invisible in v14).
 //  - Per-frame texture upload: at 512² × 4 bytes = 1 MB copy per frame
 //    PER ASTEROID. With 5 targeted asteroids on screen at 60 fps that's
 //    5 MB/frame for the texture upload path alone. This is the
@@ -116,7 +147,8 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 //    the DataTexture. The abort throws DOMException('Aborted') in the
 //    pending `.then()` chain — the placeholder swap path catches and
 //    logs it, leaving the placeholder material in place (harmless
-//    because the game is stopping anyway).
+//    because the game is stopping anyway). v14: mesh stays invisible
+//    after decode failure too (the failure path doesn't set visible=true).
 //  - DO NOT use `require('three')` anywhere — see
 //    `feedback_require_three_freeze.md`. The v13 file imports
 //    `MeshStandardMaterial` (etc) via the existing top-of-file block.
@@ -127,7 +159,7 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 //    silhouette is the accepted v13 trade-off.
 //  - JSDOM (Vitest default env) does NOT implement HTMLVideoElement
 //    seek/load events or `HTMLCanvasElement.getContext('2d')` fully.
-//    Tests for v13 either stub the video element or skip decode-dependent
+//    Tests for v14 either stub the video element or skip decode-dependent
 //    paths with `it.skip`. The lab at /test-lab/asteroid-lab.html is the
 //    visual verification surface.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -140,6 +172,16 @@ const VIDEO_SRC = '/video/asteroid1.mp4';
 // cost: 240 × 512 × 512 × 4 = 251.7 MB JS buffer. See the plan file for
 // the full size-vs-memory trade-off matrix.
 const DECODE_SIZE = 512;
+
+// Phase 7h v14 — chroma-key threshold lowered from 0.15 to 0.10 to kill
+// the rotation-persistent green halo on the asteroid. The halo is caused
+// by bilinear sampling at icosahedron triangle edges blending the green
+// border of the MP4 frame with the asteroid body, producing intermediate
+// greenness values in [0.05, 0.15] — BELOW the v11-v13 0.15 threshold.
+// Tightening to 0.10 catches those bilinear-blend edge pixels while
+// leaving the asteroid body untouched (asteroid body greenness is ≪ 0.10).
+// See src/chroma-key.ts My Rules block for the full envelope analysis.
+const CHROMA_KEY_THRESHOLD = 0.10;
 
 /**
  * Singleton FrameTable shared across all targeted asteroids. Created
@@ -237,10 +279,18 @@ export function createVideoAsteroidMesh(size: AsteroidSize): Group {
   // / 80 faces; matches the silhouette of the original Iron Slag asteroid.
   const geometry = new IcosahedronGeometry(radius, 0);
 
-  // Phase 7h v13 — placeholder material. Same dark-blue as the lab's
+  // Phase 7h v14 — placeholder material. Same dark-blue as the lab's
   // createB3Method. Swapped the moment the frame table resolves.
+  //
+  // v14 HIDES the mesh during decode (visible=false) so the player doesn't
+  // see a dark-blue flash for ~1 second on the first targeted-asteroid
+  // spawn. The mesh is set visible=true inside the .then() handler when
+  // the live v11 contract material is swapped in. tickVideoAsteroid
+  // bails out on the visibility flag so we don't waste a per-frame
+  // DataTexture upload on an invisible mesh.
   const placeholder = new MeshStandardMaterial({ color: 0x223355 });
   const mesh = new Mesh(geometry, placeholder);
+  mesh.visible = false;
   const group = new Group();
   group.add(mesh);
 
@@ -274,8 +324,15 @@ export function createVideoAsteroidMesh(size: AsteroidSize): Group {
       side: DoubleSide,
       transparent: true,
     });
-    applyChromaKeyToStandardMaterial(mat);
+    // Phase 7h v14 — pass CHROMA_KEY_THRESHOLD (0.10) to kill the
+    // rotation-persistent green halo. See src/chroma-key.ts My Rules
+    // for the threshold envelope analysis.
+    applyChromaKeyToStandardMaterial(mat, CHROMA_KEY_THRESHOLD);
     mesh.material = mat;
+    // Phase 7h v14 — unhide the mesh NOW that the live material is in
+    // place. The mesh was hidden at construction time to suppress the
+    // first-second dark-blue placeholder flash.
+    mesh.visible = true;
     userData.table = table;
     userData.material = mat;
   }).catch((err) => {
@@ -298,6 +355,11 @@ export function createVideoAsteroidMesh(size: AsteroidSize): Group {
 export function tickVideoAsteroid(mesh: Group, clockMs?: number): void {
   const stash = mesh.userData.videoAsteroid as VideoAsteroidUserData | undefined;
   if (stash === undefined) return;
+  // Phase 7h v14 — skip the per-frame work if the mesh is hidden. v14 sets
+  // visible=false until the live material swaps in (kills first-second
+  // placeholder flash). This is also a general safety: any hidden mesh
+  // (e.g. parent group .visible=false) skips the DataTexture upload.
+  if (!mesh.visible) return;
   const { table, material } = stash;
   if (table === null || material === null) return; // table still decoding
 

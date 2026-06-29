@@ -77,7 +77,7 @@ import { loadVideoFrameTable, type FrameTable } from './video-frame-table';
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const ASTEROID_RADIUS = 2.2;
-export const METHOD_COUNT = 43;
+export const METHOD_COUNT = 47;
 
 export interface MethodResult {
   group: Group;
@@ -1742,6 +1742,154 @@ function createMethod39(): MethodResult { return createB3Method(256); }
 function createMethod40(): MethodResult { return createB3Method(512); }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Phase 7h v14 — green-bug fix candidates (NO44 / NO47)
+// ═══════════════════════════════════════════════════════════════════════
+// Purpose: User reported two distinct visual artifacts on the v13 NO40
+//          production port (commit b0ef855):
+//
+//          (1) "First few seconds you see the green background, and then
+//               the rest of the frames is all good." → user mental model
+//               is a "first-second" bug. We re-verified visually with
+//               lab-no40-frame-b/c.png and found the green halo is
+//               actually ROTATION-PERSISTENT (not first-second-confined):
+//               certain icosahedron faces always sample the green border
+//               of the MP4 frame, regardless of frame index. The user's
+//               "first second" perception was the placeholder dark-blue
+//               material flashing on fresh first spawn (B3_TABLE_CACHE
+//               is per-page — first asteroid pays the decode cost).
+//
+//          (2) The rotation-persistent green halo on the right side
+//               of the asteroid. Root cause hypothesis: bilinear texture
+//               sampling at icosahedron triangle edges blends a green
+//               border pixel with an adjacent asteroid body pixel,
+//               producing intermediate colors with greenness in the
+//               band [0.05, 0.15] — above the current 0.15 threshold
+//               the discard never fires. Tightening the threshold
+//               catches these in-between pixels.
+//
+//          Both fixes live in the lab only. DO NOT port to production
+//          (src/video-asteroid.ts, src/chroma-key.ts) until the user
+//          sees the lab results and explicitly approves a port.
+//
+//          NO44 = tightened chroma-key threshold (0.15 → 0.05) on
+//                 the B3@512² path. Tests Hypothesis A: catches
+//                 bilinear blend pixels at icosahedron triangle edges.
+//
+//          NO47 = invisible-during-decode placeholder on B3@512².
+//                 During the async decode, the mesh is hidden (mesh
+//                 .visible = false) instead of showing a dark-blue
+//                 blob. Kills the first-second flash entirely.
+//                 Tests Hypothesis B: confirms the first-second visual
+//                 IS the placeholder material and not the live video.
+//
+//          NO45 / NO46 reserved — see also the existing NO41/NO42/NO43
+//          which are alternate fixes for the same root cause
+//          (cropped frames / UV remap / soft chroma-key) the user
+//          already saw in the v12.4 lab round.
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Variant of `createB3Method` that lets us override the chroma-key
+ * discard threshold. Production helper hard-codes 0.15 — this lab
+ * version writes the threshold directly into the onBeforeCompile
+ * shader patch so we can A/B test 0.05 vs 0.15 in the lab without
+ * touching src/chroma-key.ts (which is shared with production).
+ */
+function createB3ThresholdMethod(
+  size: number,
+  threshold: number,
+  placeholderVisible: boolean,
+): MethodResult {
+  const group = new Group();
+  const geometry = new IcosahedronGeometry(ASTEROID_RADIUS, 0);
+  // NO47 path: an invisible placeholder so the user sees nothing
+  // while the decode runs. The mesh is .visible = false until the
+  // live material swaps in, then the mesh is set back to true.
+  const placeholder = new MeshStandardMaterial({ color: 0x223355 });
+  const mesh = new Mesh(geometry, placeholder);
+  if (!placeholderVisible) mesh.visible = false;
+  group.add(mesh);
+
+  let table: FrameTable | null = null;
+  let liveMaterial: MeshStandardMaterial | null = null;
+  const t0 = performance.now();
+
+  getB3Table(size).then((t) => {
+    table = t;
+    const mat = new MeshStandardMaterial({
+      color: 0x000000,
+      emissive: 0xffffff,
+      emissiveIntensity: 1.5,
+      emissiveMap: t.texture,
+      flatShading: true,
+      roughness: 0.85,
+      metalness: 0.05,
+      side: DoubleSide,
+      transparent: true,
+    });
+    // Inline chroma-key injection with a custom threshold. We
+    // duplicate the helper logic from src/test-lab/chroma-key.ts
+    // (CHROMA_KEY_DISCARD_GLSL) so the threshold can vary per
+    // method. This is a deliberate copy, not a refactor: the
+    // lab must not change the production chroma-key helper.
+    const snippet = `if (totalEmissiveRadiance.g - max(totalEmissiveRadiance.r, totalEmissiveRadiance.b) > ${threshold.toFixed(3)}) discard;`;
+    mat.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>\n${snippet}`,
+      );
+    };
+    mat.needsUpdate = true;
+    mesh.material = mat;
+    liveMaterial = mat;
+    // Restore visibility on the swap-in (NO47 path).
+    if (!placeholderVisible) mesh.visible = true;
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.warn(`[test-lab] B3 threshold=${threshold} @ ${size}² decode failed:`, err);
+  });
+
+  const pixelsPerFrame = size * size * 4;
+  const update = (_dt: number, _t: number): void => {
+    if (table === null || liveMaterial === null) return;
+    const u = ((performance.now() - t0) / 1000) * table.fps;
+    const i = Math.floor(u) % table.frameCount;
+    const offset = i * pixelsPerFrame;
+    table.texture.image.data!.set(
+      table.allFrames.subarray(offset, offset + pixelsPerFrame),
+    );
+    table.texture.needsUpdate = true;
+    if (i < table.fadeFrames) {
+      liveMaterial.emissiveIntensity = 1.5 * (1 - i / table.fadeFrames);
+    } else {
+      liveMaterial.emissiveIntensity = 1.5;
+    }
+  };
+
+  return {
+    group,
+    description: `B3 frame table @ ${size}², chroma threshold=${threshold.toFixed(2)},`
+      + ` placeholder=${placeholderVisible ? 'visible (0x223355)' : 'INVISIBLE'}.`
+      + ` ${Math.round((size * size * 4 * 240) / (1024 * 1024) * 10) / 10} MB JS buffer.`,
+    update,
+  };
+}
+
+function createMethod44(): MethodResult {
+  // NO44 — tighten chroma-key threshold from 0.15 to 0.05. Catches
+  // bilinear blend pixels at icosahedron triangle edges where green
+  // border pixels mix with asteroid body pixels. Tests Hypothesis A.
+  return createB3ThresholdMethod(512, 0.05, true);
+}
+
+function createMethod47(): MethodResult {
+  // NO47 — hide the mesh entirely during async decode instead of
+  // showing the dark-blue placeholder. Kills the first-second flash.
+  // Tests Hypothesis B (first-second perception IS the placeholder).
+  return createB3ThresholdMethod(512, 0.15, false);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Phase 7h v12.4 — "half round" fix variants (NO41 / NO42 / NO43)
 // ═══════════════════════════════════════════════════════════════════════
 // Purpose: User reported the B3 asteroid "appears to be more a half round
@@ -2026,6 +2174,8 @@ function createB3SoftKeyMethod(size: number): MethodResult {
 function createMethod41(): MethodResult { return createB3CroppedMethod(256); }
 function createMethod42(): MethodResult { return createB3UVRemapMethod(256); }
 function createMethod43(): MethodResult { return createB3SoftKeyMethod(256); }
+function createMethod45(): MethodResult { return createB3ThresholdMethod(512, 0.10, true); }
+function createMethod46(): MethodResult { return createB3ThresholdMethod(512, 0.20, true); }
 
 // ═══════════════════════════════════════════════════════════════════════
 // Dispatch table
@@ -2042,6 +2192,7 @@ const METHOD_FACTORIES: ReadonlyArray<() => MethodResult> = [
   createMethod35, createMethod36, createMethod37,
   createMethod38, createMethod39, createMethod40,
   createMethod41, createMethod42, createMethod43,
+  createMethod44, createMethod45, createMethod46, createMethod47,
 ];
 
 export function createMethod(idx: number): MethodResult {
