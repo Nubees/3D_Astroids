@@ -1499,12 +1499,12 @@ export class Game {
         return;
       }
       // Phase 7i Sprint 3 — charge-stack deploy. consumeActiveCharge already
-      // decremented charges by 1 and set cooldown, so the CURRENT `charges`
-      // is the number we had BEFORE that decrement. We pass `charges` as
-      // tier (1/2/3) and then RESET charges to 0 — the player banked 3
-      // pickups but the cost is still one cooldown. Example: banked 3,
-      // pressed Digit2 → tier=3 deploy, charges=0, cooldown=4s.
-      const tier = this.activeAmmo[kind].charges as 1 | 2 | 3;
+      // decremented charges by 1, so the CURRENT charges field is banked-1.
+      // We add 1 to recover the banked count and pass it as tier (1/2/3),
+      // then reset charges to 0 — the player banked 3 pickups but the cost
+      // is still one cooldown. Example: banked 3, pressed Digit2 → tier=3
+      // deploy (4 drones), charges=0, cooldown=4s.
+      const tier = (this.activeAmmo[kind].charges + 1) as 1 | 2 | 3;
       this.activeAmmo[kind].charges = 0;
       this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene, tier));
     } else if (spec.displayName === 'MISSILES') {
