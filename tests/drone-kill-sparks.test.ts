@@ -25,7 +25,7 @@
 //          container) so it must enable visibility itself.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { AdditiveBlending, Object3D, Sprite } from 'three';
 import {
   createDroneKillSparks,
