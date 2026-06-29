@@ -350,8 +350,8 @@ export function spawnDroneDeployment(
  *     with KillSource.DRONE for downstream kill-routing (Task 6 sparks).
  *   - The deployment-level fireTimer is no longer read/written here —
  *     each perDrone[i].fireTimer drives its own fire cadence.
- *   - deployShockwaveAge starts at 999 (hidden) and is nudged to 0.001 on
- *     the first non-fade tick so the 250ms shockwave plays ONCE on deploy.
+ *   - deployShockwaveAge starts at 0 and is nudged to 0.001 on the
+ *     first non-fade tick so the 250ms shockwave plays ONCE on deploy.
  */
 export function tickDroneDeployments(
   deployments: DroneDeploymentState[],
