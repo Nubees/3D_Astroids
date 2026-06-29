@@ -227,6 +227,11 @@ import {
   updateActiveRing,
 } from './magnet-booster-vfx';
 import { createMissileExplosionFactory } from './missileExplosion';
+import {
+  createDroneKillSparks,
+  tickDroneKillSparks,
+  DroneKillSparks,
+} from './drone-kill-sparks';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
@@ -422,6 +427,11 @@ export class Game {
   // shards + 80 sparks + 1 flash sphere; reused across all detonations.
   // The factory is created in the constructor and disposed in stop().
   private missileExplosionFactory: ReturnType<typeof createMissileExplosionFactory> | null = null;
+  // Phase 7i Sprint 2 Task 6 — drone-kill sparks. Spawned when a drone-
+  // tagged projectile (projectile.state.source === 'DRONE') destroys an
+  // asteroid. Each entry is a 12-sprite additive burst that lives 0.4s
+  // before the tick path removes its sprites and disposes its materials.
+  private droneKillSparks: DroneKillSparks[] = [];
   private pickupHudElement: HTMLDivElement | null = null;
   private pickupHudPills: Map<PickupKind, PassivePill> = new Map();
   private activeHudElement: HTMLDivElement | null = null;
@@ -730,6 +740,15 @@ export class Game {
     this.freezeFramesRemaining = 0;
     disposeShockwaveParticles();
     disposeMissileVfx();
+    // Phase 7i Sprint 2 Task 6 — drone-kill spark cleanup. Force-expire any
+    // in-flight sparks so their sprites are removed from the scene and
+    // their materials are disposed (the lock-on texture is module-scope
+    // shared and is NOT disposed here). A long dt is safe because
+    // tickDroneKillSparks is dt-bounded by the lifetime clamp.
+    for (const sparks of this.droneKillSparks) {
+      tickDroneKillSparks(sparks, 1.0, this.scene);
+    }
+    this.droneKillSparks = [];
     // Phase 7f — Magnet Booster cleanup. Reset the state machine so a
     // stop() → start() cycle starts clean (no stale pendingTier or active
     // window), and hide both rings so they don't carry over to the next
@@ -1810,6 +1829,11 @@ export class Game {
     if (this.missileExplosionFactory) {
       this.missileExplosionFactory.update(deltaTime);
     }
+    // Phase 7i Sprint 2 Task 6 — tick the drone-kill spark pools. Each entry
+    // ages 0.4s before the tick path disposes its 12 sprites and removes
+    // them from this.droneKillSparks. Safe to call every frame even when
+    // the array is empty (filter on an empty array is a no-op).
+    this.updateDroneKillSparks(deltaTime);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1912,6 +1936,50 @@ export class Game {
     if (live.state.health <= 0) {
       this.destroyAsteroid(live, 'MISSILE');
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // My Rules — Drone Kill Spark Spawn (Phase 7i Sprint 2 Task 6)
+  // ══════════════════════════════════════════════════════════════════════════
+  // Purpose: Spawn the 12-sprite additive burst at the position of an
+  //          asteroid that was just killed by a drone-tagged projectile.
+  //          Pushes the entry onto this.droneKillSparks for the per-frame
+  //          tick in updateDroneKillSparks, AND adds all sprites to the
+  //          scene with visible=true so they render on the very next frame.
+  // Setup:   Called from handleCollisions ONLY when the destroying
+  //          projectile's source tag is 'DRONE' (passed in via hitSource
+  //          local). The tier is read from the active orbit-drone
+  //          deployment; in Sprint 2 the deployment is always tier 1 so
+  //          the `?? 1` fallback covers the rare "no active deployment"
+  //          case (drone killed in the same frame the deployment began
+  //          fading out).
+  // Issues:  Pre-Phase 7i drone kills were silent — the only visual cue
+  //          was the drone mesh itself, which was no longer relevant the
+  //          instant the projectile collided.
+  // Fix:     Phase 7i Sprint 2 Task 6. createDroneKillSparks emits 12
+  //          outward-radiating sprites, each tinted to the deployment's
+  //          tier color (cyan/magenta/gold). The tick path disposes the
+  //          sprites when their 0.4s lifetime expires.
+  // Gotchas: We flip sprite.visible=true AFTER scene.add so the
+  //          spawn-at-origin frame never causes a single-frame flicker at
+  //          z=0. The factory defaults to visible=false for that exact
+  //          reason. This helper is the only writer of droneKillSparks;
+  //          updateDroneKillSparks owns the read/eviction side.
+  // ══════════════════════════════════════════════════════════════════════════
+  private spawnDroneKillSparks(position: Vector2): void {
+    const tier = (this.activeDeployments[0]?.tier ?? 1) as 1 | 2 | 3;
+    const sparks = createDroneKillSparks(position, tier);
+    this.droneKillSparks.push(sparks);
+    for (const s of sparks.sprites) {
+      this.scene.add(s);
+      s.visible = true;
+    }
+  }
+
+  private updateDroneKillSparks(deltaTime: number): void {
+    this.droneKillSparks = this.droneKillSparks.filter((s) => {
+      return !tickDroneKillSparks(s, deltaTime, this.scene);
+    });
   }
 
   private updateSpawning(deltaTime: number): void {
@@ -2501,6 +2569,12 @@ export class Game {
 
     for (const asteroid of this.asteroids) {
       let hit = false;
+      // Phase 7i Sprint 2 Task 6 — tag the projectile that actually collides
+      // so the destroy branch can fan out into drone-specific visuals. The
+      // default 'BULLET' covers the legacy single-shot path; 'DRONE' is set
+      // by fireDroneProjectile on every drone-fired projectile (see
+      // Projectile.source in src/types.ts).
+      let hitSource: KillSource = 'BULLET';
       const asteroidRadius = SIZE_RADIUS[asteroid.state.size];
       const remainingProjectiles: LiveProjectile[] = [];
 
@@ -2516,6 +2590,9 @@ export class Game {
           if (asteroid.state.kind === AsteroidKind.CRYSTAL) {
             asteroid.state.health = Math.max(0, asteroid.state.health - 1);
           }
+          if (projectile.state.source === 'DRONE') {
+            hitSource = 'DRONE';
+          }
           this.disposeProjectile(projectile);
         } else {
           remainingProjectiles.push(projectile);
@@ -2526,7 +2603,8 @@ export class Game {
       if (hit) {
         // Iron asteroids always die on a hit (pre-Phase 6 behavior).
         if (asteroid.state.kind === AsteroidKind.IRON) {
-          this.destroyAsteroid(asteroid);
+          this.destroyAsteroid(asteroid, hitSource);
+          if (hitSource === 'DRONE') this.spawnDroneKillSparks(asteroid.state.position);
           continue;
         }
 
@@ -2541,7 +2619,8 @@ export class Game {
         }
 
         if (asteroid.state.health <= 0) {
-          this.destroyAsteroid(asteroid);
+          this.destroyAsteroid(asteroid, hitSource);
+          if (hitSource === 'DRONE') this.spawnDroneKillSparks(asteroid.state.position);
           continue;
         }
         // Non-fatal hit on a crystal: keep it alive so the player can still
@@ -3653,6 +3732,22 @@ export class Game {
   debugPauseClock(paused: boolean): boolean {
     this.clockPaused = paused;
     return this.clockPaused;
+  }
+
+  /**
+   * Phase 7i Sprint 2 Task 6 — spawn a pickup of the given kind at the
+   * given world position. Wraps the private spawnPickup so Playwright
+   * tests can force a pickup to drop near the ship without having to
+   * roll the natural 10% drop chance off an Iron LARGE. Accepts the
+   * PickupKind string value (e.g. 'orbitDrones', 'magnetBooster') —
+   * the same value the PickupKind enum uses internally.
+   */
+  debugSpawnPickup(kind: string, x: number, y: number): boolean {
+    const validKinds = Object.values(PickupKind) as string[];
+    if (!validKinds.includes(kind)) return false;
+    const pickupKind = kind as PickupKind;
+    this.spawnPickup(pickupKind, { x, y });
+    return true;
   }
 }
 

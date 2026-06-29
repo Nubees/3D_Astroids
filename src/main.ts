@@ -39,6 +39,13 @@ async function main(): Promise<void> {
     setGameTime: (s: number) => game.debugSetGameTime(s),
     getCrystal: (id: number) => game.debugGetCrystal(id),
     pauseClock: (paused: boolean) => game.debugPauseClock(paused),
+    // Phase 7i Sprint 2 Task 6 — force-spawn a pickup so Playwright can
+    // skip the 10% drop roll on Iron LARGE kills. Accepts the PickupKind
+    // string value (e.g. 'orbitDrones', 'magnetBooster', 'bombStrike',
+    // 'homingMissiles', 'fireRate', 'shield', 'spread'). Returns true
+    // on success, false if the kind string is unknown.
+    spawnPickup: (kind: string, x: number, y: number) =>
+      game.debugSpawnPickup(kind, x, y),
   };
 
   window.addEventListener('beforeunload', () => {
