@@ -758,10 +758,20 @@ export function tickDroneDeployments(
           drone.beamLine.visible = false;
           drone.currentBeamTarget = null;
         } else if (drone.currentBeamTarget) {
+          // Phase 7i-2 (Task 11b) — explicit z=0 here because
+          // AsteroidState.position is Vector2 (x, y only) and casting
+          // it to Vector3 leaves .z as undefined → NaN in the
+          // BufferAttribute → WebGL driver collapses the endpoint
+          // to the world origin (visible as "beams converging on
+          // the center"). The intersection check (pointToSegmentDistance
+          // in game.ts) reads only .x/.y so it kept working — only
+          // the visual was wrong.
           updateBeam(
             drone.beamLine,
             drone.mesh.position,
-            drone.currentBeamTarget.position as unknown as Vector3,
+            { x: drone.currentBeamTarget.position.x,
+              y: drone.currentBeamTarget.position.y,
+              z: 0 },
           );
         }
       }
@@ -1436,10 +1446,14 @@ export function fireDroneBeam(
   drone.beamHasHitTarget = false;
   if (target && drone.beamLine) {
     drone.beamLine.visible = true;
+    // Phase 7i-2 (Task 11b) — see the per-frame tick above for the
+    // Vector2→Vector3 NaN explanation. Explicit z=0 here keeps the
+    // initial beam endpoint valid before the per-frame tick takes
+    // over.
     updateBeam(
       drone.beamLine,
       drone.mesh.position,
-      target.position as unknown as Vector3,
+      { x: target.position.x, y: target.position.y, z: 0 },
     );
   }
 }
