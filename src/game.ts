@@ -3032,6 +3032,30 @@ export class Game {
         if (drone.beamHasHitTarget) continue; // per-beam-once gate
         if (!drone.beamLine || !drone.beamLine.visible) continue;
         const target = drone.currentBeamTarget;
+        // Phase 7i-2 hotfix — stale-target check. currentBeamTarget is
+        // set once at fire time and only cleared at end-of-beam-life or
+        // when the hit loop BELOW finds the asteroid. If the asteroid
+        // was destroyed by ANOTHER system (player blaster shot, sibling
+        // drone's beam) between fire time and this frame, it has been
+        // removed from this.asteroids by the destroyedThisTick filter
+        // at line ~2098. The hit loop iterates this.asteroids, so it
+        // never finds the dead asteroid and clearDroneBeam is never
+        // called — the beam keeps pointing at the dead position for
+        // the full 0.25s lifetime. The fix: if currentBeamTarget is
+        // not in this.asteroids, clear immediately. The distributed
+        // picker (findDistributedDroneTargets) will hand the drone a
+        // fresh target next frame, so it can fire again right away.
+        let targetStillLive = false;
+        for (const live of this.asteroids) {
+          if (live.state === target) {
+            targetStillLive = true;
+            break;
+          }
+        }
+        if (!targetStillLive) {
+          clearDroneBeam(drone);
+          continue;
+        }
         for (const live of this.asteroids) {
           const radius = SIZE_RADIUS[live.state.size];
           const dist = pointToSegmentDistance(
