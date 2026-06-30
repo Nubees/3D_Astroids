@@ -158,10 +158,12 @@ describe('Per-kind constants match spec values', () => {
     expect(ORBIT_DRONES_COOLDOWN_SECONDS).toBe(4.0);
     // Phase 7i Sprint 3 — cap bumped 2 → 3 to enable charge-stack deploy.
     expect(ORBIT_DRONES_CHARGE_CAP).toBe(3);
-    expect(ORBIT_DRONES_DURATION_SECONDS).toBe(6.0);
-    expect(ORBIT_DRONES_ORBIT_RADIUS).toBe(1.5);
+    // Phase 7i-2 — power redesign: duration 6→11s, orbit 1.5→2.5u.
+    expect(ORBIT_DRONES_DURATION_SECONDS).toBe(11.0);
+    expect(ORBIT_DRONES_ORBIT_RADIUS).toBe(2.5);
     expect(ORBIT_DRONES_ORBIT_PERIOD_SECONDS).toBe(1.5);
-    expect(ORBIT_DRONES_TARGET_RADIUS).toBe(4.0);
+    // Phase 7i-2 — ORBIT_DRONES_TARGET_RADIUS is now an alias of BEAM_REACH (24).
+    expect(ORBIT_DRONES_TARGET_RADIUS).toBe(24.0);
     expect(ORBIT_DRONES_FIRE_INTERVAL_SECONDS).toBe(0.4);
     expect(ORBIT_DRONES_DAMAGE).toBe(1);
     expect(ORBIT_DRONES_DRONE_COUNT).toBe(2);
@@ -212,12 +214,16 @@ describe('Orbit Drones — deployment', () => {
     const dep = spawnDroneDeployment({ x: 0, y: 0 }, scene);
     expect(dep.droneMeshes.length).toBe(2);
     expect(dep.remaining).toBe(ORBIT_DRONES_DURATION_SECONDS);
-    // Phase 7i — spawn now adds drone mesh + tether + lock-on sprite
-    // for each drone, plus 1 aura ring + 1 deploy shockwave = 2×3 + 2 = 8.
-    expect(scene.children.length).toBe(8);
+    // Phase 7i — spawn adds drone mesh + tether + lock-on sprite for each drone,
+    // plus 1 aura ring + 1 deploy shockwave = 2×3 + 2 = 8.
+    // Phase 7i-2 Task 6 — beam + muzzle flash added per drone, so 2×5 + 2 = 12.
+    // beamLine is initially invisible (created by createDroneBeam at 0,0,0) and
+    // muzzleFlash is also added to scene at construction time even though it is
+    // only ever visible for the first 80ms of fire.
+    expect(scene.children.length).toBe(12);
   });
 
-  it('after 0.5s of ticks, drone meshes are at radius 1.5 from ship (within tolerance)', () => {
+  it('after 0.5s of ticks, drone meshes are at radius 2.5 from ship (within tolerance)', () => {
     const scene = makeScene();
     const dep = spawnDroneDeployment({ x: 0, y: 0 }, scene);
     // 30 frames at 1/60s ≈ 0.5s.
@@ -232,14 +238,17 @@ describe('Orbit Drones — deployment', () => {
     }
   });
 
-  it('after 6.0s, the deployment is removed and meshes removed from scene', () => {
+  it('after the duration elapses, the deployment is removed and meshes removed from scene', () => {
     const scene = makeScene();
     const dep = spawnDroneDeployment({ x: 0, y: 0 }, scene);
-    // 6 seconds at 1/60s = 360 frames + 0.3s fade-out = ~378 frames; the
-    // deployment should be culled. Replace the input array with the
-    // returned list each frame so culled deployments are not re-ticked.
+    // Phase 7i-2 — duration bumped 6s → 11s. Tick well past DURATION +
+    // FADE_OUT (0.3s) so the deployment is culled. Replace the input
+    // array with the returned list each frame so culled deployments are
+    // not re-ticked.
+    const totalSeconds = ORBIT_DRONES_DURATION_SECONDS + ORBIT_DRONES_FADE_OUT_SECONDS + 1.0;
+    const frames = Math.ceil(totalSeconds * 60);
     let live: typeof dep[] = [dep];
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < frames; i++) {
       live = tickDroneDeployments(
         live,
         { x: 0, y: 0 },
@@ -268,6 +277,53 @@ describe('Phase 7i Sprint 3 — charge-stack deploy', () => {
 
   it('ORBIT_DRONES_TIER_DRONE_COUNT(3) === 4', () => {
     expect(ORBIT_DRONES_TIER_DRONE_COUNT(3)).toBe(4);
+  });
+});
+
+import {
+  ORBIT_DRONES_BEAM_COLOR,
+  ORBIT_DRONES_BEAM_REACH,
+  ORBIT_DRONES_CHARGE_UP_DEPLOY_SCALE,
+  ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS,
+  ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS,
+  ORBIT_DRONES_FIRE_INTERVAL_TAPER_END,
+} from '../src/pickups';
+
+describe('Phase 7i-2 — power redesign constants', () => {
+  it('ORBIT_DRONES_DURATION_SECONDS === 11', () => {
+    expect(ORBIT_DRONES_DURATION_SECONDS).toBe(11);
+  });
+
+  it('ORBIT_DRONES_ORBIT_RADIUS === 2.5', () => {
+    expect(ORBIT_DRONES_ORBIT_RADIUS).toBe(2.5);
+  });
+
+  it('ORBIT_DRONES_FIRE_INTERVAL_TAPER_END === 1.0', () => {
+    expect(ORBIT_DRONES_FIRE_INTERVAL_TAPER_END).toBe(1.0);
+  });
+
+  it('ORBIT_DRONES_BEAM_REACH === 24', () => {
+    expect(ORBIT_DRONES_BEAM_REACH).toBe(24);
+  });
+
+  it('ORBIT_DRONES_BEAM_COLOR === 0xff2233', () => {
+    expect(ORBIT_DRONES_BEAM_COLOR).toBe(0xff2233);
+  });
+
+  it('ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS === 0.3', () => {
+    expect(ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS).toBe(0.3);
+  });
+
+  it('ORBIT_DRONES_CHARGE_UP_DEPLOY_SCALE === 2.5', () => {
+    expect(ORBIT_DRONES_CHARGE_UP_DEPLOY_SCALE).toBe(2.5);
+  });
+
+  it('ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS === 1.5', () => {
+    expect(ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS).toBe(1.5);
+  });
+
+  it('ORBIT_DRONES_FIRE_INTERVAL_TAPER_END === 1.0', () => {
+    expect(ORBIT_DRONES_FIRE_INTERVAL_TAPER_END).toBe(1.0);
   });
 });
 

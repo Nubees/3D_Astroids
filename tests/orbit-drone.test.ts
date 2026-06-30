@@ -3,7 +3,10 @@ import {
   ORBIT_DRONES_TIER_DRONE_COUNT,
   ORBIT_DRONES_TIER_COLOR,
   bobOffset,
+  expiryAlphaCurve,
   fireFlashCurve,
+  powerPulseEmissive,
+  powerPulseScale,
   spinAngles,
 } from '../src/orbit-drone';
 
@@ -107,5 +110,53 @@ describe('spinAngles', () => {
     const angles = spinAngles(0);
     expect(angles.x).toBeCloseTo(0, 5);
     expect(angles.y).toBeCloseTo(0, 5);
+  });
+});
+
+describe('Phase 7i-2 — power pulse helpers', () => {
+  it('powerPulseScale(0, 0) === 1.0 (baseline)', () => {
+    expect(powerPulseScale(0, 0)).toBeCloseTo(1.0, 6);
+  });
+
+  it('powerPulseScale(0.5, 0) ≈ 0.9530 (past peak in negative half)', () => {
+    // 1.2 Hz * 2π = 7.5398 rad/s. Quarter period = 0.2083s, but t=0.5 is past peak.
+    // sin(0.5 * 1.2 * 2π + 0) = sin(3.7699) ≈ -0.5878 → 1.0 + 0.08 * -0.5878 ≈ 0.9530
+    expect(powerPulseScale(0.5, 0)).toBeCloseTo(0.9530, 2);
+  });
+
+  it('powerPulseScale(0.2083, 0) ≈ 1.08 (peak)', () => {
+    expect(powerPulseScale(0.2083, 0)).toBeCloseTo(1.08, 2);
+  });
+
+  it('powerPulseEmissive(0, 0) === 0.8 (baseline)', () => {
+    expect(powerPulseEmissive(0, 0)).toBeCloseTo(0.8, 6);
+  });
+
+  it('powerPulseEmissive(0.2083, 0) ≈ 1.4 (peak)', () => {
+    expect(powerPulseEmissive(0.2083, 0)).toBeCloseTo(1.4, 2);
+  });
+});
+
+describe('Phase 7i-2 — expiry telegraph', () => {
+  it('expiryAlphaCurve(2) === 1.0 (above threshold)', () => {
+    expect(expiryAlphaCurve(2)).toBe(1.0);
+  });
+
+  it('expiryAlphaCurve(1.5) === 1.0 (exactly at threshold boundary)', () => {
+    expect(expiryAlphaCurve(1.5)).toBe(1.0);
+  });
+
+  it('expiryAlphaCurve(1) ≈ 0.667 (mid fade at w=1.5)', () => {
+    // 1/1.5 ≈ 0.6667 — w=1.5 from ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS
+    expect(expiryAlphaCurve(1)).toBeCloseTo(0.6667, 2);
+  });
+
+  it('expiryAlphaCurve(0.5) ≈ 0.333 (lower fade at w=1.5)', () => {
+    // 0.5/1.5 ≈ 0.3333
+    expect(expiryAlphaCurve(0.5)).toBeCloseTo(0.3333, 2);
+  });
+
+  it('expiryAlphaCurve(0) === 0', () => {
+    expect(expiryAlphaCurve(0)).toBe(0);
   });
 });

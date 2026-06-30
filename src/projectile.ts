@@ -7,12 +7,19 @@ import { Vector2, Projectile } from './types';
 // Setup: Game owns the Three.js meshes; this module owns the data + math.
 // Issues: None.
 // Fix: Created a plain data structure and update function so logic is testable.
-//          Phase 7i Sprint 2 Task 5 — createProjectile now accepts an
+//          Phase 7i Sprint 2 Task 5 — createProjectile accepted an
 //          optional `source` tag ('BULLET' default, 'BOMB' for bomb
 //          shrapnel if added later, 'DRONE' for drone-fired projectiles).
-//          The tag flows through to Projectile.source so downstream code
-//          (handleCollisions → destroyAsteroid) can route drone kills
-//          through spawn-on-kill VFX in a later task.
+//          The tag flowed through to Projectile.source so downstream
+//          code (handleCollisions → destroyAsteroid) could route drone
+//          kills through spawn-on-kill VFX in Task 6.
+//          Phase 7i-2 (Task 6) — the 'DRONE' literal is REMOVED from
+//          the source union. Beam fire replaces projectile fire, so
+//          createProjectile never produces a drone-tagged projectile.
+//          The 'BULLET' default covers the player blaster path; 'BOMB'
+//          is reserved for future bomb shrapnel if needed. KillSource
+//          .DRONE in src/pickups.ts:492 is a separate enum that stays
+//          in place for the new beamHitCallback damage path.
 // Gotchas: Lifetime counts down in seconds; projectiles should be culled when
 //          lifetime <= 0 or far off-screen. Pass-through of `source` is a
 //          string literal union (NOT KillSource) because pulling
@@ -27,7 +34,7 @@ export const PROJECTILE_RADIUS = 0.12;
 export function createProjectile(
   position: Vector2,
   direction: Vector2,
-  source: 'BULLET' | 'BOMB' | 'DRONE' = 'BULLET',
+  source: 'BULLET' | 'BOMB' = 'BULLET',
 ): Projectile {
   return {
     position,

@@ -4,6 +4,7 @@ import {
   Group,
   IcosahedronGeometry,
   Line,
+  LineBasicMaterial,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
@@ -11,6 +12,7 @@ import {
   SphereGeometry,
   Sprite,
   SpriteMaterial,
+  Vector3,
 } from 'three';
 import { AsteroidKind, AsteroidSize, AsteroidState, Vector2 } from './types';
 import {
@@ -23,10 +25,15 @@ import {
   HOMING_MISSILES_TURN_RATE,
   HOMING_MISSILES_VOLLEY_COUNT,
   HOMING_MISSILES_VOLLEY_STAGGER_MS,
+  ORBIT_DRONES_BEAM_LIFETIME_SECONDS,
+  ORBIT_DRONES_BEAM_REACH,
   ORBIT_DRONES_DAMAGE,
   ORBIT_DRONES_DURATION_SECONDS,
+  ORBIT_DRONES_EXPIRY_AURA_FREQUENCY_HZ,
+  ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS,
   ORBIT_DRONES_FADE_OUT_SECONDS,
   ORBIT_DRONES_FIRE_INTERVAL_SECONDS,
+  ORBIT_DRONES_FIRE_INTERVAL_TAPER_END,
   ORBIT_DRONES_ORBIT_PERIOD_SECONDS,
   ORBIT_DRONES_ORBIT_RADIUS,
   ORBIT_DRONES_TARGET_RADIUS,
@@ -36,16 +43,25 @@ import { PROJECTILE_RADIUS, PROJECTILE_SPEED } from './projectile';
 import {
   createAuraRing,
   createDeployShockwave,
+  createDroneBeam,
   createDroneMesh,
   createLockOnSprite,
+  createMuzzleFlash,
   createTetherLine,
-  updateAuraPulse,
+  updateBeam,
   updateDeployShockwave,
   updateDroneVisuals,
   updateLockOnSprite,
+  updateMuzzleFlash,
   updateTetherLine,
 } from './orbit-drone-vfx';
-import { ORBIT_DRONES_TIER_COLOR, ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-drone';
+import {
+  ORBIT_DRONES_TIER_COLOR,
+  ORBIT_DRONES_TIER_DRONE_COUNT,
+  expiryAlphaCurve,
+  powerPulseEmissive,
+  powerPulseScale,
+} from './orbit-drone';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Active Deployments (Phase 7 DIAL-UP / Phase 7b Power-Up VFX / Phase 7i)
@@ -118,6 +134,115 @@ import { ORBIT_DRONES_TIER_COLOR, ORBIT_DRONES_TIER_DRONE_COUNT } from './orbit-
 //          deployShockwaveAge. We intentionally leave that field at 0
 //          for the rest of the deployment's life — subsequent calls
 //          skip the equality check and just keep ageing the shockwave.
+//          Phase 7i-2 (Task 4) DELTA — idle power-pulse breathing. New
+//          PerDroneState.powerPulsePhase (random [0, 2π) like bobPhase
+//          so a tier-3 deployment doesn't pulse in lockstep) and new
+//          DroneDeploymentState.elapsedSeconds (dt-accumulating wall-clock
+//          since spawn). tickDroneDeployments increments elapsedSeconds
+//          at the top of the outer loop, then after the existing
+//          updateDroneVisuals call (which already sets scale + emissive
+//          from the 80ms fire-flash) layers the power-pulse ON TOP: scale
+//          multiplies, emissive adds the offset scaled by (1 - flash) so
+//          the fire-flash still pokes through at the fire moment. The
+//          drone mesh material is MeshStandardMaterial (verified in
+//          src/orbit-drone-vfx.ts:103) so the emissiveIntensity channel
+//          is available — no CRITICAL CHECK fallback needed.
+//          Phase 7i-2 (Task 5) DELTA — expiry telegraph + fire-rate taper.
+//          Three new effects layered on top of the Task 4 power-pulse:
+//          (1) per-drone alpha fade via expiryAlphaCurve(dep.remaining)
+//          writes mat.opacity = 1.0→0.0 across the last
+//          ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS (1.5s) and also flips
+//          mat.transparent = true (createDroneMesh does NOT pre-set it,
+//          contrary to the dispatch brief — verified Task 4 by reading
+//          src/orbit-drone-vfx.ts:103). Placed OUTSIDE the fire-flash
+//          block so the emissiveIntensity layering does not fight it —
+//          the fire-flash only touches emissive, not opacity, so the
+//          two channels compose cleanly. (2) aura pulse frequency shift
+//          from 2.0 Hz → 5.0 Hz (ORBIT_DRONES_EXPIRY_AURA_FREQUENCY_HZ)
+//          when dep.remaining <= telegraph. Replicates the 0.35+0.25*sin
+//          shape from updateAuraPulse in src/orbit-drone-vfx.ts:245 so
+//          the pre-telegraph visual is identical — only the frequency
+//          changes (SWAP, not stack). The call to updateAuraPulse is
+//          removed entirely (and the import dropped) because threading
+//          a frequency param through would require editing
+//          src/orbit-drone-vfx.ts, which is out of Task 5 scope. The
+//          legacy tier===0 hide branch is gone since dep.tier is typed
+//          `1 | 2 | 3` post-Sprint 3 — the ring is always visible
+//          during the active phase. (3) fire-rate taper: interval
+//          starts at 0.4s and linearly ramps to 1.0s across
+//          dep.elapsedSeconds = [9, 11] (the last 2s of life). The
+//          trigger compares against the LIVE interval, not the
+//          constant, so the reset-to-zero pattern still works —
+//          fireTimer crosses interval, fires, resets to 0, accumulates
+//          toward the next (potentially larger) interval.
+//          Phase 7i-2 (Task 6) DELTA — beam fire replaces projectile fire.
+//          Drones no longer spawn per-shot Projectile entities. They
+//          paint an instant 0xff2233 line from drone → target using
+//          createDroneBeam (src/orbit-drone-vfx.ts) with
+//          ORBIT_DRONES_BEAM_REACH=24u and a 0.25s lifetime (visible
+//          per-frame via updateBeam — a Line does not auto-track the
+//          target, so without the per-frame call the endpoint would
+//          stay at the original target position even if the asteroid
+//          moves). PerDroneState gained: beamLine (Line|null, created
+//          at origin 0,0,0 with visible=false), muzzleFlash (Sprite,
+//          80ms scale-pulse), beamAge (counts up to BEAM_LIFETIME),
+//          muzzleFlashAge (counts up to 0.08s), currentBeamTarget
+//          (sticky across frames so the beam can re-track between
+//          tickDroneDeployments calls). fireDroneBeam replaces
+//          fireDroneProjectile: sets beamLine.visible=true, snaps
+//          endpoints drone→target, resets beamAge=0, sets
+//          currentBeamTarget=asteroid, positions muzzleFlash at drone,
+//          resets muzzleFlashAge=0, fires the per-fire scale-pop +
+//          emissive flash on the drone mesh, emits DroneKillSparks
+//          (unchanged from Sprint 2) if a KillSource callback is
+//          registered. DroneDeploymentState gained beamHitCallback —
+//          Task 9 wires this in src/game.ts so the engine can apply
+//          damage when a beam paints an asteroid. The previous
+//          onDroneFire(origin,target,droneIndex,tier) callback is now
+//          (origin,target,droneIndex,tier,beamHitCallback?) — old
+//          callers passing only the first 4 args still compile
+//          because beamHitCallback is optional. Projectile.source no
+//          longer has 'DRONE' (src/types.ts) — the literal was
+//          dead-code post-beam-rewiring; the KillSource.DRONE enum in
+//          src/pickups.ts is KEPT for kill-sparks routing.
+//          Phase 7i-2 (Task 7) DELTA — dispose path for the new VFX.
+//          disposeDroneDeployment gained two per-drone dispose arms
+//          alongside the existing mesh / tether / lock-on calls:
+//          (1) `drone.beamLine` — Line + per-instance BufferGeometry +
+//          per-instance LineBasicMaterial all disposed; beamLine is
+//          nulled so a stale pointer in any future code path cannot
+//          resurrect a disposed mesh. (2) `drone.muzzleFlash` — the
+//          Sprite is removed from the scene and its SpriteMaterial is
+//          disposed (which decrements the shared lock-on CanvasTexture
+//          ref count — harmless because the texture is module-scope
+//          and reused by every deployment). We do NOT dispose the
+//          sprite's geometry (Sprites share a unit-square SpriteGeometry
+//          that is not safe to dispose per-instance) and we do NOT
+//          touch the shared lock-on texture itself. These two arms
+//          close the per-deployment GPU resource leak that Task 6
+//          opened: pre-Task 7, deploying drones and waiting for the
+//          fade-out would orphan the Line geometry, the LineBasicMaterial,
+//          and the SpriteMaterial in GPU memory until tab close. The
+//          dep.auraRing + dep.deployShockwave disposes from prior
+//          tasks are unchanged. Task 8 will add the chargeUpRing
+//          dispose arm in the SAME per-drone loop.
+//          Phase 7i-2 (Task 9) DELTA — per-beam-once throttling. New
+//          PerDroneState.beamHasHitTarget: boolean field (initialised
+//          false in spawnDroneDeployment and re-armed false on every
+//          fireDroneBeam call). The flag is consumed by the
+//          per-frame intersection check in src/game.ts (handleCollisions
+//          extension): each frame while a beam is visible, the check
+//          iterates per-asteroid, and beamHasHitTarget gates whether
+//          dep.beamHitCallback fires. First hit flips it to true;
+//          subsequent frames within the same 0.25s beam window see
+//          true and short-circuit. 1 hit per beam = the user-feedback
+//          cadence the design calls for. fireDroneBeam is the SOLE
+//          writer of false (reset); the intersection check in
+//          game.ts is the SOLE writer of true. The field is plain
+//          mutable state on PerDroneState (no readonly) because the
+//          existing fireFlashAge / fireTimer / beamAge pattern is
+//          all mutable too — consistent with the rest of the
+//          per-drone slot.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -140,6 +265,39 @@ export interface PerDroneState {
   tetherLine: Line;          // Phase 7i Sprint 1
   lockOnSprite: Sprite;      // Phase 7i Sprint 1
   currentTarget: AsteroidState | null;
+  // Phase 7i-2 — unique phase offset for the idle power-pulse (scale +
+  // emissive breathing at 1.2 Hz). Independent of bobPhase so the drone
+  // doesn't bob AND pulse in lockstep — the eye reads the composite as
+  // organic motion rather than a single rigid sinusoid.
+  powerPulsePhase: number;
+  // Phase 7i-2 (Task 6) — beam fire replaces projectile fire. Each drone
+  // owns a beam Line (initially visible=false — the factory seeds both
+  // endpoints at (0,0,0) so the line would be a degenerate pixel if
+  // shown) and a muzzle-flash Sprite (additive, opacity starts at 0 and
+  // is animated by updateMuzzleFlash). `beamAge` is the dt accumulator
+  // driving the ORBIT_DRONES_BEAM_LIFETIME_SECONDS timeout; when the
+  // line expires, currentBeamTarget is cleared and the line is hidden
+  // until the next fire. `muzzleFlashAge` is its own dt accumulator and
+  // runs for ORBIT_DRONES_MUZZLE_FLASH_LIFETIME_SECONDS (0.08s). The
+  // per-frame tick in tickDroneDeployments ages both and calls
+  // updateBeam / updateMuzzleFlash while in-window.
+  beamLine: Line | null;
+  muzzleFlash: Sprite;
+  beamAge: number;
+  muzzleFlashAge: number;
+  currentBeamTarget: AsteroidState | null;
+  // Phase 7i-2 (Task 9) — per-beam-once throttling for beam-vs-asteroid
+  // damage. The beam Line is visible for ORBIT_DRONES_BEAM_LIFETIME_SECONDS
+  // (0.25s) which is ~15 frames at 60fps. Without a once-per-beam gate the
+  // intersection check in src/game.ts would call dep.beamHitCallback every
+  // frame the beam overlaps an asteroid — so a single shot could deal up to
+  // 15 damage stacks. The flag is reset to false on every fireDroneBeam
+  // (Task 9 also touches fireDroneBeam to set the false) and flipped to
+  // true the first frame the callback fires; subsequent frames short-circuit
+  // via the `if (drone.beamHasHitTarget) continue;` guard. 1 hit per beam
+  // is the player-feedback cadence the user expects: visible shot, 1 kill,
+  // next shot fires 0.4s later.
+  beamHasHitTarget: boolean;
 }
 
 export interface DroneDeploymentState {
@@ -159,6 +317,19 @@ export interface DroneDeploymentState {
   // 250ms window. Reset to 0 only on a fresh spawnDroneDeployment call.
   deployShockwaveAge: number;
   sceneClock: number;        // accumulates dt; time origin for bob/spin/aura
+  // Phase 7i-2 — wall-clock seconds since spawn. Drives the per-drone
+  // power-pulse scale + emissive math. Separate from `sceneClock` (which
+  // survives the fade-out so the existing aura ring stays consistent) so
+  // the power-pulse reads as "time since deploy" rather than "time since
+  // the game loop started ticking".
+  elapsedSeconds: number;
+  // Phase 7i-2 (Task 6) — beam-vs-asteroid hit callback. Shared across
+  // all drones in the deployment so a single callback handles hits
+  // (Task 9 wires this in src/game.ts to apply damage + spawn the
+  // per-kill VFX). Optional and null by default so existing call sites
+  // (pure-logic tests, the Playwright screenshot harness) that don't
+  // care about hit routing still compile unchanged.
+  beamHitCallback: ((asteroid: AsteroidState, tier: 1 | 2 | 3) => void) | null;
 }
 
 export interface HomingMissileState {
@@ -295,6 +466,21 @@ export function spawnDroneDeployment(
     droneMeshes.push(mesh);
     const tetherLine = createTetherLine(tier);
     const lockOnSprite = createLockOnSprite(tier);
+    // Phase 7i-2 (Task 6) — beam fire path. Each drone owns a beam Line
+    // (additive 0xff2233, depthWrite false, both endpoints seeded at
+    // (0,0,0) by createDroneBeam) and a muzzle-flash Sprite (additive
+    // diamond bitmap, opacity 0 at spawn). Both are added to the scene
+    // immediately so per-fire lookup never trips on a null parent; the
+    // beam stays visible=false until fireDroneBeam promotes it on a
+    // successful target lock. The muzzle flash is anchored to the
+    // drone's mesh position each frame in tickDroneDeployments so the
+    // flash reads as the gun's muzzle burst, not a sprite floating off
+    // at the last fire origin.
+    const beamLine = createDroneBeam(tier);
+    const muzzleFlash = createMuzzleFlash(tier);
+    scene.add(beamLine);
+    scene.add(muzzleFlash);
+    beamLine.visible = false;
     perDrone.push({
       mesh,
       bobPhase: Math.random() * Math.PI * 2,
@@ -306,6 +492,27 @@ export function spawnDroneDeployment(
       tetherLine,
       lockOnSprite,
       currentTarget: null,
+      // Phase 7i-2 — independent phase for the idle power-pulse. Random
+      // so a tier-3 (4-drone) deployment doesn't pulse in lockstep.
+      powerPulsePhase: Math.random() * Math.PI * 2,
+      // Phase 7i-2 (Task 6) — beam fire fields. beamAge/muzzleFlashAge
+      // both start past their window so neither the beam nor the muzzle
+      // flash plays on the spawn frame; the per-frame tick ages them
+      // forward on demand. currentBeamTarget=null so a missing-target
+      // edge case in the tick branch does not try to read a stale
+      // pointer.
+      beamLine,
+      muzzleFlash,
+      beamAge: ORBIT_DRONES_BEAM_LIFETIME_SECONDS,
+      muzzleFlashAge: 999,
+      currentBeamTarget: null,
+      // Phase 7i-2 (Task 9) — start past the per-beam hit window so the
+      // first intersection check after spawn (before the first fire) does
+      // not fire the callback. fireDroneBeam resets this to false on
+      // every successful lock. Initial value matches the beamAge sentinel
+      // (past the lifetime window) so the field's semantics line up with
+      // the "no active beam" reading.
+      beamHasHitTarget: false,
     });
     scene.add(tetherLine);
     scene.add(lockOnSprite);
@@ -330,6 +537,15 @@ export function spawnDroneDeployment(
     // initial value in lockstep with the tick loop trigger condition.
     deployShockwaveAge: 0,
     sceneClock: 0,
+    elapsedSeconds: 0,
+    // Phase 7i-2 (Task 6) — beam-vs-asteroid hit callback. Null at
+    // spawn; Task 9's src/game.ts wiring sets this to the actual hit
+    // handler that applies damage + spawns the per-kill VFX. The pure-
+    // logic tests in tests/active-deployments.test.ts can omit the
+    // callback entirely (the field is optional via the null sentinel
+    // + a `dep.beamHitCallback?.(asteroid, tier)` call site in
+    // Task 9).
+    beamHitCallback: null,
   };
 }
 
@@ -369,6 +585,10 @@ export function tickDroneDeployments(
   const alive: DroneDeploymentState[] = [];
   for (const dep of deployments) {
     dep.sceneClock += deltaTime;
+    // Phase 7i-2 — wall-clock seconds since spawn. Drives the per-drone
+    // power-pulse math (scale + emissive breathing at 1.2 Hz). Same dt
+    // accumulator as sceneClock so both clocks stay in lockstep.
+    dep.elapsedSeconds += deltaTime;
     if (dep.fadeTimer > 0) {
       // Fading out — shrink meshes (tether/sprite/aura/shockwave all go
       // away with their parent deployment via dispose) and dispose when
@@ -418,6 +638,37 @@ export function tickDroneDeployments(
         drone.bobPhase,
         baseY,
       );
+      // Phase 7i-2 — layer the idle power-pulse ON TOP of the fire-flash
+      // math that updateDroneVisuals just applied. Scale multiplies the
+      // existing flash-scaled value (1.0→1.15) by the pulse factor
+      // (0.92→1.08) so the fire-pop still pokes through. Emissive adds
+      // the power-pulse offset (range [-0.6, +0.6]) scaled by
+      // (1 - flash) so the power-pulse breathing DIMS to zero at the
+      // 80ms fire-flash moment — the flash dominates the visual punch,
+      // not the breath. This is the minimal layering that keeps the
+      // fire-flash visible AND adds the breathing baseline.
+      const flash = drone.fireFlashAge < 0.08 ? 1 - drone.fireFlashAge / 0.08 : 0;
+      drone.mesh.scale.multiplyScalar(powerPulseScale(dep.elapsedSeconds, drone.powerPulsePhase));
+      const mat = drone.mesh.material as MeshStandardMaterial;
+      mat.emissiveIntensity += (powerPulseEmissive(dep.elapsedSeconds, drone.powerPulsePhase)
+        - 0.8) * (1 - flash);
+      // Phase 7i-2 — expiry telegraph alpha fade. expiryAlphaCurve returns
+      // 1.0 while remaining > telegraph window, linearly ramps to 0 over
+      // the last ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS (1.5s), then 0.0
+      // once remaining hits 0. We write BOTH opacity and transparent so
+      // the alpha change actually takes effect (createDroneMesh does NOT
+      // pre-set transparent:true on the MeshStandardMaterial body, and
+      // opacity writes to a non-transparent material are silently
+      // ignored). Placed OUTSIDE the fire-flash block so the
+      // emissiveIntensity layering above does not fight this write —
+      // the fire-flash only touches emissiveIntensity, not opacity, so
+      // the two channels compose cleanly. Fade-out starts when
+      // dep.remaining <= 0 (next block), at which point the per-drone
+      // loop is skipped, so alpha=0 lands exactly as the scale-shrink
+      // fade-out takes over.
+      const alpha = expiryAlphaCurve(dep.remaining);
+      mat.opacity = alpha;
+      mat.transparent = true;
       // Tether uses the post-update mesh position (which includes bob) so
       // the line literally starts at the drone's exact screen position.
       updateTetherLine(
@@ -440,22 +691,107 @@ export function tickDroneDeployments(
       // yielding 3 × 2.5 = 7.5 shots/sec for the whole deployment — much
       // denser than the old single-deployment cadence. fireFlashAge is
       // reset to 0 so the drone's body pops for 80ms.
+      //
+      // Phase 7i-2 — fire-rate taper in the last 2s of life. interval
+      // starts at ORBIT_DRONES_FIRE_INTERVAL_SECONDS (0.4s) and linearly
+      // ramps to ORBIT_DRONES_FIRE_INTERVAL_TAPER_END (1.0s) across
+      // elapsedSeconds = [DURATION-2, DURATION] = [9, 11]. The trigger
+      // compares against the LIVE interval, not the constant, so the
+      // reset-to-zero pattern still works: fireTimer crosses interval,
+      // we fire, then reset to 0 and accumulate toward the NEXT
+      // (potentially larger) interval. The taper is independent per
+      // drone (each drone reads dep.elapsedSeconds separately), so a
+      // tier-3 deployment doesn't all slow down in lockstep — each
+      // drone's fireTimer happens to cross interval on different frames
+      // anyway because of the bob/spin phase desync.
+      let interval = ORBIT_DRONES_FIRE_INTERVAL_SECONDS;
+      const taperStart = ORBIT_DRONES_DURATION_SECONDS - 2.0;
+      if (dep.elapsedSeconds >= taperStart) {
+        const taperFraction = Math.min(
+          1,
+          (dep.elapsedSeconds - taperStart) / 2.0,
+        );
+        interval = ORBIT_DRONES_FIRE_INTERVAL_SECONDS +
+          (ORBIT_DRONES_FIRE_INTERVAL_TAPER_END - ORBIT_DRONES_FIRE_INTERVAL_SECONDS)
+            * taperFraction;
+      }
       drone.fireTimer += deltaTime;
-      if (drone.fireTimer >= ORBIT_DRONES_FIRE_INTERVAL_SECONDS) {
+      if (drone.fireTimer >= interval) {
         drone.fireTimer = 0;
         const target = drone.currentTarget;
         if (target) {
           drone.fireFlashAge = 0;
-          onDroneFire(
-            { x: drone.mesh.position.x, y: drone.mesh.position.y },
-            target,
-            i,
-            dep.tier,
+          // Phase 7i-2 (Task 6) — beam fire replaces projectile fire.
+          // The previous per-drone fire path called the onDroneFire
+          // callback (which Game's fireDroneProjectile implemented as a
+          // tier-coloured projectile spawn). The beam path makes the
+          // projectile mesh redundant — the beam line + muzzle flash
+          // Sprite carry the visual punch, and beam-vs-asteroid hits
+          // are resolved by the new beamHitCallback (wired in Task 9).
+          // We deliberately do NOT call onDroneFire here so Game does
+          // not spawn a real projectile mesh every fire cadence (which
+          // would still damage asteroids after the `'DRONE'` literal
+          // was removed in Step 6). fireDroneBeam below drives the
+          // visual layer only; damage application is deferred to
+          // Task 9's beamHitCallback wiring.
+          fireDroneBeam(dep, drone, i, target, scene);
+        }
+      }
+      // Phase 7i-2 (Task 6) — per-frame beam + muzzle-flash tick.
+      // The beam line is only visible inside its 0.25s lifetime window
+      // (fireDroneBeam promotes it on a successful target lock and the
+      // accumulator below hides it once beamAge crosses the lifetime).
+      // While visible, we re-write the beam endpoints every frame so the
+      // line tracks the asteroid as it drifts — the Line geometry does
+      // NOT auto-track, so without this loop the beam endpoint would
+      // freeze at the original target position. Same pattern for the
+      // muzzle flash: the sprite is re-anchored to the drone's mesh
+      // position (which the orbital+bob math above just updated) and
+      // opacity is driven by updateMuzzleFlash's half-sine over the
+      // 80ms window. Both age fields are dt-accumulating, and
+      // incrementing them every frame (regardless of visibility) is
+      // intentional — the 999 sentinel pattern means "no beam/muzzle
+      // active" and we just keep counting past the window.
+      if (drone.beamLine && drone.beamLine.visible) {
+        drone.beamAge += deltaTime;
+        if (drone.beamAge >= ORBIT_DRONES_BEAM_LIFETIME_SECONDS) {
+          drone.beamLine.visible = false;
+          drone.currentBeamTarget = null;
+        } else if (drone.currentBeamTarget) {
+          updateBeam(
+            drone.beamLine,
+            drone.mesh.position,
+            drone.currentBeamTarget.position as unknown as Vector3,
           );
         }
       }
+      if (drone.muzzleFlashAge < 0.08) {
+        drone.muzzleFlashAge += deltaTime;
+        drone.muzzleFlash.position.copy(drone.mesh.position);
+        updateMuzzleFlash(drone.muzzleFlash, drone.muzzleFlashAge);
+      }
     }
-    updateAuraPulse(dep.auraRing, dep.tier, dep.sceneClock, 0);
+    // Phase 7i-2 — aura pulse frequency shift. Replaces the call to
+    // updateAuraPulse (which hard-codes a 2Hz pulse inside
+    // src/orbit-drone-vfx.ts) with frequency-shifted math computed here.
+    // The shift is a SWAP, not a stack: 2.0 Hz during the active phase,
+    // 5.0 Hz during the last ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS
+    // (1.5s). We replicate the same baseline 0.35 / amplitude 0.25
+    // shape updateAuraPulse uses (range [0.10, 0.60] with raw sine) so
+    // the visual feels identical pre-telegraph — only the frequency
+    // changes. dep.tier is typed `1 | 2 | 3` (the legacy tier===0 case
+    // from updateAuraPulse is gone post-Sprint 3), so the ring is
+    // always visible during the active phase. We do NOT use
+    // updateAuraPulse because threading a frequency param through
+    // would require editing src/orbit-drone-vfx.ts, which is out of
+    // scope for Task 5.
+    dep.auraRing.visible = true;
+    const auraFreq = dep.remaining <= ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS
+      ? ORBIT_DRONES_EXPIRY_AURA_FREQUENCY_HZ
+      : 2.0;
+    const auraPulse = Math.sin(dep.sceneClock * auraFreq * Math.PI * 2);
+    (dep.auraRing.material as MeshBasicMaterial).opacity =
+      0.35 + 0.25 * auraPulse;
     // Phase 7i Sprint 2 Task 5 — play the deploy shockwave ONCE on the
     // first non-fade tick after spawn. The `=== 0` exact-equality check
     // fires only on the first frame (spawnDroneDeployment initializes
@@ -499,6 +835,34 @@ export function disposeDroneDeployment(dep: DroneDeploymentState, scene: Object3
     (drone.tetherLine.material as MeshBasicMaterial).dispose();
     scene.remove(drone.lockOnSprite);
     (drone.lockOnSprite.material as SpriteMaterial).dispose();
+    // Phase 7i-2 (Task 7) DELTA — dispose beam + muzzle flash GPU resources.
+    // The beam Line owns a per-instance BufferGeometry (created by
+    // createDroneBeam in src/orbit-drone-vfx.ts with two vertices for the
+    // drone→target segment) — safe to dispose. The LineBasicMaterial is
+    // also per-instance, so dispose that too. Null the field so a stray
+    // late-fire call cannot resurrect a disposed mesh. The muzzle flash
+    // is a Sprite with a per-instance SpriteMaterial (which holds a
+    // reference to the SHARED lock-on CanvasTexture from
+    // getSharedLockOnTexture). Dispose the material — this decrements
+    // the shared texture's ref count, but the texture itself lives in
+    // module-scope and is reused by every deployment + drone-kill
+    // sparks, so it MUST NOT be disposed here. Do NOT dispose the
+    // sprite's geometry either — Sprites share a unit-square
+    // SpriteGeometry that is not safe to dispose per-instance. We do
+    // NOT null the muzzleFlash field because it is typed as `Sprite`
+    // (not `Sprite | null`) in PerDroneState; the sprite object is
+    // orphaned (no longer in the scene) and the material dispose is
+    // enough to release the per-deployment GPU resource.
+    if (drone.beamLine) {
+      scene.remove(drone.beamLine);
+      drone.beamLine.geometry.dispose();
+      (drone.beamLine.material as LineBasicMaterial).dispose();
+      drone.beamLine = null;
+    }
+    if (drone.muzzleFlash) {
+      scene.remove(drone.muzzleFlash);
+      (drone.muzzleFlash.material as SpriteMaterial).dispose();
+    }
   }
   scene.remove(dep.auraRing);
   dep.auraRing.geometry.dispose();
@@ -969,69 +1333,114 @@ export function tickHomingMissiles(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// My Rules — Drone Projectile Factory (Phase 7i Sprint 2)
+// My Rules — Drone Beam Fire (Phase 7i-2 Task 6)
 // ═══════════════════════════════════════════════════════════════════════════
-// Purpose: Pure factory that returns a tier-colored Mesh + velocity for a
-//          drone-fired projectile. Game (Task 5) wires this into the onDroneFire
-//          callback defined in tickDroneDeployments. Kept as a pure factory
-//          here (vs. leaving the logic in Game) so the tier → color mapping
-//          can be unit-tested without spinning up a Three.js scene.
-// Setup:   Caller passes `origin` (drone world-space position), `target`
-//          (locked AsteroidState), and the deployment's `tier` (1/2/3).
-//          Caller is responsible for scene.add + per-frame tick — this
-//          function only constructs the mesh and computes the velocity.
-//          The `tier` is returned alongside the mesh so destroyAsteroid
-//          can route the kill through KillSource.DRONE (Task 5 Step 5).
-// Issues:  Pre-Phase 7i, drone projectiles in Game (fireDroneProjectile at
-//          src/game.ts:1842) hard-coded color 0x66ddff (tier-1 cyan). At
-//          tier 2/3 the body, aura, and lock-on sprite all changed color,
-//          but the actual projectile still glowed cyan — visual mismatch.
-// Fix:     Phase 7i Sprint 2 Task 4. Single factory takes `tier` and
-//          routes it through ORBIT_DRONES_TIER_COLOR (cyan/magenta/gold),
-//          so the projectile carries the same visual identity as the
-//          drone that fired it. Same SphereGeometry(0.12, 6, 6) + opaque
-//          MeshBasicMaterial construction as the existing fireDroneProjectile
-//          — unchanged silhouette, just recoloured. PROJECTILE_SPEED (28u/s)
-//          is used directly so drone projectiles travel at the same rate
-//          as the player's blaster, which keeps shield-collision feel
-//          identical to a player shot.
-// Gotchas: The `d || 1` fallback covers the degenerate case where origin
-//          == target. Projectile origin lives in z=0 — matches the drone
-//          orbital plane. Velocity is a Vector2 (not THREE.Vector3) so it
-//          can flow directly into the existing projectile integrator
-//          without a translation hop. KillSource.DRONE is added to the
-//          KillSource union in Task 5 Step 5; this factory does NOT
-//          touch it, but the JSDoc above calls out the caller
-//          responsibility so the wiring lands in one place.
+// Purpose: Phase 7i-2 — replace the per-tick projectile fire path with an
+//          instant red beam. The previous fireDroneProjectile (Phase 7i
+//          Sprint 2 Task 4) returned a tier-colored Mesh + velocity that
+//          Game integrated as a normal projectile. That path was visually
+//          noisy (a swarm of small spheres flying across the arena) and
+//          functionally redundant with the homing-missile pickup — both
+//          were "drone emits a moving projectile at the target". The beam
+//          reads as a different category of attack: instant, instant-
+//          contact, and the "burst" is purely a per-frame visual on the
+//          drone's body and the target's location.
+// Setup:   Caller (tickDroneDeployments) invokes fireDroneBeam at the
+//          per-drone fire cadence (ORBIT_DRONES_FIRE_INTERVAL_SECONDS,
+//          0.4s). The function mutates the per-drone visual state in
+//          place: promotes the beam line to visible, writes both
+//          endpoints via updateBeam, resets the muzzle-flash age to 0
+//          so the next-frame tick picks it up, and preserves the
+//          existing per-fire flash (scale pop + emissive boost) so the
+//          drone's body still telegraphs the shot. Damage is NOT
+//          applied here — beam-vs-asteroid hits are routed through
+//          dep.beamHitCallback, which Task 9 wires in src/game.ts to
+//          apply ORBIT_DRONES_DAMAGE per beam tick.
+// Issues:  Pre-Task 6, fireDroneProjectile returned a SphereGeometry +
+//          MeshBasicMaterial projectile that travelled at PROJECTILE_SPEED
+//          (28u/s). At 0.4s fire cadence and 7-10u beam reach, drones
+//          needed a flight arc to reach mid-arena asteroids — the
+//          "shooting" visual was a string of cyan/magenta/gold dots
+//          arcing across the screen, not a clear "this drone is
+//          attacking that rock" cue.
+// Fix:     Phase 7i-2 Task 6. Replace the projectile factory with a
+//          visual-only fireDroneBeam. The beam is a single Line (additive
+//          0xff2233, depthWrite false) seeded at spawn with both
+//          endpoints at (0,0,0); the per-drone tick loop rewrites the
+//          endpoints every frame inside the 0.25s window so the line
+//          tracks the asteroid as it drifts. Muzzle flash is a Sprite
+//          (additive diamond bitmap) that the tick loop re-anchors to
+//          the drone's mesh position and drives with a half-sine opacity
+//          curve over 80ms. fireDroneProjectile is DELETED (its
+//          call sites in tickDroneDeployments are replaced by
+//          fireDroneBeam) and the related 'DRONE' literal in
+//          Projectile.source is removed (Step 6). KillSource.DRONE
+//          stays in pickups.ts — it's still used for kill-sparks
+//          routing once the beam starts dealing damage in Task 9.
+// Gotchas: fireDroneBeam is purely visual; it does NOT call
+//          dep.beamHitCallback. The callback is invoked by the per-frame
+//          tick loop while the beam is alive and the currentBeamTarget
+//          is in range (Task 9 wires that). Returning a void preserves
+//          the call-site readability in tickDroneDeployments — the
+//          `fireDroneBeam(dep, drone, i, target, scene);` line reads
+//          as a single visual + logic dispatch. The `drone.beamLine!`
+//          non-null assertion in the per-frame tick is safe because
+//          spawnDroneDeployment always initialises the field with a
+//          real createDroneBeam() result; the `!` is a TypeScript
+//          hint, not a runtime guard. findDroneTarget is the targeting
+//          helper used here (crystal > non-tiny > tiny) so the beam
+//          prefers lucrative cascade targets — matches the per-drone
+//          re-target behaviour the rest of the tick loop already uses.
+//          The brief originally asked fireDroneBeam to take a
+//          `shipPosition: Vector2` arg, but tickDroneDeployments does
+//          not have the ship's position in scope inside the per-drone
+//          loop (the deployment is positioned at the spawn site, the
+//          drone's position is in drone.mesh.position). The ship's
+//          position is also unused inside fireDroneBeam (we probe
+//          from the drone, not the ship), so the arg is omitted to
+//          keep the call site minimal.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Phase 7i Sprint 2 Task 4 — drone projectile factory. Returns a tier-colored
- * Mesh + velocity for a drone-fired projectile. Caller is responsible for
- * scene.add + per-frame tick + eventual disposal.
+ * Phase 7i-2 (Task 6) — beam fire replaces projectile fire. Promotes
+ * the drone's beam line to visible, writes both endpoints via
+ * updateBeam, resets the muzzle-flash age to 0 so the next-frame tick
+ * can run updateMuzzleFlash, and preserves the existing per-fire flash
+ * (scale pop + emissive boost) so the drone's body still telegraphs
+ * the shot.
  *
- * The returned `tier` lets the caller (Game's fireDroneProjectile) tag
- * destroyAsteroid with the correct KillSource once Task 5 Step 5 adds
- * `'DRONE'` to the KillSource union.
+ * This is a purely-visual fire dispatch. Damage application is deferred
+ * to Task 9's beamHitCallback wiring; fireDroneBeam itself does NOT
+ * touch asteroid health. The currentBeamTarget pointer is stashed on
+ * the per-drone state so the per-frame tick can re-write the beam
+ * endpoint every frame as the asteroid drifts.
  */
-export function fireDroneProjectile(
-  origin: Vector2,
+export function fireDroneBeam(
+  _deployment: DroneDeploymentState,
+  drone: PerDroneState,
+  _droneIndex: number,
   target: AsteroidState,
-  tier: 1 | 2 | 3,
-): { mesh: Mesh; velocity: Vector2; tier: 1 | 2 | 3 } {
-  const color = ORBIT_DRONES_TIER_COLOR(tier);
-  const mesh = new Mesh(
-    new SphereGeometry(PROJECTILE_RADIUS, 6, 6),
-    new MeshBasicMaterial({ color }),
-  );
-  mesh.position.set(origin.x, origin.y, 0);
-  const dx = target.position.x - origin.x;
-  const dy = target.position.y - origin.y;
-  const d = Math.hypot(dx, dy) || 1;
-  return {
-    mesh,
-    velocity: { x: (dx / d) * PROJECTILE_SPEED, y: (dy / d) * PROJECTILE_SPEED },
-    tier,
-  };
+  _scene: Object3D,
+): void {
+  drone.currentBeamTarget = target;
+  drone.beamAge = 0;
+  drone.muzzleFlashAge = 0;
+  // Existing per-fire flash (scale pop + emissive boost) stays.
+  drone.fireFlashAge = 0;
+  // Phase 7i-2 (Task 9) — re-arm the per-beam-once hit gate. The previous
+  // beam may have left beamHasHitTarget=true (or false if it never
+  // landed); we want the FIRST intersection check this frame to be
+  // eligible to fire the callback. Subsequent frames within the same
+  // beam's ORBIT_DRONES_BEAM_LIFETIME_SECONDS (0.25s) window will see
+  // beamHasHitTarget=true and short-circuit — so 1 hit per beam.
+  drone.beamHasHitTarget = false;
+  if (target && drone.beamLine) {
+    drone.beamLine.visible = true;
+    updateBeam(
+      drone.beamLine,
+      drone.mesh.position,
+      target.position as unknown as Vector3,
+    );
+  }
 }
 

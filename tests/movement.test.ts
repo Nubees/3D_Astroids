@@ -33,6 +33,12 @@ const zeroInput: InputState = {
   useActive2: false,
   useActive3: false,
   useMagnetBooster: false,
+  // Phase 7i-2 (Task 8) — Digit2 charge-up defaults.
+  useActive2PressTime: null,
+  useActive2ChargeUpRing: null,
+  useActive2ChargeUpTier: null,
+  useActive2ChargeUpStart: null,
+  useActive2IsChargeUp: false,
 };
 
 describe('ArenaMovementController', () => {
@@ -47,6 +53,11 @@ describe('ArenaMovementController', () => {
       useActive2: false,
       useActive3: false,
       useMagnetBooster: false,
+      useActive2PressTime: null,
+      useActive2ChargeUpRing: null,
+      useActive2ChargeUpTier: null,
+      useActive2ChargeUpStart: null,
+      useActive2IsChargeUp: false,
     };
     const controller = new ArenaMovementController();
 
@@ -68,6 +79,11 @@ describe('ArenaMovementController', () => {
       useActive2: false,
       useActive3: false,
       useMagnetBooster: false,
+      useActive2PressTime: null,
+      useActive2ChargeUpRing: null,
+      useActive2ChargeUpTier: null,
+      useActive2ChargeUpStart: null,
+      useActive2IsChargeUp: false,
     };
     const controller = new ArenaMovementController();
 
@@ -87,6 +103,11 @@ describe('ArenaMovementController', () => {
       useActive2: false,
       useActive3: false,
       useMagnetBooster: false,
+      useActive2PressTime: null,
+      useActive2ChargeUpRing: null,
+      useActive2ChargeUpTier: null,
+      useActive2ChargeUpStart: null,
+      useActive2IsChargeUp: false,
     };
     const controller = new ArenaMovementController();
 

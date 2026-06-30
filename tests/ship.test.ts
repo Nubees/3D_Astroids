@@ -24,6 +24,13 @@ function createInput(overrides: Partial<InputState> = {}): InputState {
     useActive2: false,
     useActive3: false,
     useMagnetBooster: false,
+    // Phase 7i-2 (Task 8) — Digit2 charge-up defaults. Tests that don't
+    // exercise the charge-up path can leave these at their resting state.
+    useActive2PressTime: null,
+    useActive2ChargeUpRing: null,
+    useActive2ChargeUpTier: null,
+    useActive2ChargeUpStart: null,
+    useActive2IsChargeUp: false,
     ...overrides,
   };
 }
@@ -111,6 +118,11 @@ describe('Ship — fireRateMultiplier (Phase 7 pickup)', () => {
       useActive2: false,
       useActive3: false,
       useMagnetBooster: false,
+      useActive2PressTime: null,
+      useActive2ChargeUpRing: null,
+      useActive2ChargeUpTier: null,
+      useActive2ChargeUpStart: null,
+      useActive2IsChargeUp: false,
     };
     ship.update(input, 0.1, 3);
     expect(ship.fireCooldown).toBeCloseTo(0.6, 5);
@@ -128,6 +140,11 @@ describe('Ship — fireRateMultiplier (Phase 7 pickup)', () => {
       useActive2: false,
       useActive3: false,
       useMagnetBooster: false,
+      useActive2PressTime: null,
+      useActive2ChargeUpRing: null,
+      useActive2ChargeUpTier: null,
+      useActive2ChargeUpStart: null,
+      useActive2IsChargeUp: false,
     };
     ship.update(input, 0.1);
     expect(ship.fireCooldown).toBeCloseTo(0.8, 5);

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import {
   AdditiveBlending,
   BufferGeometry,
@@ -15,15 +16,24 @@ import {
 } from 'three';
 import { ORBIT_DRONES_TIER_COLOR } from '../src/orbit-drone';
 import {
+  AURA_RING_INNER,
+  AURA_RING_OUTER,
+  DRONE_MESH_RADIUS,
   createAuraRing,
+  createChargeUpRing,
   createDeployShockwave,
+  createDroneBeam,
   createDroneMesh,
   createLockOnSprite,
+  createMuzzleFlash,
   createTetherLine,
   updateAuraPulse,
+  updateBeam,
+  updateChargeUpRing,
   updateDeployShockwave,
   updateDroneVisuals,
   updateLockOnSprite,
+  updateMuzzleFlash,
   updateTetherLine,
 } from '../src/orbit-drone-vfx';
 
@@ -60,11 +70,11 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('createDroneMesh', () => {
-  it('returns a Mesh with IcosahedronGeometry radius 0.12', () => {
+  it('returns a Mesh with IcosahedronGeometry radius 0.24 (Phase 7i-2)', () => {
     const mesh = createDroneMesh(1);
     expect(mesh).toBeInstanceOf(Mesh);
     const geom = mesh.geometry as IcosahedronGeometry;
-    expect(geom.parameters.radius).toBeCloseTo(0.12, 5);
+    expect(geom.parameters.radius).toBeCloseTo(0.24, 5);
     expect(geom.parameters.detail).toBe(0);
   });
 
@@ -79,11 +89,11 @@ describe('createDroneMesh', () => {
 });
 
 describe('createAuraRing', () => {
-  it('returns Mesh with RingGeometry inner=0.6 outer=1.4 48-segments', () => {
+  it('returns Mesh with RingGeometry inner=1.0 outer=2.2 48-segments (Phase 7i-2)', () => {
     const ring = createAuraRing(1);
     const geom = ring.geometry as RingGeometry;
-    expect(geom.parameters.innerRadius).toBeCloseTo(0.6, 5);
-    expect(geom.parameters.outerRadius).toBeCloseTo(1.4, 5);
+    expect(geom.parameters.innerRadius).toBeCloseTo(1.0, 5);
+    expect(geom.parameters.outerRadius).toBeCloseTo(2.2, 5);
     expect(geom.parameters.thetaSegments).toBe(48);
   });
 
@@ -308,5 +318,137 @@ describe('updateDeployShockwave', () => {
     const ring = createDeployShockwave(1);
     updateDeployShockwave(ring, 0.3);
     expect(ring.visible).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Phase 7i-2 Task 3 (drone beam + muzzle flash + charge-up ring)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: TDD tests for the new VFX factories + per-frame updaters added
+//          in Phase 7i-2. The drone now fires a bright-red beam from its
+//          barrel to the locked-on target, spawns an additive muzzle flash
+//          sprite at the muzzle, and renders a tier-colored charge-up ring
+//          under the ship during the Digit2 hold window.
+// Setup:   Vitest node environment. The shared lock-on CanvasTexture is
+//          guarded by `typeof document === 'undefined'` so the muzzle
+//          flash's `map` is null in tests but every other property is
+//          still asserted. Additive opacity caps come from
+//          feedback_additive_blending_whiteout.md (beam 0.8, flash 0.6,
+//          ring 0.5).
+// Issues:  Pre-Phase 7i-2 the drone had no visible fire event — the
+//          projectile was teleported away with no muzzle punch, no
+//          tracing beam, and no charge-up telegraph before activation.
+// Fix:     Three new factories (createDroneBeam, createMuzzleFlash,
+//          createChargeUpRing) and three per-frame updaters (updateBeam,
+//          updateMuzzleFlash, updateChargeUpRing) plus the three sizing
+//          constants (DRONE_MESH_RADIUS, AURA_RING_INNER, AURA_RING_OUTER)
+//          that the existing createDroneMesh / createAuraRing now read
+//          from. Beam is bright red (0xff2233), ring is tier-colored.
+// Gotchas: updateChargeUpRing test uses MAX_RADIUS=3.0 (from
+//          ORBIT_DRONES_CHARGE_UP_RING_MAX_RADIUS in src/pickups.ts) so
+//          the close-to check is 1 decimal. updateMuzzleFlash uses a
+//          half-sine curve: 0 → PEAK → 0 across the 80ms lifetime — the
+//          test for age=0.04 (mid-life) is where peak-opacity (0.6) hits.
+//          updateBeam receives plain {x,y,z} objects (not Vector3) and
+//          reads them with .x/.y/.z in the implementation.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Phase 7i-2 — drone mesh + aura sizing', () => {
+  it('DRONE_MESH_RADIUS === 0.24 (2x v7)', () => {
+    expect(DRONE_MESH_RADIUS).toBe(0.24);
+  });
+
+  it('AURA_RING_INNER === 1.0', () => {
+    expect(AURA_RING_INNER).toBe(1.0);
+  });
+
+  it('AURA_RING_OUTER === 2.2', () => {
+    expect(AURA_RING_OUTER).toBe(2.2);
+  });
+});
+
+describe('Phase 7i-2 — createDroneBeam', () => {
+  it('returns a Line with AdditiveBlending material', () => {
+    const beam = createDroneBeam(2);
+    const mat = beam.material as THREE.LineBasicMaterial;
+    expect(mat.blending).toBe(THREE.AdditiveBlending);
+    expect(mat.color.getHex()).toBe(0xff2233);
+    expect(mat.opacity).toBeLessThanOrEqual(0.8);
+  });
+
+  it('initial endpoints both at origin (placeholder)', () => {
+    const beam = createDroneBeam(1);
+    const pos = beam.geometry.attributes.position;
+    expect(pos.getX(0)).toBe(0);
+    expect(pos.getY(0)).toBe(0);
+    expect(pos.getZ(0)).toBe(0);
+    expect(pos.getX(1)).toBe(0);
+    expect(pos.getY(1)).toBe(0);
+    expect(pos.getZ(1)).toBe(0);
+  });
+});
+
+describe('Phase 7i-2 — createMuzzleFlash', () => {
+  it('returns a Sprite with AdditiveBlending and red color', () => {
+    const flash = createMuzzleFlash(1);
+    const mat = flash.material as THREE.SpriteMaterial;
+    expect(mat.blending).toBe(THREE.AdditiveBlending);
+    expect(mat.color.getHex()).toBe(0xff2233);
+  });
+});
+
+describe('Phase 7i-2 — createChargeUpRing', () => {
+  it('returns a Mesh with additive tier-color material', () => {
+    const ring = createChargeUpRing(3);
+    const mat = ring.material as THREE.MeshBasicMaterial;
+    expect(mat.blending).toBe(THREE.AdditiveBlending);
+    expect(mat.opacity).toBeLessThanOrEqual(0.5);
+    expect(mat.color.getHex()).toBe(0xffcc44); // gold for tier 3
+  });
+});
+
+describe('Phase 7i-2 — updateBeam', () => {
+  it('sets endpoints to drone.position → target.position', () => {
+    const beam = createDroneBeam(1);
+    updateBeam(beam, { x: 0, y: 0, z: 0 }, { x: 5, y: 5, z: 0 });
+    const pos = beam.geometry.attributes.position;
+    expect(pos.getX(0)).toBe(0);
+    expect(pos.getY(0)).toBe(0);
+    expect(pos.getX(1)).toBe(5);
+    expect(pos.getY(1)).toBe(5);
+  });
+});
+
+describe('Phase 7i-2 — updateMuzzleFlash', () => {
+  it('opacity = 0 at age=0', () => {
+    const flash = createMuzzleFlash(1);
+    updateMuzzleFlash(flash, 0);
+    const mat = flash.material as THREE.SpriteMaterial;
+    expect(mat.opacity).toBe(0);
+  });
+
+  it('opacity > 0 at age=0.04 (mid 80ms lifetime)', () => {
+    const flash = createMuzzleFlash(1);
+    updateMuzzleFlash(flash, 0.04);
+    const mat = flash.material as THREE.SpriteMaterial;
+    expect(mat.opacity).toBeGreaterThan(0);
+    expect(mat.opacity).toBeLessThanOrEqual(0.6);
+  });
+
+  it('opacity = 0 at age=0.08 (end of lifetime)', () => {
+    const flash = createMuzzleFlash(1);
+    updateMuzzleFlash(flash, 0.08);
+    const mat = flash.material as THREE.SpriteMaterial;
+    expect(mat.opacity).toBe(0);
+  });
+});
+
+describe('Phase 7i-2 — updateChargeUpRing', () => {
+  it('scales ring from 0 to MAX_RADIUS as fraction goes 0 → 1', () => {
+    const ring = createChargeUpRing(1);
+    updateChargeUpRing(ring, 0);
+    expect(ring.scale.x).toBeCloseTo(0, 6);
+    updateChargeUpRing(ring, 1);
+    expect(ring.scale.x).toBeCloseTo(3.0, 1);
   });
 });

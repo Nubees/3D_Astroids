@@ -35,6 +35,53 @@ import { MAGNET_RADIUS } from './scrap';
 //          ACTIVE_KIND_SPECS table. A defensive test in Task 5 asserts
 //          the constant and the table cell agree.
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 7i-2 DELTA — power redesign (added 2026-06-29, Task 1):
+// Purpose: Turn the ORBIT_DRONES active pickup from a 6-second static
+//          guardian into an 11-second escalating fight. The deployment now
+//          feels like a temporary ally instead of a panic button — the
+//          longer duration (6s→11s) + larger orbit (1.5u→2.5u) lets the
+//          drones reach far asteroids without constant heading rotation,
+//          the 9→11s fire-interval taper (0.4s→1.0s) creates a clear
+//          wind-down telegraph before expiry, and the new ORBIT_DRONES_BEAM_*
+//          constants (BEAM_REACH=24, BEAM_COLOR=0xff2233, BEAM_LIFETIME=0.25s)
+//          replace the per-tick projectile path with an instant beam.
+//          The charge-up sequence (HOLD 0.3s → DEPLOY_SCALE 2.5 shockwave →
+//          LERP 0.7s drone arrival) makes tier-3 deploys feel cinematic
+//          without slowing down the press-to-fire responsiveness.
+// Setup:   All values exposed as exported `readonly` constants. Later tasks
+//          (beam factory, drone visuals, charge-up state machine) consume
+//          these by import — no string lookups, no magic numbers.
+// Issues:  Pre-7i-2, drone deployment felt short — 6s with projectile range
+//          capped at 4u meant drones spent most of their life re-aiming at
+//          near asteroids. Pre-7i-2 also had no visible "about to expire"
+//          signal; drones just blinked out at 100% intensity.
+// Fix:     Phase 7i-2 power redesign. DURATION_SECONDS 6→11 (~2× longer
+//          contribution window), ORBIT_RADIUS 1.5→2.5 (beam arc reaches
+//          further without drone rotation), FIRE_INTERVAL_TAPER_END=1.0
+//          (new — controls the 9→11s taper, see Task 2/3 for the formula),
+//          BEAM_REACH=24 (was 4u projectile range; beam sweeps farther
+//          since the drone is the emitter, not the projectile),
+//          BEAM_COLOR=0xff2233 (was projectile color 0x66ddff cyan — beam
+//          reads as a different category of attack). Backward-compat alias
+//          ORBIT_DRONES_TARGET_RADIUS=ORBIT_DRONES_BEAM_REACH keeps
+//          active-deployments.ts:32 compiling until Task 2 wires the beam
+//          factory and drops the legacy import.
+// Gotchas: ORBIT_DRONES_TARGET_RADIUS is a deprecated alias. The projectile
+//          path is GONE in 7i-2 — anything still reading TARGET_RADIUS in
+//          active-deployments.ts is a leftover that Task 2 will clean up.
+//          The CHARGE_UP_HOLD/DEPLOY_SCALE/LERP triple is intentionally
+//          larger than the press→visual window in pure gameplay terms; the
+//          0.3s hold gives the player a "telegraph" beat to feel the
+//          commitment, the 0.7s lerp bridges the shockwave ring expand
+//          to the drones arriving at orbit radius, so the total
+//          press-to-fighting time is 1.0s but the VISUAL is full
+//          build-up→release→settle. Do NOT shorten the lerp below 0.5s
+//          or the drones "pop in" without a clear arrival. Power-pulse
+//          amplitudes (0.08 scale, 0.6 emissive) and expiry telegraph
+//          (1.5s warning, 5Hz aura) are independent of combat math — they
+//          are PRESENTATION knobs, so rebalance can change them without
+//          touching beam damage or fire interval.
+// ═══════════════════════════════════════════════════════════════════════════
 
 export enum PickupKind {
   FIRE_RATE = 'fireRate',           // passive — 6s — orange  0xff8800
@@ -452,16 +499,50 @@ export { CRYSTAL_HEALTH as CRYSTAL_HEALTH_FOR_TEST } from './asteroid';
 // pressing Digit2 once spawns a tier-3 deployment (4 drones) instead of
 // the tier-1 baseline (2 drones). tier is derived from `charges` at
 // deploy time via ORBIT_DRONES_TIER_DRONE_COUNT (1→2, 2→3, 3→4 drones).
+// Phase 7i-2 DELTA — power redesign: drone stays in fight ~2× longer (6→11s),
+// orbits farther from ship (1.5→2.5u) so the beam doesn't have to over-rotate
+// to reach near asteroids, and tapers the fire interval up to 1.0s in the
+// final 2 seconds so the expiry window reads as a clear wind-down.
+// ORBIT_DRONES_TARGET_RADIUS is now an alias of ORBIT_DRONES_BEAM_REACH (24)
+// so active-deployments.ts:32 keeps compiling without a per-callsite edit —
+// the projectile range check is gone (beam replaces projectile) but the name
+// is still the cleanest match for "how far can a drone attack reach".
 export const ORBIT_DRONES_COOLDOWN_SECONDS = 4.0;
 export const ORBIT_DRONES_CHARGE_CAP = 3;
-export const ORBIT_DRONES_DURATION_SECONDS = 6.0;
-export const ORBIT_DRONES_ORBIT_RADIUS = 1.5;
+export const ORBIT_DRONES_DURATION_SECONDS = 11.0; // was 6.0
+export const ORBIT_DRONES_ORBIT_RADIUS = 2.5; // was 1.5
 export const ORBIT_DRONES_ORBIT_PERIOD_SECONDS = 1.5;
-export const ORBIT_DRONES_TARGET_RADIUS = 4.0;
 export const ORBIT_DRONES_FIRE_INTERVAL_SECONDS = 0.4;
+export const ORBIT_DRONES_FIRE_INTERVAL_TAPER_END = 1.0; // NEW: 9-11s taper
 export const ORBIT_DRONES_DAMAGE = 1;
 export const ORBIT_DRONES_DRONE_COUNT = 2;
 export const ORBIT_DRONES_FADE_OUT_SECONDS = 0.3;
+
+// Phase 7i-2: beam replaces projectile
+export const ORBIT_DRONES_BEAM_REACH = 24; // was ORBIT_DRONES_TARGET_RADIUS=4
+export const ORBIT_DRONES_BEAM_COLOR = 0xff2233; // bright red
+export const ORBIT_DRONES_BEAM_LIFETIME_SECONDS = 0.25; // per firing
+
+// Phase 7i-2: charge-up hold
+export const ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS = 0.3;
+export const ORBIT_DRONES_CHARGE_UP_DEPLOY_SCALE = 2.5; // shockwave end scale
+// ORBIT_DRONES_CHARGE_UP_LERP_DURATION removed in Task 12 (deferred to Phase 7i-3):
+// no per-drone lerp existed in the runtime, so the value was never read. The
+// snap-to-orbit on first frame is the actual behavior; if/when a charge-up
+// lerp-in is implemented the constant can return alongside the lerp code.
+export const ORBIT_DRONES_CHARGE_UP_RING_MAX_RADIUS = 3.0;
+
+// Phase 7i-2: idle power pulse + expiry telegraph
+export const ORBIT_DRONES_POWER_PULSE_FREQUENCY_HZ = 1.2;
+export const ORBIT_DRONES_POWER_PULSE_SCALE_AMPLITUDE = 0.08;
+export const ORBIT_DRONES_POWER_PULSE_EMISSIVE_BASE = 0.8;
+export const ORBIT_DRONES_POWER_PULSE_EMISSIVE_AMPLITUDE = 0.6;
+export const ORBIT_DRONES_EXPIRY_TELEGRAPH_SECONDS = 1.5;
+export const ORBIT_DRONES_EXPIRY_AURA_FREQUENCY_HZ = 5.0;
+
+// Keep the legacy ORBIT_DRONES_TARGET_RADIUS as an alias for backward compat
+// with active-deployments.ts if it still references it. Mark deprecated.
+export const ORBIT_DRONES_TARGET_RADIUS = ORBIT_DRONES_BEAM_REACH;
 
 // Homing Missiles constants — Phase 7c-2 buffed.
 export const HOMING_MISSILES_COOLDOWN_SECONDS = 4.0;

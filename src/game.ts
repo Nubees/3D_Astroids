@@ -146,6 +146,7 @@ import {
   setShieldEnergy,
   updateShieldVisuals,
 } from './shield-visuals';
+import { createChargeUpRing, updateChargeUpRing } from './orbit-drone-vfx';
 import {
   ActiveAmmoMap,
   ACTIVE_KIND_SPECS,
@@ -153,6 +154,7 @@ import {
   BOMB_STRIKE_DAMAGE,
   BOMB_STRIKE_RADIUS,
   HOMING_MISSILES_DAMAGE,
+  ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS,
   ORBIT_DRONES_COOLDOWN_SECONDS,
   ORBIT_DRONES_DURATION_SECONDS,
   PICKUP_BOB_AMPLITUDE,
@@ -187,7 +189,6 @@ import {
   DroneDeploymentState,
   HomingMissileState,
   VolleySchedule,
-  fireDroneProjectile as makeDroneProjectile,
   scheduleMissileVolley,
   spawnDroneDeployment,
   tickDroneDeployments,
@@ -234,6 +235,53 @@ import {
 } from './drone-kill-sparks';
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Phase 7i-2 (Task 9) — Beam-vs-Asteroid Geometry Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: pure functions for the new beam intersection check. Free functions
+//          (not methods) so the per-frame hot loop in handleCollisions can
+//          call them without `this` binding. Pure means: no scene access, no
+//          drone state, no allocations beyond the return value.
+// Setup:   pointToSegmentDistance(px, py, ax, ay, bx, by) returns the
+//          minimum distance from point (px,py) to the line segment
+//          (ax,ay)→(bx,by). BEAM_HIT_RADIUS is the per-asteroid forgiveness
+//          around the line (the visual beam is 1px wide, so the gameplay
+//          hit radius must be much larger or the player will perceive the
+//          beam as missing asteroids that the segment technically touches).
+//          Both are imported into handleCollisions below.
+// Issues:  None — both helpers are < 10 lines of pure math, no side effects.
+// Fix:     Phase 7i-2 Task 9. taskToSegmentDistance is a textbook
+//          parametric projection (clamp t to [0,1] for a finite segment,
+//          fall back to point-to-point distance when the segment
+//          degenerates). BEAM_HIT_RADIUS = 0.3 matches the visual beam
+//          width perceived at the canvas resolution the user plays at —
+//          tight enough that a beam aimed off-center misses, generous
+//          enough that the player doesn't feel cheated when the beam
+//          visually overlaps an asteroid edge.
+// Gotchas: We do NOT export these (the existing per-frame math in
+//          handleCollisions is the only call site). If a future task
+//          needs them in tests, promote to a separate src/geometry.ts
+//          module rather than scattering copy-pastes — the per-frame hot
+//          loop is performance-sensitive and we'd rather not import a
+//          module-scope helper that's only used here.
+// ═══════════════════════════════════════════════════════════════════════════
+const BEAM_HIT_RADIUS = 0.3;
+
+function pointToSegmentDistance(
+  px: number, py: number,
+  ax: number, ay: number,
+  bx: number, by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  const projX = ax + t * dx;
+  const projY = ay + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Game Loop
 // ═══════════════════════════════════════════════════════════════════════════
 // Purpose: Own the Three.js scene, camera, renderer, and update/render loop.
@@ -270,6 +318,37 @@ import {
 //          active) from pendingTier + activeTier — Task 7 supplies the .empty /
 //          .pending / .active CSS classes; this task sets className + countLabel
 //          text + bar fill so the DOM state is correct.
+//
+//          Phase 7i-2 (Task 9) DELTA — beam-vs-asteroid hit detection. Two
+//          free functions added at module scope: pointToSegmentDistance
+//          (textbook parametric projection, < 10 lines, pure) and the
+//          BEAM_HIT_RADIUS = 0.3 constant (the per-asteroid forgiveness
+//          around the beam line). The per-frame intersection check lives
+//          at the end of handleCollisions (after the per-asteroid loop
+//          prunes this.asteroids): for each active deployment with
+//          dep.fadeTimer === 0, for each drone with a non-null
+//          currentBeamTarget and beamLine.visible, the loop tests each
+//          asteroid via pointToSegmentDistance(asteroid, drone, target)
+//          <= BEAM_HIT_RADIUS + SIZE_RADIUS[size]. A hit invokes
+//          dep.beamHitCallback (set in useActiveItem to the bound
+//          onDroneBeamHitAsteroid method) and sets drone.beamHasHitTarget
+//          = true so subsequent frames within the same 0.25s beam window
+//          short-circuit. onDroneBeamHitAsteroid is the single damage
+//          path: TINY asteroids get a knockback impulse away from the
+//          ship at HOMING_MISSILES_TINY_KNOCKBACK_SPEED (same pattern
+//          as the homing-missile TINY path at lines 1976-1991), non-TINY
+//          get spawnDroneKillSparks(position) + destroyAsteroid(live,
+//          'DRONE') which sets source to 'DRONE' so the kill-source
+//          rule in shouldSplitForKillSource skips splitAsteroid (1 shot
+//          = 1 kill, no children). KillSource is a type union, not an
+//          enum, so the string literal 'DRONE' is the correct dispatch
+//          (the existing onMissileImpact uses 'MISSILE' the same way).
+//          The intersection check is placed AFTER the per-asteroid
+//          projectile loop so any projectile-driven destruction has
+//          already pruned the asteroid list, and the check sees the
+//          post-prune list. fade-out branches (dep.fadeTimer > 0) skip
+//          the check entirely so a fading deployment cannot deal damage
+//          to a freshly-pruned survivor.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const MAX_DELTA_TIME = 0.1;
@@ -596,6 +675,21 @@ export class Game {
   stop(): void {
     this.running = false;
     window.removeEventListener('resize', this.resizeHandler);
+    // Phase 7i-2 (Task 8) — dispose any in-flight charge-up ring before
+    // the scene is torn down. Mirrors the release-branch dispose in
+    // update(): scene.remove + geometry/material dispose to avoid a GPU
+    // leak on shutdown.
+    if (this.input.digit2ChargeUp.ring) {
+      const ring = this.input.digit2ChargeUp.ring;
+      this.scene.remove(ring);
+      ring.geometry.dispose();
+      (ring.material as MeshBasicMaterial).dispose();
+      this.input.digit2ChargeUp.ring = null;
+    }
+    this.input.digit2ChargeUp.pressTime = null;
+    this.input.digit2ChargeUp.start = null;
+    this.input.digit2ChargeUp.tier = null;
+    this.input.digit2ChargeUp.isChargeUp = false;
     this.input.destroy();
     if (this.scoreElement) this.scoreElement.remove();
     if (this.waveElement) this.waveElement.remove();
@@ -788,6 +882,13 @@ export class Game {
   };
 
   private update(deltaTime: number): void {
+    // Phase 7i-2 (Task 8) DELTA — Digit2 charge-up hold lives in the
+    //   active-dispatch block below. It tracks 3 states (press → hold →
+    //   release) via InputManager edge methods; per-frame ring update
+    //   uses wall-clock time so the 0.3s threshold feels constant. The
+    //   release branch calls useActiveItem({isChargeUp}) which then
+    //   pre-scales dep.deployShockwave for the larger end-scale.
+    //   Full DELTA on useActiveItem's My Rules block.
     // Phase 7c — freeze-frame skip. When a bomb has just fired, the first
     // 2 ticks are skipped to give the player a "bullet time" beat. The
     // 6-layer bomb visual still progresses because fireBombStrike was called
@@ -818,6 +919,14 @@ export class Game {
       useActive2: rawInput.useActive2,
       useActive3: rawInput.useActive3,
       useMagnetBooster: rawInput.useMagnetBooster,
+      // Phase 7i-2 (Task 8) — Digit2 charge-up fields. The InputManager holds
+      // a long-lived digit2ChargeUp object that we read here and mutate
+      // directly via this.input.digit2ChargeUp.* below.
+      useActive2PressTime: rawInput.useActive2PressTime,
+      useActive2ChargeUpRing: rawInput.useActive2ChargeUpRing,
+      useActive2ChargeUpTier: rawInput.useActive2ChargeUpTier,
+      useActive2ChargeUpStart: rawInput.useActive2ChargeUpStart,
+      useActive2IsChargeUp: rawInput.useActive2IsChargeUp,
     };
 
     // Respawn flow: ship is dead/exploding; skip gameplay until it revives.
@@ -865,7 +974,89 @@ export class Game {
     this.updateActiveDeployments(deltaTime);
     // Phase 7 — active input dispatch (Digit1/2/3 → BOMB/DRONES/MISSILES).
     if (input.useActive1) this.useActiveItem(PickupKind.BOMB_STRIKE);
-    if (input.useActive2) this.useActiveItem(PickupKind.ORBIT_DRONES);
+    // Phase 7i-2 (Task 8) — Digit2 charge-up hold. Three states:
+    //   press  → spawn tier-colored ring at ship, record wall-clock start
+    //   hold   → each frame, check heldFor against threshold; if past,
+    //             flip isChargeUp=true and continue updating the ring
+    //   release→ fire useActiveItem({isChargeUp}), dispose ring, reset
+    // Edge detection is provided by InputManager.digit2JustPressed() /
+    // digit2JustReleased() so a held key only triggers the press/release
+    // exactly once. Time is wall-clock (performance.now()/1000), NOT
+    // game-time dt — the 0.3s threshold must feel like 0.3s to the
+    // player regardless of frame rate. State lives on
+    // this.input.digit2ChargeUp (long-lived) since the per-frame
+    // InputState snapshot does not persist.
+    if (this.input.digit2JustPressed()) {
+      // Capture the pre-decrement tier so the deploy fires the correct
+      // drone count even though consumeActiveCharge() inside
+      // useActiveItem will decrement charges by 1.
+      const preDecrementCharges = this.activeAmmo[PickupKind.ORBIT_DRONES].charges;
+      const tier = (preDecrementCharges + 1) as 1 | 2 | 3;
+      const now = performance.now() / 1000;
+      // Phase 7i-2 (Task 11) — DELTA CRITICAL: dispose any stale ring
+      // from a prior press before re-assigning digit2ChargeUp.ring.
+      // Previously the press branch just overwrote the field, leaking
+      // a Mesh (geometry + material) every retry. The release branch
+      // already had the right dispose pattern (lines below); mirror it
+      // here. If the field is null this is a no-op.
+      const staleRing = this.input.digit2ChargeUp.ring;
+      if (staleRing) {
+        this.scene.remove(staleRing);
+        staleRing.geometry.dispose();
+        (staleRing.material as MeshBasicMaterial).dispose();
+      }
+      this.input.digit2ChargeUp.pressTime = now;
+      this.input.digit2ChargeUp.start = now;
+      this.input.digit2ChargeUp.tier = tier;
+      this.input.digit2ChargeUp.isChargeUp = false;
+      const ring = createChargeUpRing(tier);
+      ring.position.set(
+        this.ship.state.position.x,
+        this.ship.state.position.y,
+        -0.05,
+      );
+      this.scene.add(ring);
+      this.input.digit2ChargeUp.ring = ring;
+    }
+    if (
+      this.input.digit2ChargeUp.pressTime !== null
+      && this.input.digit2ChargeUp.ring !== null
+      && this.input.digit2ChargeUp.tier !== null
+    ) {
+      const heldFor = (performance.now() / 1000) - this.input.digit2ChargeUp.pressTime;
+      if (heldFor >= ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS) {
+        this.input.digit2ChargeUp.isChargeUp = true;
+      }
+      const fraction = Math.min(
+        1,
+        heldFor / ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS,
+      );
+      updateChargeUpRing(
+        this.input.digit2ChargeUp.ring,
+        fraction,
+      );
+    }
+    if (this.input.digit2JustReleased()) {
+      if (this.input.digit2ChargeUp.pressTime !== null) {
+        const isChargeUp = this.input.digit2ChargeUp.isChargeUp;
+        this.useActiveItem(PickupKind.ORBIT_DRONES, { isChargeUp });
+        // Dispose the charge-up ring. Scene ownership belongs to the
+        // Game; InputManager has no scene reference. Materials and
+        // geometry are created by createChargeUpRing — see
+        // src/orbit-drone-vfx.ts:140-160.
+        const ring = this.input.digit2ChargeUp.ring;
+        if (ring) {
+          this.scene.remove(ring);
+          ring.geometry.dispose();
+          (ring.material as MeshBasicMaterial).dispose();
+        }
+        this.input.digit2ChargeUp.pressTime = null;
+        this.input.digit2ChargeUp.start = null;
+        this.input.digit2ChargeUp.tier = null;
+        this.input.digit2ChargeUp.isChargeUp = false;
+        this.input.digit2ChargeUp.ring = null;
+      }
+    }
     if (input.useActive3) this.useActiveItem(PickupKind.HOMING_MISSILES);
     // Phase 7f — Magnet Booster dispatch (Digit4). Routes directly to
     // activateMagnetBooster rather than useActiveItem because the magnet
@@ -1479,8 +1670,48 @@ export class Game {
   //          one-shot actually clears the screen. fireBombStrike and
   //          onMissileImpact pass their source explicitly; all bullet kills
   //          (default 'BULLET') keep the classic Asteroids split behavior.
+  //
+  // Phase 7i-2 (Task 8) DELTA — Digit2 charge-up hold:
+  //   Purpose: useActiveItem now accepts opts.isChargeUp. The Digit2 input
+  //            loop (above) tracks a 3-state press/hold/release flow: on
+  //            press, spawn a tier-colored charge-up ring at the ship; on
+  //            hold, update the ring scale and flip isChargeUp once heldFor
+  //            >= ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS; on release, fire
+  //            useActiveItem with the captured isChargeUp and dispose the
+  //            ring.
+  //   Setup:   createChargeUpRing + updateChargeUpRing come from
+  //            src/orbit-drone-vfx.ts (Task 3). Time is wall-clock via
+  //            performance.now()/1000 — NOT dt accumulation. Edge detection
+  //            is provided by InputManager.digit2JustPressed/Released.
+  //   Issues:  None on the typecheck side; the spawnDroneDeployment
+  //            function returns a single DroneDeploymentState, so the
+  //            isChargeUp pre-scale is straightforward.
+  //   Fix:     Multiplied dep.deployShockwave.scale by 1.25 when isChargeUp
+  //            is true. updateDeployShockwave is hard-coded 0.5→2.0 inside
+  //            orbit-drone-vfx.ts:281-283 (forbidden to edit per Task 8
+  //            constraints), so pre-scaling the base ring maps the tick
+  //            loop's range to 0.625→2.5 — matching the
+  //            ORBIT_DRONES_CHARGE_UP_DEPLOY_SCALE = 2.5 constant.
+  //   Gotchas: (1) The drone lerp duration distinction (0.5s base vs 0.7s
+  //            charge-up) is NOT visually distinct: spawnDroneDeployment
+  //            places drones at the ship and tickDroneDeployments snaps
+  //            them to orbit slots on the first frame — there is no
+  //            per-drone lerp in the tick loop. The 0.7s constant lives
+  //            in src/pickups.ts but is unreferenced; documented as a
+  //            known scope limitation in the Task 8 report. (2) The
+  //            charge-up ring dispose path uses scene.remove + geometry
+  //            dispose + material dispose — mirrors the dispose pattern
+  //            in src/orbit-drone-vfx.ts (createChargeUpRing owns the
+  //            RingGeometry + MeshBasicMaterial). InputManager has no
+  //            scene reference, so dispose lives in Game. (3) The
+  //            onBlur reset in InputManager clears all 5 charge-up
+  //            fields so a held Digit2 doesn't fire a phantom release on
+  //            tab refocus.
   // ═══════════════════════════════════════════════════════════════════════════
-  private useActiveItem(kind: PickupKind): void {
+  private useActiveItem(
+    kind: PickupKind,
+    opts?: { isChargeUp?: boolean },
+  ): void {
     if (!canFireActive(this.activeAmmo[kind])) return;
     if (!consumeActiveCharge(this.activeAmmo[kind], kind)) return;
     const spec = ACTIVE_KIND_SPECS[kind];
@@ -1506,7 +1737,36 @@ export class Game {
       // deploy (4 drones), charges=0, cooldown=4s.
       const tier = (this.activeAmmo[kind].charges + 1) as 1 | 2 | 3;
       this.activeAmmo[kind].charges = 0;
-      this.activeDeployments.push(spawnDroneDeployment(shipPos, this.scene, tier));
+      const dep = spawnDroneDeployment(shipPos, this.scene, tier);
+      // Phase 7i-2 (Task 9) — wire the beam-vs-asteroid hit callback. The
+      // dispatch field was added in Task 6 (default null) and is the single
+      // hook through which fireDroneBeam's beam line routes to the engine's
+      // damage path. Setting it ONCE in the deploy path is cleaner than
+      // checking it inside the per-frame intersection loop (which would
+      // need a guard or no-op) — every beam in this deployment now shares
+      // the same handler. The handler (`onDroneBeamHitAsteroid` method
+      // below) is bound via an arrow closure to keep `this` pointing at
+      // the Game instance; the callback's own signature is
+      // `(asteroid, tier) => void` so the method's signature is
+      // `(asteroid: AsteroidState, tier: 1 | 2 | 3) => void`.
+      dep.beamHitCallback = (asteroid, t) => this.onDroneBeamHitAsteroid(asteroid, t);
+      // Phase 7i-2 (Task 8) — charge-up apply. When Digit2 was held past
+      // ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS, the deploy shockwave grows
+      // 25% larger (end-scale 2.0 → 2.5). We do this by pre-scaling the
+      // base ring.scale — updateDeployShockwave hard-codes 0.5 → 2.0
+      // inside orbit-drone-vfx.ts:281-283, so multiplying by 1.25 at
+      // spawn time maps the tick loop's range to 0.625 → 2.5 without
+      // touching the VFX module. The drone lerp duration distinction
+      // (0.5s vs 0.7s) is conceptual: spawnDroneDeployment places
+      // drones at the ship and tickDroneDeployments snaps them to
+      // their orbit slots on the first frame — there is no actual
+      // per-drone lerp to lengthen. Documented as a known scope
+      // limitation in the Task 8 report.
+      const isChargeUp = opts?.isChargeUp ?? false;
+      if (isChargeUp) {
+        dep.deployShockwave.scale.set(1.25, 1.25, 1);
+      }
+      this.activeDeployments.push(dep);
     } else if (spec.displayName === 'MISSILES') {
       // Phase 7b — push a VolleySchedule; the schedule is drained each frame
       // by tickMissileVolleySchedules inside updateActiveDeployments. The
@@ -1743,12 +2003,14 @@ export class Game {
       this.asteroids.map((a) => a.state),
       deltaTime,
       this.scene,
-      // Phase 7i Sprint 2 Task 5 — per-drone timers drive the callback
-      // individually, so each fire carries both the drone index (for
-      // spawn-on-fire VFX in future tasks) and the tier (1/2/3 — drives
-      // the colour of the new factory-made projectile).
-      (origin, target, droneIndex, tier) =>
-        this.fireDroneProjectile(origin, target, droneIndex, tier),
+      // Phase 7i-2 (Task 6) — the onDroneFire callback used to invoke
+      // this.fireDroneProjectile which spawned a tagged Projectile mesh.
+      // The beam fire path (src/active-deployments.ts fireDroneBeam) now
+      // drives the visual layer inline, so the callback is a no-op
+      // (kept as a parameter for forward-compat with any future
+      // Game-side hook — Task 9 will use it for the beamHitCallback
+      // wiring). Damage application is also deferred to Task 9.
+      () => {},
     );
     // Spec: DRONES cooldown starts AFTER the 6s active window + 0.3s fade.
     // We detect "deployment ended" by a length drop in the returned array.
@@ -1845,72 +2107,22 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // My Rules — Drone Projectile Spawn Callback (Phase 7 Task 12 / Phase 7i Sprint 2)
+  // My Rules — Drone Projectile Spawn Callback (Phase 7 Task 12 / Phase 7i Sprint 2) [REMOVED Phase 7i-2 Task 6]
   // ═══════════════════════════════════════════════════════════════════════════
-  // Purpose: Callback for `tickDroneDeployments`. Spawns a tier-coloured
-  //          projectile at the drone's position aimed at the target
-  //          asteroid. Tags the projectile with KillSource.DRONE so the
-  //          collision pipeline (handleCollisions → destroyAsteroid) can
-  //          route drone kills through spawn-on-kill VFX in Task 6.
-  // Setup:   Called from tickDroneDeployments via the onDroneFire callback
-  //          (signature widened in Task 5 to
-  //            (origin, target, droneIndex, tier)
-  //          — tier drives projectile colour via Task 4's
-  //          ORBIT_DRONES_TIER_COLOR helper). The target argument is only
-  //          used for its position; this method does NOT apply damage —
-  //          that lives in handleCollisions where the projectile collides
-  //          with the asteroid naturally.
-  // Issues:  Pre-Phase 7i the drone projectile was always cyan (0x66ddff)
-  //          and the callback dropped `droneIndex`. At tier 2/3 the body,
-  //          aura, and lock-on sprite all changed colour but the actual
-  //          projectile stayed cyan — visual mismatch, and there was no
-  //          way for downstream code to distinguish drone shots from
-  //          player shots.
-  // Fix:     Phase 7i Sprint 2 Task 5. fireDroneProjectile now defers to
-  //          the active-deployments.ts Task 4 factory (makeDroneProjectile
-  //          import) for both the mesh AND the velocity vector, then
-  //          wraps them in a tagged Projectile via createProjectile with
-  //          source='DRONE'. The factory builds the tier-coloured
-  //          SphereGeometry + MeshBasicMaterial so the projectile carries
-  //          the same visual identity as the drone that fired it (cyan
-  //          tier 1 / magenta tier 2 / gold tier 3). The velocity it
-  //          returns is already scaled to PROJECTILE_SPEED so a shield
-  //          collision from a drone reads identically to a player shot.
-  // Gotchas: Projectile mesh is shared between the active-deployments
-  //          factory's mesh and Game's projectiles entry — adding the
-  //          mesh to the scene FIRST and then pushing to projectiles[]
-  //          ensures a frame where the projectile is in flight but not
-  //          yet in the update loop still renders (matches the
-  //          pre-Phase 7i fireProjectile path in updateProjectiles).
-  //          Drone-fired projectiles still go through handleCollisions,
-  //          which calls destroyAsteroid with the default 'BULLET'
-  //          source — the per-projectile `source` tag is reserved for
-  //          Task 6 (drone-kill sparks + bonus audio). For now the tag
-  //          is observational only.
-  // ═══════════════════════════════════════════════════════════════════════════
-  private fireDroneProjectile(
-    origin: Vector2,
-    target: AsteroidState,
-    _droneIndex: number,
-    tier: 1 | 2 | 3,
-  ): void {
-    const dx = target.position.x - origin.x;
-    const dy = target.position.y - origin.y;
-    const length = Math.hypot(dx, dy);
-    if (length < 0.01) return;
-    const dirX = dx / length;
-    const dirY = dy / length;
-    const dir: Vector2 = { x: dirX, y: dirY };
-    // Phase 7i Sprint 2 Task 4 factory — returns the tier-coloured mesh
-    // AND a pre-scaled velocity Vector2. We discard the factory's
-    // velocity and re-derive via createProjectile so the projectile state
-    // carries the 'DRONE' source tag (and benefits from the existing
-    // lifetime / position integrator in src/projectile.ts).
-    const { mesh } = makeDroneProjectile(origin, target, tier);
-    this.scene.add(mesh);
-    const state = createProjectile(origin, dir, 'DRONE');
-    this.projectiles.push({ state, mesh });
-  }
+  // Phase 7i-2 (Task 6) — fireDroneProjectile was the per-drone fire
+  // callback that spawned a tier-coloured projectile mesh and pushed it
+  // onto this.projectiles. The beam fire path (src/active-deployments.ts
+  // fireDroneBeam) replaces projectile fire with an instant red beam, so
+  // this method is dead code as of Task 6. The My Rules + body are
+  // deleted rather than stubbed so the call site in tickDroneDeployments
+  // (which used to pass an onDroneFire callback invoking this method) can
+  // stop invoking it. The pre-Task 6 history is preserved in
+  // docs/superpowers/specs/2026-06-29-phase-7i-orbit-drone-polish-design.md
+  // and the kill-sparks routing (projectile.state.source === 'DRONE')
+  // in handleCollisions is preserved for any future drone source that
+  // might re-introduce a tagged projectile. The per-kill sparks still
+  // fire from KillSource.DRONE once Task 9 wires beam-vs-asteroid
+  // damage through the new dep.beamHitCallback.
 
   // ═══════════════════════════════════════════════════════════════════════════
   // My Rules — Homing Missile Impact (Phase 7 Task 12)
@@ -1944,6 +2156,92 @@ export class Game {
     if (live.state.health <= 0) {
       this.destroyAsteroid(live, 'MISSILE');
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Drone Beam Hit (Phase 7i-2 Task 9)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Apply damage when a drone beam (Phase 7i-2 Task 6) overlaps an
+  //          asteroid. Wired through dep.beamHitCallback in useActiveItem
+  //          so the dispatch lives in src/active-deployments.ts (it owns
+  //          the per-drone currentBeamTarget pointer) and the damage logic
+  //          lives here (it owns the asteroid list + scoring + sparks).
+  // Setup:   Called from the per-frame intersection loop at the end of
+  //          handleCollisions. Signature is (asteroid, tier) where tier
+  //          is forwarded from the deployment (1/2/3) so the kill-sparks
+  //          factory can use the tier-coloured sparks.
+  // Issues:  Pre-Task 9, the beam was a visual-only fire dispatch (Task 6
+  //          removed fireDroneProjectile). Asteroids took no damage from
+  //          drone beams. Drones essentially did nothing gameplay-wise.
+  // Fix:     Phase 7i-2 Task 9. TINY asteroids get a knockback impulse
+  //          away from the ship (same pattern as the homing-missile TINY
+  //          handling at lines 1976-1991) so the drone "shoves aside" the
+  //          small fragments in its path. Non-TINY asteroids get a clean
+  //          destroy with KillSource.DRONE — bomb/missile kills skip
+  //          splitAsteroid (no children spawn, screen really clears), and
+  //          we want the same feel for drone kills so the player sees a
+  //          visible cause→effect (one shot = one kill). The drone-kill
+  //          sparks spawn BEFORE destroyAsteroid so the sparks read as
+  //          the kill's signature, not a delayed after-effect.
+  // Gotchas: We do NOT look up the LiveAsteroid wrapper before applying
+  //          TINY knockback — the missile path's tinyKnockbacks map-based
+  //          approach (lines 1976-1991) batches velocity updates for ALL
+  //          asteroids in a single map pass. The beam path only ever
+  //          knocks ONE asteroid per callback (1 hit per beam), so the
+  //          per-asteroid in-place map pattern is wasteful. Instead, we
+  //          update the matched asteroid's velocity directly through a
+  //          fresh array. This diverges slightly from the missile code
+  //          path but is correct for the 1-hit-per-beam contract.
+  //          KillSource is passed as the string literal 'DRONE' — the
+  //          type is a union (`'BULLET' | 'BOMB' | 'MISSILE' | 'WALL' |
+  //          'SHARD' | 'DRONE'`) NOT an enum, so the enum-import pattern
+  //          used elsewhere in the engine does not apply. The string
+  //          literal is what onMissileImpact uses on the line above
+  //          (`destroyAsteroid(live, 'MISSILE')`) — same convention.
+  // ═══════════════════════════════════════════════════════════════════════════
+  private onDroneBeamHitAsteroid(asteroid: AsteroidState, tier: 1 | 2 | 3): void {
+    if (asteroid.size === AsteroidSize.TINY) {
+      // TINY: knockback away from the ship (the orbit center). Direction
+      // is asteroid→ship normalized, then we add the impulse scaled by
+      // HOMING_MISSILES_TINY_KNOCKBACK_SPEED to the asteroid's existing
+      // velocity. Vector2 is readonly in this codebase, so we cannot
+      // mutate asteroid.velocity in place — same pattern as
+      // resolveAsteroidCollision in src/asteroid.ts:266. We map this.asteroids
+      // to a new array; only the matched asteroid's wrapper is rebuilt.
+      const shipPos = this.ship.state.position;
+      const dx = shipPos.x - asteroid.position.x;
+      const dy = shipPos.y - asteroid.position.y;
+      const len = Math.hypot(dx, dy);
+      if (len > 0.01) {
+        const dirX = dx / len;
+        const dirY = dy / len;
+        const speed = HOMING_MISSILES_TINY_KNOCKBACK_SPEED;
+        this.asteroids = this.asteroids.map((a) => {
+          if (a.state !== asteroid) return a;
+          return {
+            ...a,
+            state: {
+              ...a.state,
+              velocity: {
+                x: a.state.velocity.x + dirX * speed,
+                y: a.state.velocity.y + dirY * speed,
+              },
+            },
+          };
+        });
+      }
+      return;
+    }
+    // Non-TINY: spawn kill-sparks at the impact point, then destroy the
+    // asteroid with KillSource.DRONE. findByState pattern matches
+    // onMissileImpact (line 2110) — the asteroid could have been culled
+    // by a projectile in the same frame's handleCollisions loop above,
+    // in which case we silently no-op (the player will see the sparks
+    // AND the projectile kill, which reads as overkill, not a bug).
+    const live = this.asteroids.find((a) => a.state === asteroid);
+    if (!live) return;
+    this.spawnDroneKillSparks(live.state.position);
+    this.destroyAsteroid(live, 'DRONE');
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -2598,9 +2896,14 @@ export class Game {
           if (asteroid.state.kind === AsteroidKind.CRYSTAL) {
             asteroid.state.health = Math.max(0, asteroid.state.health - 1);
           }
-          if (projectile.state.source === 'DRONE') {
-            hitSource = 'DRONE';
-          }
+          // Phase 7i-2 (Task 6) — drone-tagged projectile branch was
+          // removed because beam fire replaces projectile fire. The
+          // source field is now 'BULLET' | 'BOMB' | undefined; no
+          // projectile can carry 'DRONE' anymore. The drone-kill sparks
+          // are re-wired in Task 9 to fire from the new
+          // DroneDeploymentState.beamHitCallback when a beam actually
+          // hits an asteroid. The spawnDroneKillSparks method itself
+          // stays in place (now only called from Task 9).
           this.disposeProjectile(projectile);
         } else {
           remainingProjectiles.push(projectile);
@@ -2612,7 +2915,6 @@ export class Game {
         // Iron asteroids always die on a hit (pre-Phase 6 behavior).
         if (asteroid.state.kind === AsteroidKind.IRON) {
           this.destroyAsteroid(asteroid, hitSource);
-          if (hitSource === 'DRONE') this.spawnDroneKillSparks(asteroid.state.position);
           continue;
         }
 
@@ -2628,7 +2930,6 @@ export class Game {
 
         if (asteroid.state.health <= 0) {
           this.destroyAsteroid(asteroid, hitSource);
-          if (hitSource === 'DRONE') this.spawnDroneKillSparks(asteroid.state.position);
           continue;
         }
         // Non-fatal hit on a crystal: keep it alive so the player can still
@@ -2653,6 +2954,48 @@ export class Game {
     }
 
     this.asteroids = aliveAsteroids;
+
+    // Phase 7i-2 (Task 9) — beam-vs-asteroid hit detection. For every
+    // active deployment, for every drone with a currentBeamTarget, check
+    // whether the line segment drone→target passes within
+    // (BEAM_HIT_RADIUS + asteroid.radius) of each asteroid's centre. If so,
+    // call dep.beamHitCallback (set in useActiveItem at deploy time) which
+    // applies TINY-knockback or destroyAsteroid + the kill-sparks VFX.
+    //
+    // The per-beam-once throttling lives in PerDroneState.beamHasHitTarget
+    // (see src/active-deployments.ts Task 9 DELTA): fireDroneBeam sets it
+    // false on every shot, and the first hit in this loop flips it true
+    // via the closure. Subsequent frames within the same 0.25s beam window
+    // see true and short-circuit. The check is placed AFTER the
+    // projectile/asteroid loop above so any projectile-driven destruction
+    // has already pruned this.asteroids, and the beam check sees the
+    // post-prune list. We iterate asteroids via .state so the callback
+    // gets the same AsteroidState the rest of the engine uses; lookup to
+    // LiveAsteroid happens inside onDroneBeamHitAsteroid.
+    for (const dep of this.activeDeployments) {
+      if (dep.fadeTimer > 0) continue; // no hits during fade-out
+      for (const drone of dep.perDrone) {
+        if (!drone.currentBeamTarget) continue;
+        if (drone.beamHasHitTarget) continue; // per-beam-once gate
+        if (!drone.beamLine || !drone.beamLine.visible) continue;
+        const target = drone.currentBeamTarget;
+        for (const live of this.asteroids) {
+          const radius = SIZE_RADIUS[live.state.size];
+          const dist = pointToSegmentDistance(
+            live.state.position.x, live.state.position.y,
+            drone.mesh.position.x, drone.mesh.position.y,
+            target.position.x, target.position.y,
+          );
+          if (dist <= BEAM_HIT_RADIUS + radius) {
+            if (dep.beamHitCallback) {
+              dep.beamHitCallback(live.state, dep.tier);
+            }
+            drone.beamHasHitTarget = true;
+            break; // one hit per beam — no need to test other asteroids
+          }
+        }
+      }
+    }
   }
 
   private destroyAsteroid(target: LiveAsteroid, source: KillSource = 'BULLET'): void {

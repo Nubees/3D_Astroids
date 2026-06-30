@@ -48,14 +48,19 @@ export interface Projectile {
   velocity: Vector2;
   lifetime: number;
   readonly maxLifetime: number;
-  // Phase 7i Sprint 2 — tagged kill-source on projectiles so drone-fired shots
-  // can be distinguished from player blaster shots. Defaults to 'BULLET'
-  // when omitted so existing call sites that build projectiles via
-  // createProjectile(spawn, dir) continue to compile unchanged. Game's
-  // fireDroneProjectile passes 'DRONE' through this field so the kill
-  // pipeline (handleCollisions → destroyAsteroid → TagSource → sparks)
-  // knows the projectile came from a drone.
-  source?: 'BULLET' | 'BOMB' | 'DRONE';
+  // Phase 7i-2 (Task 6) — the 'DRONE' literal was removed because beam
+  // fire replaces projectile fire. The beam is a visual-only layer
+  // (Line + Sprite) that lives in src/active-deployments.ts; it does
+  // not flow through createProjectile + handleCollisions. The
+  // projectile's `source` field is now reserved for BULLET (player
+  // blaster) and BOMB (bomb shrapnel — added in a future phase if
+  // needed). KillSource.DRONE in src/pickups.ts:492 is a SEPARATE enum
+  // and is still used for kill-sparks routing once Task 9 wires
+  // beam-vs-asteroid damage through the new
+  // DroneDeploymentState.beamHitCallback. Defaults to 'BULLET' when
+  // omitted so existing call sites that build projectiles via
+  // createProjectile(spawn, dir) continue to compile unchanged.
+  source?: 'BULLET' | 'BOMB';
 }
 
 export enum AsteroidSize {
