@@ -382,14 +382,16 @@ describe('Phase 7i-2 — createDroneBeam', () => {
     expect(beam.visible).toBe(false);
   });
 
-  it('uses a CylinderGeometry with r=0.04 + h=1 (unit height for per-frame Y-scale)', () => {
+  it('uses a CylinderGeometry with r=0.08 + h=1 (unit height for per-frame Y-scale)', () => {
     const beam = createDroneBeam(1);
     const geom = beam.geometry as THREE.CylinderGeometry;
     expect(geom).toBeInstanceOf(THREE.CylinderGeometry);
-    // radiusTop === radiusBottom === 0.04 (unit h is set via scale.y
-    // in updateBeam, not baked into the geometry).
-    expect(geom.parameters.radiusTop).toBeCloseTo(0.04, 6);
-    expect(geom.parameters.radiusBottom).toBeCloseTo(0.04, 6);
+    // radiusTop === radiusBottom === 0.08 (Phase 7i-2 hotfix #6 — was 0.04
+    // before user asked to "make the laser 2x bigger in width"; 0.08 = 2×0.04
+    // = 2× the cylinder diameter, per the user's "2x in width" phrasing).
+    // Unit h is set via scale.y in updateBeam, not baked into the geometry.
+    expect(geom.parameters.radiusTop).toBeCloseTo(0.08, 6);
+    expect(geom.parameters.radiusBottom).toBeCloseTo(0.08, 6);
     expect(geom.parameters.height).toBe(1);
   });
 });

@@ -27,9 +27,13 @@
 //            (additive, opacity 0.8 cap, color ORBIT_DRONES_BEAM_COLOR).
 //            Originally a Line + LineBasicMaterial, but the WebGL spec
 //            ignores `linewidth` so 1px additive red was invisible against
-//            bloom + bright asteroid surfaces. Cylinder r=0.04 (~1/6 the
-//            drone radius) renders as a real triangle mesh and reads at
-//            glance distance. Same visual contract otherwise.
+//            bloom + bright asteroid surfaces. Cylinder r=BEAM_RADIUS
+//            (was 0.04, hotfix #6 doubled to 0.08 = 2× width per user
+//            "make the laser 2x bigger in width" — the beam now reads
+//            as a clearly visible "laser" streak rather than a thin
+//            streak that was washing to orange against bloom + dark
+//            asteroid backdrop) renders as a real triangle mesh and
+//            reads at glance distance. Same visual contract otherwise.
 //          - createMuzzleFlash — additive Sprite at muzzle using the
 //            shared lock-on diamond texture, 80ms sin-curve opacity 0→0.6→0
 //          - createChargeUpRing — tier-colored flat ring under ship
@@ -109,11 +113,22 @@ const MUZZLE_FLASH_SCALE = 0.3;
 // the WebGL spec (all lines render at 1px regardless of the property).
 // A 1px additive-red line on top of bloom + bright asteroid surfaces is
 // effectively invisible — that was the user-reported "weird beam"
-// symptom after commit e9d0030. CylinderGeometry r=0.04 (~1/6 the drone
-// body radius of 0.24) renders as a real triangle mesh, so the beam
-// reads as a thick bright-red streak at glance distance. Same color
-// (0xff2233), same additive opacity cap (0.8), same depthWrite=false.
-const BEAM_RADIUS = 0.04;
+// symptom after commit e9d0030. CylinderGeometry r=BEAM_RADIUS renders
+// as a real triangle mesh, so the beam reads as a thick bright-red
+// streak at glance distance. Same color (0xff2233), same additive
+// opacity cap (0.8), same depthWrite=false.
+//
+// Phase 7i-2 hotfix #6 — user feedback: "make the laser 2x bigger in
+// width and bright red in color". Doubled the radius (0.04 → 0.08) so
+// the beam reads as a clearly visible "laser" rather than a thin
+// streak. Additive overlap math is unchanged per-pixel (2 beams still
+// meet at most), so the per-channel color saturation is identical —
+// the beam now occupies a larger area of saturated red on screen
+// instead of a thinner streak that was washing to orange against the
+// existing bloom + dark asteroid backdrop. Color is unchanged
+// (0xff2233 was already "bright red"); bumping the radius is what
+// makes it LOOK brighter because more pixels hit the saturation cap.
+const BEAM_RADIUS = 0.08;
 
 export function createDroneMesh(tier: 1 | 2 | 3): Mesh {
   const color = ORBIT_DRONES_TIER_COLOR(tier);
@@ -315,12 +330,14 @@ export function updateDeployShockwave(ring: Mesh, age: number): void {
  * Phase 7i-2 (post-ship hotfix) — beam was Line + LineBasicMaterial in
  * v15.0 but WebGL's `linewidth` is a no-op (always 1px), so the beam
  * was effectively invisible against bloom + bright asteroid surfaces.
- * Now a thin CylinderGeometry (r=BEAM_RADIUS, h=1 along Y) so the beam
- * is a real triangle mesh that renders at the intended thickness. The
- * cylinder is unit-height; updateBeam scales Y to the drone→target
- * distance and re-orients via Quaternion.setFromUnitVectors(UP, dir).
- * Color (0xff2233), additive blending, opacity cap 0.8, and
- * depthWrite=false are unchanged from the v15 spec.
+ * Now a thin CylinderGeometry (r=BEAM_RADIUS=0.08, h=1 along Y) so the
+ * beam is a real triangle mesh that renders at the intended thickness.
+ * Phase 7i-2 hotfix #6 doubled the radius from 0.04 → 0.08 per user
+ * feedback "make the laser 2x bigger in width". The cylinder is
+ * unit-height; updateBeam scales Y to the drone→target distance and
+ * re-orients via Quaternion.setFromUnitVectors(UP, dir). Color
+ * (0xff2233), additive blending, opacity cap 0.8, and depthWrite=false
+ * are unchanged.
  */
 export function createDroneBeam(_tier: 1 | 2 | 3): Mesh {
   const geometry = new CylinderGeometry(BEAM_RADIUS, BEAM_RADIUS, 1, 8, 1, true);
