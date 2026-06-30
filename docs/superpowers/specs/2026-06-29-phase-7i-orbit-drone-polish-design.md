@@ -74,6 +74,7 @@ freeze-to-read), and **Hyper Light Drifter** (dash echoes).
 | Drones per tier | **2 → 3 → 4** (1 charge / 2 / 3 charges) |
 | Fire pattern | **Per-drone independent timer** at 0.4s each |
 | Aura ring | **Tier-colored pulsing ring** (cyan / magenta / gold) |
+| Targeting | **Phase 7i = nearest asteroid** (crystal-priority wiring deferred to Phase 7i-2 micro-task; `findDroneTarget` helper exported) |
 | Tier colors | Tier 1 = `0x66ddff` cyan, Tier 2 = `0xff66dd` magenta, Tier 3 = `0xffcc44` gold |
 | Tier 3 color clash | OK — Magnet Booster is gold, both can share (different HUD slot, different mesh family) |
 | Sound | **No new SFX** — existing projectile hit feedback only |
@@ -137,10 +138,9 @@ module — matches the existing pattern (`missile-vfx.ts`,
 
 ### Targeting
 
-- Drones prioritize: **crystal > non-tiny iron > tiny**.
-- New helper `findDroneTarget(asteroids, dronePosition)` —
-  prefers crystals via `AsteroidKind.CRYSTAL` filter, then iron by
-  Euclidean distance. Skips TINY (per existing `missileIgnoresAsteroid`).
+- **Phase 7i implementation:** nearest-asteroid (`findNearestAsteroid` reused from existing munitions).
+- **Crystal-priority helper deferred to follow-up:** the `findDroneTarget(asteroids, dronePosition)` helper is exported in `src/active-deployments.ts` (prefers crystals via `AsteroidKind.CRYSTAL` filter, then iron by Euclidean distance, skips TINY per existing `missileIgnoresAsteroid`) but is NOT yet wired into `tickDroneDeployments`.
+- **Status:** locked targeting priority (crystal > non-tiny iron > tiny) is correct but the wiring is deferred to a Phase 7i-2 micro-task. Current behavior = nearest, which feels acceptable in practice but does not match the locked spec wording.
 
 ### Lifetime / Cooldown
 
@@ -169,7 +169,7 @@ module — matches the existing pattern (`missile-vfx.ts`,
 - `MeshBasicMaterial({ color: <tier>, transparent: true,
   opacity: 0.35, blending: AdditiveBlending, side: DoubleSide,
   depthWrite: false })`.
-- Per-frame opacity pulse: `0.35 + 0.25 * sin(t * 4)` (2 Hz pulse).
+- Per-frame opacity pulse: `0.35 + 0.25 * sin(t * 4π)` (2 Hz pulse).
 - Per-fire flash: ramp to `1.0` for 80ms then decay back to baseline.
 - Tier colors per above.
 
@@ -312,6 +312,7 @@ User pushes manually per project convention after all 3 sprints land.
   - Aura ring opacity capped at 0.6 peak (per fire flash).
   - Spark sprites capped at 0.4 opacity per source.
   - Tether line opacity capped at 0.25.
+  - **Lock-on sprite opacity NOT capped in spec** — review finding MINOR-2 noted 4 drones × 0.7 opacity on the same target = 2.8 per-pixel additive, exceeds saturation. Defer cap to follow-up; safe values 0.25-0.30.
   - Multiple sources never stack on the same pixel simultaneously
     (deploy-shockwave disposes at 250ms, aura pulse is steady-state
     only).
@@ -325,6 +326,7 @@ User pushes manually per project convention after all 3 sprints land.
 
 ## Carryover Notes
 
+- **Targeting deferral:** `findDroneTarget` (crystal > non-tiny iron > tiny priority) is exported but NOT YET wired into `tickDroneDeployments`. Currently `findNearestAsteroid` is still used. Tracked as Phase 7i-2 micro-task. The Locked Decisions table now reads "Phase 7i = nearest asteroid" to match implementation reality.
 - **Spec covers ALL three sprints in one place** because the tier
   scaling depends on the visual layer being in place first (you can't
   show "tier 3 = gold" without the aura ring being built). Each
