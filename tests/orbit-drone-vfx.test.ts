@@ -368,23 +368,29 @@ describe('Phase 7i-2 — drone mesh + aura sizing', () => {
 });
 
 describe('Phase 7i-2 — createDroneBeam', () => {
-  it('returns a Line with AdditiveBlending material', () => {
+  it('returns a Mesh (cylinder) with AdditiveBlending material', () => {
     const beam = createDroneBeam(2);
-    const mat = beam.material as THREE.LineBasicMaterial;
+    const mat = beam.material as THREE.MeshBasicMaterial;
+    expect(beam).toBeInstanceOf(THREE.Mesh);
     expect(mat.blending).toBe(THREE.AdditiveBlending);
     expect(mat.color.getHex()).toBe(0xff2233);
     expect(mat.opacity).toBeLessThanOrEqual(0.8);
   });
 
-  it('initial endpoints both at origin (placeholder)', () => {
+  it('starts hidden (visible=false) so spawnDroneDeployment shows nothing on frame 0', () => {
     const beam = createDroneBeam(1);
-    const pos = beam.geometry.attributes.position;
-    expect(pos.getX(0)).toBe(0);
-    expect(pos.getY(0)).toBe(0);
-    expect(pos.getZ(0)).toBe(0);
-    expect(pos.getX(1)).toBe(0);
-    expect(pos.getY(1)).toBe(0);
-    expect(pos.getZ(1)).toBe(0);
+    expect(beam.visible).toBe(false);
+  });
+
+  it('uses a CylinderGeometry with r=0.04 + h=1 (unit height for per-frame Y-scale)', () => {
+    const beam = createDroneBeam(1);
+    const geom = beam.geometry as THREE.CylinderGeometry;
+    expect(geom).toBeInstanceOf(THREE.CylinderGeometry);
+    // radiusTop === radiusBottom === 0.04 (unit h is set via scale.y
+    // in updateBeam, not baked into the geometry).
+    expect(geom.parameters.radiusTop).toBeCloseTo(0.04, 6);
+    expect(geom.parameters.radiusBottom).toBeCloseTo(0.04, 6);
+    expect(geom.parameters.height).toBe(1);
   });
 });
 
@@ -408,14 +414,45 @@ describe('Phase 7i-2 — createChargeUpRing', () => {
 });
 
 describe('Phase 7i-2 — updateBeam', () => {
-  it('sets endpoints to drone.position → target.position', () => {
+  it('positions the cylinder at the drone→target midpoint', () => {
     const beam = createDroneBeam(1);
-    updateBeam(beam, { x: 0, y: 0, z: 0 }, { x: 5, y: 5, z: 0 });
-    const pos = beam.geometry.attributes.position;
-    expect(pos.getX(0)).toBe(0);
-    expect(pos.getY(0)).toBe(0);
-    expect(pos.getX(1)).toBe(5);
-    expect(pos.getY(1)).toBe(5);
+    updateBeam(beam, { x: 0, y: 0, z: 0 }, { x: 4, y: 6, z: 0 });
+    expect(beam.position.x).toBeCloseTo(2, 6);
+    expect(beam.position.y).toBeCloseTo(3, 6);
+    expect(beam.position.z).toBeCloseTo(0, 6);
+  });
+
+  it('scales the cylinder Y to the segment length', () => {
+    const beam = createDroneBeam(1);
+    updateBeam(beam, { x: 0, y: 0, z: 0 }, { x: 3, y: 4, z: 0 });
+    // 3-4-5 triangle, length = 5.
+    expect(beam.scale.y).toBeCloseTo(5, 6);
+    // X/Z stay 1 so the cylinder thickness isn't squashed.
+    expect(beam.scale.x).toBe(1);
+    expect(beam.scale.z).toBe(1);
+  });
+
+  it('rotates the cylinder so its +Y axis points from drone to target', () => {
+    const beam = createDroneBeam(1);
+    // Origin → +X direction. Cylinder default axis is +Y, so after
+    // updateBeam the quaternion should map +Y → +X. We test the
+    // rotated-up vector to assert this without re-deriving the quat
+    // math.
+    updateBeam(beam, { x: 0, y: 0, z: 0 }, { x: 5, y: 0, z: 0 });
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(beam.quaternion);
+    expect(up.x).toBeCloseTo(1, 6);
+    expect(up.y).toBeCloseTo(0, 6);
+    expect(up.z).toBeCloseTo(0, 6);
+  });
+
+  it('handles a coincident drone/target without producing NaN (length clamped to 0.001)', () => {
+    const beam = createDroneBeam(1);
+    updateBeam(beam, { x: 1, y: 1, z: 0 }, { x: 1, y: 1, z: 0 });
+    expect(Number.isFinite(beam.position.x)).toBe(true);
+    expect(Number.isFinite(beam.position.y)).toBe(true);
+    expect(Number.isFinite(beam.position.z)).toBe(true);
+    expect(Number.isFinite(beam.scale.y)).toBe(true);
+    expect(Number.isFinite(beam.quaternion.x)).toBe(true);
   });
 });
 

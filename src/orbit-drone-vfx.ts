@@ -23,8 +23,13 @@
 //          bump so the drone actually feels like it fires a weapon:
 //          - DRONE_MESH_RADIUS 0.12 → 0.24 (2× — reads at glance distance)
 //          - AURA_RING 0.6→1.4 → 1.0→2.2 (wider footprint, matches scale-up)
-//          - createDroneBeam — bright red Line from muzzle to target
-//            (additive, opacity 0.8 cap, color ORBIT_DRONES_BEAM_COLOR)
+//          - createDroneBeam — bright red CYLINDER from muzzle to target
+//            (additive, opacity 0.8 cap, color ORBIT_DRONES_BEAM_COLOR).
+//            Originally a Line + LineBasicMaterial, but the WebGL spec
+//            ignores `linewidth` so 1px additive red was invisible against
+//            bloom + bright asteroid surfaces. Cylinder r=0.04 (~1/6 the
+//            drone radius) renders as a real triangle mesh and reads at
+//            glance distance. Same visual contract otherwise.
 //          - createMuzzleFlash — additive Sprite at muzzle using the
 //            shared lock-on diamond texture, 80ms sin-curve opacity 0→0.6→0
 //          - createChargeUpRing — tier-colored flat ring under ship
@@ -53,6 +58,7 @@ import {
   BufferAttribute,
   BufferGeometry,
   CanvasTexture,
+  CylinderGeometry,
   DoubleSide,
   IcosahedronGeometry,
   Line,
@@ -60,9 +66,11 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
+  Quaternion,
   RingGeometry,
   Sprite,
   SpriteMaterial,
+  Vector3,
 } from 'three';
 import { Vector2 } from './types';
 import {
@@ -96,6 +104,16 @@ export const AURA_RING_OUTER = 2.2;
 const MUZZLE_FLASH_LIFETIME_SECONDS = 0.08;
 const MUZZLE_FLASH_PEAK_OPACITY = 0.6;
 const MUZZLE_FLASH_SCALE = 0.3;
+// Phase 7i-2 (post-ship hotfix) — beam thickness. The original v15 spec
+// used Three.js Line + LineBasicMaterial, but `linewidth` is a no-op in
+// the WebGL spec (all lines render at 1px regardless of the property).
+// A 1px additive-red line on top of bloom + bright asteroid surfaces is
+// effectively invisible — that was the user-reported "weird beam"
+// symptom after commit e9d0030. CylinderGeometry r=0.04 (~1/6 the drone
+// body radius of 0.24) renders as a real triangle mesh, so the beam
+// reads as a thick bright-red streak at glance distance. Same color
+// (0xff2233), same additive opacity cap (0.8), same depthWrite=false.
+const BEAM_RADIUS = 0.04;
 
 export function createDroneMesh(tier: 1 | 2 | 3): Mesh {
   const color = ORBIT_DRONES_TIER_COLOR(tier);
@@ -294,27 +312,31 @@ export function updateDeployShockwave(ring: Mesh, age: number): void {
 // handle teardown (Line/Sprite/Mesh are standard Three.js objects).
 
 /**
- * Phase 7i-2 — bright red beam from drone to locked-on target.
- * Endpoints are placeholders (both at origin); call updateBeam each
- * frame once the active-deployment tick has resolved the target. The
- * additive opacity cap is 0.8 per feedback_additive_blending_whiteout.md.
- * The beam is a single Line segment; thickness is fixed (1px in
- * WebGL), color and additive blending carry the visual punch.
+ * Phase 7i-2 (post-ship hotfix) — beam was Line + LineBasicMaterial in
+ * v15.0 but WebGL's `linewidth` is a no-op (always 1px), so the beam
+ * was effectively invisible against bloom + bright asteroid surfaces.
+ * Now a thin CylinderGeometry (r=BEAM_RADIUS, h=1 along Y) so the beam
+ * is a real triangle mesh that renders at the intended thickness. The
+ * cylinder is unit-height; updateBeam scales Y to the drone→target
+ * distance and re-orients via Quaternion.setFromUnitVectors(UP, dir).
+ * Color (0xff2233), additive blending, opacity cap 0.8, and
+ * depthWrite=false are unchanged from the v15 spec.
  */
-export function createDroneBeam(_tier: 1 | 2 | 3): Line {
-  const geometry = new BufferGeometry();
-  geometry.setAttribute(
-    'position',
-    new BufferAttribute(new Float32Array([0, 0, 0, 0, 0, 0]), 3),
-  );
-  const material = new LineBasicMaterial({
+export function createDroneBeam(_tier: 1 | 2 | 3): Mesh {
+  const geometry = new CylinderGeometry(BEAM_RADIUS, BEAM_RADIUS, 1, 8, 1, true);
+  const material = new MeshBasicMaterial({
     color: ORBIT_DRONES_BEAM_COLOR,
     transparent: true,
     opacity: 0.8,
     blending: AdditiveBlending,
     depthWrite: false,
+    side: DoubleSide,
   });
-  return new Line(geometry, material);
+  const mesh = new Mesh(geometry, material);
+  // Mesh is invisible until fireDroneBeam promotes it (consistent with
+  // the v15 Line path which started with visible=false).
+  mesh.visible = false;
+  return mesh;
 }
 
 /**
@@ -362,20 +384,35 @@ export function createChargeUpRing(tier: 1 | 2 | 3): Mesh {
 }
 
 /**
- * Phase 7i-2 — per-frame endpoint update for the drone beam. Caller
- * passes the drone world position and the current target world
- * position. Positional args are typed as {x,y,z} so both Vector3 and
- * plain literals satisfy the contract (test code uses literals).
+ * Phase 7i-2 (post-ship hotfix) — per-frame pose update for the
+ * cylinder beam. The cylinder is unit-height along +Y at construction;
+ * we compute the drone→target direction, set the mesh to the midpoint,
+ * scale Y to the segment length, and rotate +Y to align with the
+ * direction via Quaternion.setFromUnitVectors. Length is clamped to
+ * >=0.001 so a coincident drone/target can't produce NaN from a
+ * zero-length normalize.
  */
+const _BEAM_UP = new Vector3(0, 1, 0);
+const _BEAM_DIR = new Vector3();
+const _BEAM_QUAT = new Quaternion();
 export function updateBeam(
-  beam: Line,
+  beam: Mesh,
   dronePos: { x: number; y: number; z: number },
   targetPos: { x: number; y: number; z: number },
 ): void {
-  const positions = (beam.geometry as BufferGeometry).attributes.position;
-  positions.setXYZ(0, dronePos.x, dronePos.y, dronePos.z);
-  positions.setXYZ(1, targetPos.x, targetPos.y, targetPos.z);
-  positions.needsUpdate = true;
+  const dx = targetPos.x - dronePos.x;
+  const dy = targetPos.y - dronePos.y;
+  const dz = targetPos.z - dronePos.z;
+  const length = Math.max(0.001, Math.hypot(dx, dy, dz));
+  _BEAM_DIR.set(dx / length, dy / length, dz / length);
+  _BEAM_QUAT.setFromUnitVectors(_BEAM_UP, _BEAM_DIR);
+  beam.position.set(
+    (dronePos.x + targetPos.x) * 0.5,
+    (dronePos.y + targetPos.y) * 0.5,
+    (dronePos.z + targetPos.z) * 0.5,
+  );
+  beam.quaternion.copy(_BEAM_QUAT);
+  beam.scale.set(1, length, 1);
 }
 
 /**

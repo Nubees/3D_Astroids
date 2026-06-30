@@ -270,18 +270,23 @@ export interface PerDroneState {
   // doesn't bob AND pulse in lockstep — the eye reads the composite as
   // organic motion rather than a single rigid sinusoid.
   powerPulsePhase: number;
-  // Phase 7i-2 (Task 6) — beam fire replaces projectile fire. Each drone
-  // owns a beam Line (initially visible=false — the factory seeds both
-  // endpoints at (0,0,0) so the line would be a degenerate pixel if
-  // shown) and a muzzle-flash Sprite (additive, opacity starts at 0 and
-  // is animated by updateMuzzleFlash). `beamAge` is the dt accumulator
-  // driving the ORBIT_DRONES_BEAM_LIFETIME_SECONDS timeout; when the
-  // line expires, currentBeamTarget is cleared and the line is hidden
-  // until the next fire. `muzzleFlashAge` is its own dt accumulator and
-  // runs for ORBIT_DRONES_MUZZLE_FLASH_LIFETIME_SECONDS (0.08s). The
-  // per-frame tick in tickDroneDeployments ages both and calls
-  // updateBeam / updateMuzzleFlash while in-window.
-  beamLine: Line | null;
+  // Phase 7i-2 (post-ship hotfix) — beam fire replaces projectile fire.
+  // Originally a Line + LineBasicMaterial, but WebGL's `linewidth` is a
+  // no-op (1px max), so a bright-red additive line was effectively
+  // invisible against bloom + bright asteroid surfaces — the user
+  // reported "beams behaving weird" because the visual punch was
+  // missing. Now a CylinderGeometry mesh (r=0.04, unit h, additive
+  // 0xff2233, opacity 0.8 cap, depthWrite false) that updateBeam
+  // per-frame poses at the drone→target midpoint with the cylinder Y
+  // scaled to the segment length and rotated to align with the
+  // direction. `beamAge` is the dt accumulator driving the
+  // ORBIT_DRONES_BEAM_LIFETIME_SECONDS timeout; when the beam expires,
+  // currentBeamTarget is cleared and the mesh is hidden until the next
+  // fire. `muzzleFlashAge` is its own dt accumulator and runs for
+  // ORBIT_DRONES_MUZZLE_FLASH_LIFETIME_SECONDS (0.08s). The per-frame
+  // tick in tickDroneDeployments ages both and calls updateBeam /
+  // updateMuzzleFlash while in-window.
+  beamLine: Mesh | null;
   muzzleFlash: Sprite;
   beamAge: number;
   muzzleFlashAge: number;
@@ -865,8 +870,12 @@ export function disposeDroneDeployment(dep: DroneDeploymentState, scene: Object3
     // enough to release the per-deployment GPU resource.
     if (drone.beamLine) {
       scene.remove(drone.beamLine);
+      // Phase 7i-2 (post-ship hotfix) — beam is now a CylinderGeometry
+      // mesh (not a Line + LineBasicMaterial). dispose() the
+      // CylinderGeometry (per-instance) and the MeshBasicMaterial
+      // (per-instance) just like the muzzle-flash path does.
       drone.beamLine.geometry.dispose();
-      (drone.beamLine.material as LineBasicMaterial).dispose();
+      (drone.beamLine.material as MeshBasicMaterial).dispose();
       drone.beamLine = null;
     }
     if (drone.muzzleFlash) {
