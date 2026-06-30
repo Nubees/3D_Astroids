@@ -2138,7 +2138,25 @@ export class Game {
     // ordering still respects projectile/asteroid prune: missiles and
     // projectiles don't interact with beam check (different hit channels)
     // so calling after tickDroneDeployments + tickHomingMissiles is safe.
-    this.checkDroneBeamHits();
+    //
+    // Phase 7i-2 hotfix #5 — checkDroneBeamHits now returns the Set of
+    // AsteroidState values it destroyed this frame. We prune
+    // this.asteroids BEFORE the next tickDroneDeployments call so the
+    // distributed picker sees a corpse-free list and hands each drone a
+    // fresh target. Without this filter, destroyed asteroids linger in
+    // this.asteroids (destroyIronAsteroid / destroyCrystal only remove
+    // the mesh + dispose GPU resources, they don't splice the wrapper)
+    // and the distributed picker re-ranks them as valid in-range targets
+    // → both drones in a multi-drone deployment end up firing at the
+    // same dead asteroid's frozen position → "shoots into middle space"
+    // visual bug. The filter mirrors the missile path's destroyedThisTick
+    // pattern (line ~2074) for consistency.
+    const droneDestroyedThisTick = this.checkDroneBeamHits();
+    if (droneDestroyedThisTick.size > 0) {
+      this.asteroids = this.asteroids.filter(
+        (a) => !droneDestroyedThisTick.has(a.state),
+      );
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3024,7 +3042,37 @@ export class Game {
   // which now runs BEFORE the respawn gate) keeps the entire drone system
   // (tick + targeting + fire + hit detection) live for the full 11s window
   // the player paid for, regardless of ship state.
-  private checkDroneBeamHits(): void {
+  //
+  // **Phase 7i-2 hotfix #5 — root-cause fix for the "both drone lasers shoot
+  // at the same empty space" bug.** The previous fix (hotfix #4 / commit
+  // 009f2e9) added a stale-target check that iterated this.asteroids looking
+  // for the beam's currentBeamTarget. That check passed even when the beam
+  // had just destroyed its own target — because destroyIronAsteroid /
+  // destroyCrystal remove the mesh + dispose GPU resources but DO NOT splice
+  // the LiveAsteroid out of this.asteroids. The reference sits in the array
+  // indefinitely, so:
+  //   1. currentBeamTarget reference-equality check says "still alive"
+  //      (false positive — it's a corpse)
+  //   2. findDistributedDroneTargets keeps re-ranking the corpse as a
+  //      valid in-range target, hands the SAME asteroid back to the drone
+  //      on the next tick
+  //   3. fireDroneBeam keeps firing at the corpse's frozen position for
+  //      the full 0.25s beam lifetime
+  //   4. With two drones in the same deployment, both pick the same
+  //      corpse (it's the "closest" by distance), both beams converge on
+  //      the same dead-position — the "shooting at empty space" visual.
+  // The fix mirrors the missile path at line ~2074: checkDroneBeamHits now
+  // returns a Set<AsteroidState> of every asteroid state it destroyed via
+  // dep.beamHitCallback this frame. updateActiveDeployments filters those
+  // states out of this.asteroids immediately after, so the distributed
+  // picker next frame sees a corpse-free list. The stale-target loop
+  // becomes correct (no corpse to false-positive on) and clearDroneBeam
+  // is no longer needed for the self-kill case (the corpse is gone).
+  // We keep the stale-target loop for the cross-system-kill case
+  // (sibling beam / player blaster already removed the asteroid) where
+  // the destroyedThisTick filter ran earlier in the same frame.
+  private checkDroneBeamHits(): Set<AsteroidState> {
+    const destroyed = new Set<AsteroidState>();
     for (const dep of this.activeDeployments) {
       if (dep.fadeTimer > 0) continue; // no hits during fade-out
       for (const drone of dep.perDrone) {
@@ -3045,6 +3093,15 @@ export class Game {
         // not in this.asteroids, clear immediately. The distributed
         // picker (findDistributedDroneTargets) will hand the drone a
         // fresh target next frame, so it can fire again right away.
+        //
+        // Phase 7i-2 hotfix #5 — this check now correctly identifies
+        // the self-kill case AFTER the asteroid has been filtered out
+        // by the new destroyed-set filter below. Pre-fix, the corpse
+        // was still in this.asteroids (destroyIronAsteroid doesn't
+        // prune), so the check returned true even for corpses and the
+        // beam kept pointing at the dead position. The new filter
+        // removes the corpse first, then this check returns false,
+        // then clearDroneBeam hides the beam.
         let targetStillLive = false;
         for (const live of this.asteroids) {
           if (live.state === target) {
@@ -3064,6 +3121,17 @@ export class Game {
             target.position.x, target.position.y,
           );
           if (dist <= BEAM_HIT_RADIUS + radius) {
+            // Phase 7i-2 hotfix #5 — only collect destroyed state for
+            // non-TINY hits. TINY knockback (onDroneBeamHitAsteroid's
+            // TINY branch) does NOT destroy the asteroid — it just
+            // shoves it with a velocity impulse. Adding a TINY state
+            // here would prune it from this.asteroids and the next
+            // frame's distributed picker would lose it. Iron LARGE /
+            // MEDIUM / SMALL and CRYSTAL all fall through to
+            // destroyAsteroid, so they're correctly collected here.
+            if (live.state.size !== AsteroidSize.TINY) {
+              destroyed.add(live.state);
+            }
             if (dep.beamHitCallback) {
               dep.beamHitCallback(live.state, dep.tier);
             }
@@ -3083,6 +3151,7 @@ export class Game {
         }
       }
     }
+    return destroyed;
   }
 
   private destroyAsteroid(target: LiveAsteroid, source: KillSource = 'BULLET'): void {
