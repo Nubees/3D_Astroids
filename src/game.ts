@@ -189,6 +189,7 @@ import {
   DroneDeploymentState,
   HomingMissileState,
   VolleySchedule,
+  clearDroneBeam, // Phase 7i-2 hotfix — hide beam mesh + clear target on hit
   scheduleMissileVolley,
   spawnDroneDeployment,
   tickDroneDeployments,
@@ -929,6 +930,21 @@ export class Game {
       useActive2IsChargeUp: rawInput.useActive2IsChargeUp,
     };
 
+    // Phase 7i-2 hotfix — drone system must keep ticking during ship
+    // respawn. The respawn early-return below (line ~933) skips EVERY
+    // per-frame ticker including updateActiveDeployments, which freezes
+    // elapsedSeconds/remaining/sceneClock + beam-vs-asteroid hit detection.
+    // User-visible symptom: the drone's in-flight beam visually sticks
+    // pointing at the last acquired (now stale) asteroid position (looks
+    // like "shoots into middle space") and any prior-frame beam-hit
+    // pickup drops float uncollected until the player respawns. Calling
+    // updateActiveDeployments here, BEFORE the respawn gate, keeps the
+    // full 11s window the player paid for alive regardless of ship state.
+    // Note: updateActiveDeployments now also internally drives beam
+    // hit detection (was at the end of handleCollisions, gated by the
+    // same respawn flow), so this single move covers both.
+    this.updateActiveDeployments(deltaTime);
+
     // Respawn flow: ship is dead/exploding; skip gameplay until it revives.
     if (this.respawnPhase !== 'none') {
       this.updateRespawn(deltaTime, input);
@@ -971,7 +987,13 @@ export class Game {
     this.updateActivePickupEffects(deltaTime);
     this.updatePickups(deltaTime);
     this.updateActiveAmmoCooldowns(deltaTime);
-    this.updateActiveDeployments(deltaTime);
+    // Phase 7i-2 hotfix — updateActiveDeployments was REMOVED from this
+    // post-respawn block. It now lives ABOVE the respawn early-return so
+    // the drone system (tick + beam-vs-asteroid hits) stays alive during
+    // ship death. Leaving a duplicate call here would double-tick the
+    // drone state machine (orbit, fire timer, beam, kill sparks) and risk
+    // double-firing the beamHitCallback. See the explanatory comment at
+    // the new call site above the respawn gate.
     // Phase 7 — active input dispatch (Digit1/2/3 → BOMB/DRONES/MISSILES).
     if (input.useActive1) this.useActiveItem(PickupKind.BOMB_STRIKE);
     // Phase 7i-2 (Task 8) — Digit2 charge-up hold. Three states:
@@ -2104,6 +2126,19 @@ export class Game {
     // them from this.droneKillSparks. Safe to call every frame even when
     // the array is empty (filter on an empty array is a no-op).
     this.updateDroneKillSparks(deltaTime);
+    // Phase 7i-2 hotfix — beam-vs-asteroid hit detection used to live at
+    // the end of handleCollisions. handleCollisions is gated by the ship-
+    // alive path (Game.update returns early when respawnPhase !== 'none'),
+    // so a player death mid-deployment would freeze drone targeting + beam
+    // hits. The beam visually stuck pointing at the last acquired (now
+    // stale) asteroid position and any prior-frame pickup drops floated
+    // in the world. Moving the check here (inside updateActiveDeployments,
+    // which now runs before the respawn gate) keeps the entire drone
+    // system live for the full 11s window regardless of ship state. The
+    // ordering still respects projectile/asteroid prune: missiles and
+    // projectiles don't interact with beam check (different hit channels)
+    // so calling after tickDroneDeployments + tickHomingMissiles is safe.
+    this.checkDroneBeamHits();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2954,24 +2989,42 @@ export class Game {
     }
 
     this.asteroids = aliveAsteroids;
+  }
 
-    // Phase 7i-2 (Task 9) — beam-vs-asteroid hit detection. For every
-    // active deployment, for every drone with a currentBeamTarget, check
-    // whether the line segment drone→target passes within
-    // (BEAM_HIT_RADIUS + asteroid.radius) of each asteroid's centre. If so,
-    // call dep.beamHitCallback (set in useActiveItem at deploy time) which
-    // applies TINY-knockback or destroyAsteroid + the kill-sparks VFX.
-    //
-    // The per-beam-once throttling lives in PerDroneState.beamHasHitTarget
-    // (see src/active-deployments.ts Task 9 DELTA): fireDroneBeam sets it
-    // false on every shot, and the first hit in this loop flips it true
-    // via the closure. Subsequent frames within the same 0.25s beam window
-    // see true and short-circuit. The check is placed AFTER the
-    // projectile/asteroid loop above so any projectile-driven destruction
-    // has already pruned this.asteroids, and the beam check sees the
-    // post-prune list. We iterate asteroids via .state so the callback
-    // gets the same AsteroidState the rest of the engine uses; lookup to
-    // LiveAsteroid happens inside onDroneBeamHitAsteroid.
+  // Phase 7i-2 (Task 9) — beam-vs-asteroid hit detection. For every
+  // active deployment, for every drone with a currentBeamTarget, check
+  // whether the line segment drone→target passes within
+  // (BEAM_HIT_RADIUS + asteroid.radius) of each asteroid's centre. If so,
+  // call dep.beamHitCallback (set in useActiveItem at deploy time) which
+  // applies TINY-knockback or destroyAsteroid + the kill-sparks VFX.
+  //
+  // The per-beam-once throttling lives in PerDroneState.beamHasHitTarget
+  // (see src/active-deployments.ts Task 9 DELTA): fireDroneBeam sets it
+  // false on every shot, and the first hit in this loop flips it true
+  // via the closure. Subsequent frames within the same 0.25s beam window
+  // see true and short-circuit.
+  //
+  // We iterate asteroids via .state so the callback gets the same
+  // AsteroidState the rest of the engine uses; lookup to LiveAsteroid
+  // happens inside onDroneBeamHitAsteroid.
+  //
+  // **Phase 7i-2 hotfix — respawn-gate independent hit check.**
+  // The original location was at the end of handleCollisions. handleCollisions
+  // is gated by the ship-alive path: if the player dies mid-deployment the
+  // respawn early-return at the top of Game.update() skips EVERY per-frame
+  // ticker, including updateActiveDeployments and handleCollisions. Result:
+  // the deployment's elapsedSeconds/remaining/sceneClock freeze, the drone
+  // re-acquires no new target, and the in-flight beam visually sticks pointing
+  // at the last acquired (now stale) asteroid position. The pickup drop
+  // (maybeDropPickup inside onDroneBeamHitAsteroid → destroyAsteroid) also
+  // pauses — but the *prior frame's* beam hits still spawned pickups which
+  // drift in space and get collected when the player respawns, giving the
+  // "shoots into middle space and produces a collectable" impression.
+  // Extraction into a standalone method (called from updateActiveDeployments,
+  // which now runs BEFORE the respawn gate) keeps the entire drone system
+  // (tick + targeting + fire + hit detection) live for the full 11s window
+  // the player paid for, regardless of ship state.
+  private checkDroneBeamHits(): void {
     for (const dep of this.activeDeployments) {
       if (dep.fadeTimer > 0) continue; // no hits during fade-out
       for (const drone of dep.perDrone) {
@@ -2991,6 +3044,16 @@ export class Game {
               dep.beamHitCallback(live.state, dep.tier);
             }
             drone.beamHasHitTarget = true;
+            // Phase 7i-2 hotfix — clearDroneBeam hides the beam mesh
+            // AND nulls drone.currentBeamTarget so the beam doesn't keep
+            // pointing at the destroyed asteroid's last-known position
+            // for the remaining 0.25s beam lifetime. Without this, the
+            // visual "shoots into middle space" (the destroyed FX
+            // position near origin) for a quarter second after every
+            // hit. The beam's own per-frame tick also clears
+            // currentBeamTarget when beamAge >= BEAM_LIFETIME — this
+            // just makes the cut-off immediate.
+            clearDroneBeam(drone);
             break; // one hit per beam — no need to test other asteroids
           }
         }

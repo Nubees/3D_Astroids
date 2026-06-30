@@ -405,6 +405,60 @@ export function findNearestAsteroid(
 }
 
 /**
+ * Phase 7i-2 (Task 10) — distribute N targets across M drones so each drone
+ * gets its OWN asteroid (or null if none in range) instead of all drones
+ * racing to shoot the single nearest asteroid.
+ *
+ * Strategy: rank all in-range asteroids by distance to the shipPosition
+ * (the orbital center). Take the top M asteroids and assign
+ * drone[i] -> asteroid[i]. If fewer in-range asteroids than drones, the
+ * extras get null (drone has nothing to shoot, fire-timer does not
+ * advance, no beam fires — drone is "idle but vigilant").
+ *
+ * This is the per-deployment one-shot allocation: each tick re-runs
+ * findDistributedDroneTargets against the FRESH asteroids list, so a
+ * destroyed target naturally drops out and the next tick re-distributes
+ * the survivors across the drones. No sticky-target bookkeeping needed
+ * — the freshly re-acquired assignment IS the new sticky lock for that
+ * one frame, and it changes the moment an asteroid is destroyed.
+ *
+ * Why shipPosition-relative and not per-drone-position-relative:
+ * the drones orbit the ship, so the SHIP is the natural focal point.
+ * "First drone targets the closest, second targets the second-closest"
+ * is the simplest stable assignment and matches the user's
+ * "each drone must shoot at its own target" request. The previous
+ * per-drone findNearestAsteroid (probe from each drone's orbital point)
+ * picked the same nearest asteroid for every drone in the common case
+ * where the nearest asteroid was within range of all drones.
+ */
+export function findDistributedDroneTargets(
+  asteroids: AsteroidState[],
+  shipPosition: Vector2,
+  droneCount: number,
+  maxRadius: number,
+): (AsteroidState | null)[] {
+  if (droneCount <= 0) return [];
+  // Rank in-range asteroids by distance to the ship. Use a single pass
+  // to avoid sorting a giant array when most asteroids are out of range.
+  const inRange: { a: AsteroidState; d: number }[] = [];
+  for (const a of asteroids) {
+    if (missileIgnoresAsteroid(a)) continue;
+    const d = Math.hypot(a.position.x - shipPosition.x, a.position.y - shipPosition.y);
+    if (d <= maxRadius) {
+      inRange.push({ a, d });
+    }
+  }
+  // Sort ascending by distance — O(N log N) but N is small (in-range
+  // subset, typically < 10 asteroids during gameplay).
+  inRange.sort((p, q) => p.d - q.d);
+  const result: (AsteroidState | null)[] = [];
+  for (let i = 0; i < droneCount; i++) {
+    result.push(inRange[i]?.a ?? null);
+  }
+  return result;
+}
+
+/**
  * Find the farthest asteroid from `position` within `maxRadius`. Returns
  * null if none in range. Used by Phase 7c-2 "far tier" missiles (volleyIndex
  * >= NEAR_TIER_COUNT) so the last 3 missiles in a 6-volley hit the back of
@@ -620,22 +674,36 @@ export function tickDroneDeployments(
     // Phase 7i Sprint 1 — distribute drones evenly around the orbit (was
     // "opposite sides" 180° offsets). phaseOffset[i] = i * (2π / droneCount).
     // Larger tier counts naturally distribute on the same radius.
-    const droneCount = dep.perDrone.length;
-    for (let i = 0; i < droneCount; i++) {
+    // Phase 7i-2 (Task 10) — distribute targets across all drones in this
+    // deployment so each drone fires at a DIFFERENT asteroid (when enough
+    // in-range asteroids exist). Without this, every drone in a multi-drone
+    // tier would call findNearestAsteroid and pick the same single nearest
+    // asteroid — visual swarm collapses to a single beam, and the rest of
+    // the drones are wasted DPS. The helper is called ONCE per tick (not
+    // per drone) and returns a (droneCount)-sized array; per-drone index
+    // `i` reads from `distributedTargets[i]`. Re-runs every frame against
+    // the fresh asteroids list, so a destroyed target naturally drops out
+    // and the next tick redistributes the survivors.
+    const distributedTargets = findDistributedDroneTargets(
+      asteroids,
+      shipPosition,
+      dep.perDrone.length,
+      ORBIT_DRONES_TARGET_RADIUS,
+    );
+    for (let i = 0; i < dep.perDrone.length; i++) {
       const drone = dep.perDrone[i];
-      const angle = dep.sceneClock * ORBIT_ANGULAR_SPEED + i * (2 * Math.PI / droneCount);
+      const angle = dep.sceneClock * ORBIT_ANGULAR_SPEED + i * (2 * Math.PI / dep.perDrone.length);
       drone.mesh.position.x = shipPosition.x + Math.cos(angle) * ORBIT_DRONES_ORBIT_RADIUS;
       // Base Y is the orbital Y; updateDroneVisuals layers bobOffset on top
       // so we save it locally and pass it back in.
       const baseY = shipPosition.y + Math.sin(angle) * ORBIT_DRONES_ORBIT_RADIUS;
-      // Pick the target using current nearest (Task 5 may swap to
-      // findDroneTarget for crystal-priority). The bob offset has not been
-      // applied yet, so probe from the un-bobbed orbital point.
-      drone.currentTarget = findNearestAsteroid(
-        { x: drone.mesh.position.x, y: baseY },
-        asteroids,
-        ORBIT_DRONES_TARGET_RADIUS,
-      );
+      // Phase 7i-2 (Task 10) — per-drone distributed target. Replaces the
+      // per-drone findNearestAsteroid (which had every drone race to the
+      // same single asteroid). null means "no asteroid in range" — the
+      // fire timer below is gated on this, so the drone stays silent
+      // until a target appears (matches user's "only shoot when an
+      // asteroid is in range" requirement).
+      drone.currentTarget = distributedTargets[i] ?? null;
       updateDroneVisuals(
         drone.mesh,
         dep.sceneClock,
@@ -720,10 +788,21 @@ export function tickDroneDeployments(
           (ORBIT_DRONES_FIRE_INTERVAL_TAPER_END - ORBIT_DRONES_FIRE_INTERVAL_SECONDS)
             * taperFraction;
       }
-      drone.fireTimer += deltaTime;
+      // Fire-timer-in-range gate (Phase 7i-2 hotfix) — only advance
+      // the fire timer when the drone has a valid in-range target. If
+      // a drone has been idle (no asteroid within ORBIT_DRONES_TARGET_RADIUS)
+      // for 5 seconds, it must NOT fire into empty space AND it must
+      // fire the moment a target appears. This makes the firing feel
+      // "responsive" (wait for target → fire immediately when one
+      // appears) instead of "warmed up and firing into nothing".
+      const target = drone.currentTarget;
+      if (target) {
+        drone.fireTimer += deltaTime;
+      } else {
+        drone.fireTimer = 0;
+      }
       if (drone.fireTimer >= interval) {
         drone.fireTimer = 0;
-        const target = drone.currentTarget;
         if (target) {
           drone.fireFlashAge = 0;
           // Phase 7i-2 (Task 6) — beam fire replaces projectile fire.
@@ -1464,6 +1543,42 @@ export function fireDroneBeam(
       drone.mesh.position,
       { x: target.position.x, y: target.position.y, z: 0 },
     );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — clearDroneBeam (Phase 7i-2 hotfix)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: Immediately hide a drone's beam mesh AND clear its
+//          currentBeamTarget reference so the visual doesn't keep
+//          pointing at a destroyed asteroid's last-known position for
+//          the remaining ORBIT_DRONES_BEAM_LIFETIME_SECONDS (0.25s).
+// Setup:   Called from Game.checkDroneBeamHits (src/game.ts) the moment
+//          an intersection is registered — BEFORE the destroyed
+//          asteroid's reference goes stale.
+// Issues:  Pre-hotfix, the beam kept pointing at the destroyed
+//          asteroid's frozen position for the full 0.25s beam
+//          lifetime. When that position was near (0,0) (the world
+//          origin where the camera looks), the user saw "drones
+//          shooting into middle space and producing a collectable"
+//          (the destruction FX + score pickup spawn).
+// Fix:     Hide the beam mesh synchronously and clear the target
+//          reference. The beam's tick loop also clears
+//          currentBeamTarget at the end of its lifetime — clearing
+//          here just makes the visual cut off earlier.
+// Gotchas: We do NOT reset fireTimer here — the fire gate is
+//          currentTarget-based (added in the same hotfix), and as long
+//          as the distributed picker gives the drone a NEW target
+//          next frame, it can fire again immediately. This is correct:
+//          a beam that just destroyed an asteroid should NOT have to
+//          wait a full 0.4s fire interval before contributing again.
+//          beamHasHitTarget stays true until the NEXT fireDroneBeam
+//          call (re-armed there). No need to clear it here.
+// ═══════════════════════════════════════════════════════════════════════════
+export function clearDroneBeam(drone: PerDroneState): void {
+  drone.currentBeamTarget = null;
+  if (drone.beamLine) {
+    drone.beamLine.visible = false;
   }
 }
 
