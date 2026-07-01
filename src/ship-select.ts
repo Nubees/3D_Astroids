@@ -124,43 +124,31 @@ export class ShipSelectScreen {
     overlay.className = 'ship-select-overlay';
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // My Rules — Ship Select toolbar icons (top-left launcher trio)
+    // My Rules — Ship Select toolbar icons (top-left launcher pair)
     // ═══════════════════════════════════════════════════════════════════════════
     // Purpose: Give players a discoverable way to open the Ship Hangar
-    //          (tune exhaust flames), the Asteroid Lab (compare video-
-    //          textured asteroid methods, Phase 7h v7), and the Weapon
-    //          Lab (LAB-NO2 — Phase 7i-3, test the 3 active deployable
-    //          weapons + MAGNET buff in isolation).
-    // Setup:   Three small icons in the top-left of the overlay, side by
-    //          side as a toolbar trio. The Hangar navigates to
-    //          /ships-inspector.html; the Asteroid Lab navigates to
-    //          /test-lab/asteroid-lab.html; the Weapon Lab navigates to
-    //          /test-lab/weapon-lab.html. All three use the same
-    //          cyan-bordered hex clip-path visual treatment (see
-    //          .ship-select-{hangar,lab,weapon-lab}-icon in
-    //          ship-select.css) — only position differs.
+    //          (tune exhaust flames) AND the Asteroid Lab (compare 20
+    //          video-textured asteroid methods, Phase 7h v7) before flying.
+    // Setup:   Two small icons in the top-left of the overlay, side by
+    //          side as a toolbar pair. The Hangar navigates to
+    //          /ships-inspector.html; the Lab navigates to
+    //          /test-lab/asteroid-lab.html. Both use the same cyan-bordered
+    //          hex clip-path visual treatment (see .ship-select-{hangar,
+    //          lab}-icon in ship-select.css) — only position differs.
     // Issues:  Before Phase 7h v8 the hangar was the only launcher icon;
     //          the test lab was reachable only via direct URL. Players
     //          reviewing v6 / v7 / v8 video-asteroid methods had no
-    //          discoverable entry point. Before Phase 7i-3 the same was
-    //          true for the weapon testbed — players reviewing per-weapon
-    //          tuning (bomb timing, drone beam width, missile sprite)
-    //          had to play the full game.
-    // Fix:     Phase 7h v8 — added the Lab icon immediately to the right
-    //          of the Hangar icon (Hangar at left:18px, Lab at left:74px
-    //          — 44px button + 12px gap + 18px page padding).
-    //          Phase 7i-3 — added the Weapon Lab icon immediately to
-    //          the right of the Asteroid Lab icon (left:148px — same
-    //          44+12+18 math). The SVG is a crosshair with a small "2"
-    //          superscript so users can tell the three launcher icons
-    //          apart at a glance.
-    // Gotchas: All three icons live on the ship-select overlay which is
+    //          discoverable entry point.
+    // Fix:     Added the Lab icon immediately to the right of the
+    //          Hangar icon (Hangar at left:18px, Lab at left:74px —
+    //          44px button + 12px gap + 18px page padding).
+    // Gotchas: Both icons live on the ship-select overlay which is
     //          pointer-events: none — the icons themselves must opt back
     //          in with pointer-events: auto (handled by the shared CSS
     //          class). Returning players use browser back to return.
     //          publicDir is enabled in vite.config.ts so
-    //          public/test-lab/*.html ships to dist/ in production builds
-    //          alongside dist/ships-inspector.html.
+    //          public/test-lab/asteroid-lab.html ships to dist/ in
+    //          production builds alongside dist/ships-inspector.html.
     // ═══════════════════════════════════════════════════════════════════════════
     const hangarButton = document.createElement('button');
     hangarButton.className = 'ship-select-hangar-icon';
@@ -188,25 +176,6 @@ export class ShipSelectScreen {
       window.location.href = '/test-lab/asteroid-lab.html';
     });
     overlay.appendChild(labButton);
-
-    // Weapon Lab — Phase 7i-3 LAB-NO2 testbed at
-    // /test-lab/weapon-lab.html. Same visual treatment as the Asteroid
-    // Lab icon (cyan-bordered hex clip-path, 44x44). The SVG is a
-    // crosshair + lightning bolt — crosshair reads as "aim/weapon",
-    // lightning reads as "active deployable". A small "2" superscript
-    // label lives in the bottom-right of the icon so users can tell the
-    // two labs apart at a glance. Position: Hangar (left:18px) + 44px
-    // + Lab (left:74px) + 44px + 12px gap + 18px page padding = 148px.
-    const weaponLabButton = document.createElement('button');
-    weaponLabButton.className = 'ship-select-weapon-lab-icon';
-    weaponLabButton.type = 'button';
-    weaponLabButton.setAttribute('aria-label', 'Open Weapon Lab (LAB-NO2)');
-    weaponLabButton.title = 'Open Weapon Lab (LAB-NO2)';
-    weaponLabButton.innerHTML = `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/><path d="M12 1.5 L12 5"/><path d="M12 19 L12 22.5"/><path d="M1.5 12 L5 12"/><path d="M19 12 L22.5 12"/><text x="19" y="22" font-family="monospace" font-size="9" font-weight="bold" fill="currentColor" stroke="none">2</text></svg>`;
-    weaponLabButton.addEventListener('click', () => {
-      window.location.href = '/test-lab/weapon-lab.html';
-    });
-    overlay.appendChild(weaponLabButton);
 
     const title = document.createElement('h1');
     title.className = 'ship-select-title';

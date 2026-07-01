@@ -186,12 +186,6 @@ import {
 } from './pickups';
 import { shouldSplitForKillSource } from './game-helpers';
 import {
-  GameplayAsteroid,
-  GameplayContext,
-  useActiveItem as useActiveItemPure,
-  fireBombStrike as fireBombStrikePure,
-} from './gameplay-context';
-import {
   DroneDeploymentState,
   HomingMissileState,
   VolleySchedule,
@@ -1648,125 +1642,6 @@ export class Game {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // My Rules — buildGameplayContext (Phase 7i-3 refactor)
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Purpose: Construct a GameplayContext that wires production Game state
-  //          (asteroids, activeAmmo, deployments, etc.) and the side-effect
-  //          callbacks (screen flash, punch-zoom, edge flash, camera shake,
-  //          floating text, freeze-frame) into the lifted useActiveItem +
-  //          fireBombStrike free functions in src/gameplay-context.ts. The
-  //          lab mounts those SAME free functions and builds its own context
-  //          with no-op side-effect callbacks, so the bomb + drone + missile
-  //          fire paths in the lab and in production execute the SAME control
-  //          flow.
-  // Setup:   Called from the useActiveItem and fireBombStrike delegations
-  //          (lines 1844, 1891) right before they call the pure free
-  //          functions. Builds a fresh context per call (cheap — the
-  //          context is plain data, no heap allocation beyond ~20 closure
-  //          objects per call site).
-  // Issues:  (1) Field-name mismatch — production's magnet field is
-  //          `this.magnetBooster` (line 476) but gameplay-context.ts names
-  //          the same field `magnet` in its interface. The two are the
-  //          SAME data; the rename is intentional so the lab's context can
-  //          use a generic `magnet` field name without leaking the
-  //          production-side `magnetBooster` naming. (2) Type mismatch —
-  //          `this.asteroids: LiveAsteroid[]` (interface declared at
-  //          line 367) is structurally identical to `GameplayAsteroid[]`
-  //          (interface declared in gameplay-context.ts) but TypeScript
-  //          treats them as distinct because they are declared in different
-  //          files. We cast at the assignment site — the structures are
-  //          guaranteed to stay in sync (gameplay-context.ts:84-89
-  //          documents this). (3) The onDamageAsteroid callback forwards
-  //          the damage to this.destroyAsteroid, which mutates
-  //          `this.asteroids` in place (splice). The free function in
-  //          gameplay-context.ts also writes a NEW array to `ctx.asteroids`
-  //          after the damage pass — that assignment lands on the same
-  //          backing array reference because the field is a single
-  //          `let`-style property. The free function's caller reads
-  //          `ctx.asteroids` back out and walks it; we pass the LIVE
-  //          reference (not a copy) — otherwise the lab's mount would
-  //          diverge.
-  // Fix:     Phase 7i-3 refactor — production useActiveItem + fireBombStrike
-  //          became 1-line delegations to the pure free functions. This
-  //          method is the seam that keeps production behavior identical
-  //          while letting the lab mount the same code path.
-  // Gotchas: (1) onDamageAsteroid ignores its `damage` arg because
-  //          destroyAsteroid applies BOMB_STRIKE_DAMAGE internally for
-  //          the bomb path — the free function pre-applies the damage
-  //          AND the health check before calling the callback, so the
-  //          callback is just "destroy this asteroid, source = BOMB".
-  //          For DRONES, the callback is a separate path (beam hit
-  //          detection in active-deployments.ts fires it independently).
-  //          (2) onFloatingText passes the world-space position straight
-  //          to spawnFloatingTextAt with delaySeconds=0 + default color
-  //          #ff8800 (the bomb's own color). The lab omits this callback
-  //          entirely (no DOM HUD wrap). (3) onCameraShake takes the
-  //          MAX of (existing, new) so a second bomb layered on top of
-  //          a half-decayed shake extends the shake without doubling
-  //          the amplitude. (4) The cast `as GameplayAsteroid[]` for
-  //          the asteroids field is a structural cast — LiveAsteroid
-  //          has state + mesh + id; GameplayAsteroid has state + mesh;
-  //          the lab's local copy has the same shape so the cast is
-  //          safe in both directions.
-  // ═══════════════════════════════════════════════════════════════════════════
-  private buildGameplayContext(): GameplayContext {
-    return {
-      // ── Pure state ────────────────────────────────────────────────
-      scene: this.scene,
-      activeAmmo: this.activeAmmo,
-      activeDeployments: this.activeDeployments,
-      homingMissiles: this.homingMissiles,
-      missileVolleySchedules: this.missileVolleySchedules,
-      activeShockwaves: this.activeShockwaves,
-      activeCoreFlashes: this.activeCoreFlashes,
-      magnet: this.magnetBooster,
-      // The free function writes a new array to ctx.asteroids after the
-      // damage pass. The new array is reassigned into this.asteroids
-      // by the free function's caller, so we pass the LIVE reference
-      // (not a copy) — otherwise the lab's mount would diverge.
-      asteroids: this.asteroids as unknown as GameplayAsteroid[],
-
-      // ── Required: damage routing ─────────────────────────────────
-      onDamageAsteroid: (asteroid, _damage, source) => {
-        // gameplay-context.ts already decremented health and verified
-        // health <= 0 before calling this. We just route to the
-        // production destroy path with the bomb's source attribution.
-        this.destroyAsteroid(asteroid as unknown as LiveAsteroid, source);
-      },
-
-      // ── Optional: visual / DOM side-effects ──────────────────────
-      onScreenFlash: () => this.triggerScreenFlash(),
-      onPunchZoom: () => this.triggerBombPunchZoom(),
-      onEdgeFlash: () => this.triggerBombEdgeFlash(),
-      onCameraShake: (amplitude, durationSeconds) => {
-        // MAX semantics so a second bomb layered on a half-decayed
-        // shake does not double-amplify — matches the inline pattern
-        // in this.destroyCrystal (line 2286-2287) and the missile-
-        // impact path (line 2386-2390).
-        this.cameraShakeAmplitude = Math.max(this.cameraShakeAmplitude, amplitude);
-        this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, durationSeconds);
-      },
-      onFloatingText: (text, position, color) => {
-        // spawnFloatingTextAt(text, worldPos, delaySeconds=0,
-        // color, verticalOffset=0, horizontalOffset=0, fontSize=18,
-        // duration=5.0). We pass the bomb's own color through and let
-        // the rest of the args use production's defaults so the
-        // floating text style is identical to the pre-refactor
-        // inline call.
-        this.spawnFloatingTextAt(text, position, 0, color, 0, 0, 18, 1.0);
-      },
-      onFreezeFrames: (ticks) => {
-        this.freezeFramesRemaining = ticks;
-      },
-
-      // ── Per-frame read ───────────────────────────────────────────
-      gameTimeSeconds: this.gameTimeSeconds,
-      getShipPosition: () => this.ship.state.position,
-      getShipAim: () => this.ship.state.aim,
-    };
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
   // My Rules — Active Item Dispatch (Phase 7 Task 12 → Phase 7b Task 8)
   // ═══════════════════════════════════════════════════════════════════════════
   // Purpose:  Wire Digit1/2/3 → consumeActiveCharge → per-kind deploy or impact.
@@ -1859,22 +1734,68 @@ export class Game {
     kind: PickupKind,
     opts?: { isChargeUp?: boolean },
   ): void {
-    // Phase 7i-3 refactor — the weapon-firing dispatcher is now a free
-    // function in src/gameplay-context.ts. The lab mounts the SAME
-    // function. The remaining work here is the per-instance wiring that
-    // needs `this` (drone beam-hit callback closure).
-    const previousDroneCount = this.activeDeployments.length;
-    useActiveItemPure(this.buildGameplayContext(), kind, opts);
-    // Phase 7i-2 (Task 9) — wire the beam-vs-asteroid hit callback on the
-    // most recently pushed deployment. The free function pushes onto
-    // activeDeployments exactly once per DRONES dispatch (or zero times
-    // if a deployment was already active and the charge was refunded).
-    if (
-      this.activeDeployments.length > previousDroneCount &&
-      kind === PickupKind.ORBIT_DRONES
-    ) {
-      const dep = this.activeDeployments[this.activeDeployments.length - 1];
+    if (!canFireActive(this.activeAmmo[kind])) return;
+    if (!consumeActiveCharge(this.activeAmmo[kind], kind)) return;
+    const spec = ACTIVE_KIND_SPECS[kind];
+    const shipPos = this.ship.state.position;
+    // I1 dispatch: routed through displayName so adding a new active kind
+    // requires only a new `else if` branch below — no PickupKind switch
+    // table to keep in sync.
+    if (spec.displayName === 'BOMB') {
+      this.fireBombStrike(shipPos);
+    } else if (spec.displayName === 'DRONES') {
+      // Block re-press while a deployment is live or fading.
+      if (this.activeDeployments.length > 0) {
+        // Refund the charge so the press doesn't silently consume a charge.
+        this.activeAmmo[kind].charges += 1;
+        this.activeAmmo[kind].cooldownRemaining = 0;
+        return;
+      }
+      // Phase 7i Sprint 3 — charge-stack deploy. consumeActiveCharge already
+      // decremented charges by 1, so the CURRENT charges field is banked-1.
+      // We add 1 to recover the banked count and pass it as tier (1/2/3),
+      // then reset charges to 0 — the player banked 3 pickups but the cost
+      // is still one cooldown. Example: banked 3, pressed Digit2 → tier=3
+      // deploy (4 drones), charges=0, cooldown=4s.
+      const tier = (this.activeAmmo[kind].charges + 1) as 1 | 2 | 3;
+      this.activeAmmo[kind].charges = 0;
+      const dep = spawnDroneDeployment(shipPos, this.scene, tier);
+      // Phase 7i-2 (Task 9) — wire the beam-vs-asteroid hit callback. The
+      // dispatch field was added in Task 6 (default null) and is the single
+      // hook through which fireDroneBeam's beam line routes to the engine's
+      // damage path. Setting it ONCE in the deploy path is cleaner than
+      // checking it inside the per-frame intersection loop (which would
+      // need a guard or no-op) — every beam in this deployment now shares
+      // the same handler. The handler (`onDroneBeamHitAsteroid` method
+      // below) is bound via an arrow closure to keep `this` pointing at
+      // the Game instance; the callback's own signature is
+      // `(asteroid, tier) => void` so the method's signature is
+      // `(asteroid: AsteroidState, tier: 1 | 2 | 3) => void`.
       dep.beamHitCallback = (asteroid, t) => this.onDroneBeamHitAsteroid(asteroid, t);
+      // Phase 7i-2 (Task 8) — charge-up apply. When Digit2 was held past
+      // ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS, the deploy shockwave grows
+      // 25% larger (end-scale 2.0 → 2.5). We do this by pre-scaling the
+      // base ring.scale — updateDeployShockwave hard-codes 0.5 → 2.0
+      // inside orbit-drone-vfx.ts:281-283, so multiplying by 1.25 at
+      // spawn time maps the tick loop's range to 0.625 → 2.5 without
+      // touching the VFX module. The drone lerp duration distinction
+      // (0.5s vs 0.7s) is conceptual: spawnDroneDeployment places
+      // drones at the ship and tickDroneDeployments snaps them to
+      // their orbit slots on the first frame — there is no actual
+      // per-drone lerp to lengthen. Documented as a known scope
+      // limitation in the Task 8 report.
+      const isChargeUp = opts?.isChargeUp ?? false;
+      if (isChargeUp) {
+        dep.deployShockwave.scale.set(1.25, 1.25, 1);
+      }
+      this.activeDeployments.push(dep);
+    } else if (spec.displayName === 'MISSILES') {
+      // Phase 7b — push a VolleySchedule; the schedule is drained each frame
+      // by tickMissileVolleySchedules inside updateActiveDeployments. The
+      // 4 missiles launch at 0/180/360/540ms with narrow angular spread.
+      this.missileVolleySchedules.push(
+        scheduleMissileVolley(shipPos, this.ship.state.aim),
+      );
     }
   }
 
@@ -1903,11 +1824,109 @@ export class Game {
   //          a single shared Shockwave + text emission is enough.
   // ═══════════════════════════════════════════════════════════════════════════
   private fireBombStrike(position: Vector2): void {
-    // Phase 7i-3 refactor — the bomb strike is now a free function in
-    // src/gameplay-context.ts. The lab mounts the SAME function. The
-    // context wires all the production-only DOM / score / shake side
-    // effects; the lab omits them.
-    fireBombStrikePure(this.buildGameplayContext(), position);
+    // Phase 7c — 3-phase time sequence. Replaces Phase 7b's 6-layer combo
+    // (which peaked all layers in the same frame, reading as additive soup).
+    // Phase 1 (T+0ms):   DOM white-flash + freeze-frame (2 ticks) + CSS punch-zoom + layer 1 core flash
+    // Phase 2 (T+50ms):  primary 12u shock ring + 30 streamers (layers 2, 4)
+    // Phase 3 (T+200ms): camera shake onset (0.8/0.5s, bumped from 0.6/0.4)
+    //                    + debris chunks (layer 5) at T+300ms
+    // Phase 4 (T+400ms): secondary 14u ring (was T+80ms with 10u radius)
+    // Tail    (T+800ms): residual glow sprite (existing via secondary ring's fade)
+    //
+    // The 3 phases feel distinct because of:
+    //   - DOM flash (high attention, 80ms ease-out)
+    //   - Freeze-frame (2 ticks skipped, ~60ms of frozen arena)
+    //   - Punch-zoom (canvas scale 1.02, 100ms ease-out)
+    //   - 50ms gap before the primary ring (so the flash reads as a beat
+    //     BEFORE the ring, not concurrently with it)
+
+    // T+0: DOM white-flash (zero-WebGL screen-level beat).
+    this.triggerScreenFlash();
+    // T+0: Freeze-frame (skip 2 update ticks).
+    this.freezeFramesRemaining = FREEZE_FRAME_TICKS;
+    // T+0: CSS punch-zoom.
+    this.triggerBombPunchZoom();
+
+    // Layer 1: Hot core flash — single-frame additive sphere that expands to 1u.
+    const core = new Mesh(
+      new SphereGeometry(0.5, 16, 16),
+      new MeshBasicMaterial({
+        color: 0xffaa00,
+        transparent: true,
+        opacity: 0.7,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    core.position.set(position.x, position.y, -0.1);
+    this.scene.add(core);
+    this.activeCoreFlashes.push({ mesh: core, age: 0, duration: 0.1 });
+
+    // T+50: Primary shock ring (16u radius, orange) — Phase 7d: was 12u, bumped to match 15u damage radius.
+    setTimeout(() => {
+      this.activeShockwaves.push(new Shockwave(position, 0xff8800, 1.0, 16.0));
+    }, 50);
+
+    // T+50: Shock-front particles (30 outward streamers, 30u/s so they reach the 15u edge in 0.5s lifetime).
+    setTimeout(() => {
+      emitShockwaveParticles(this.scene, position.x, position.y, {
+        count: 30,
+        speed: 30,
+        color: 0xffcc66,
+        lifetime: 0.5,
+      });
+    }, 50);
+
+    // T+200: Camera shake onset, bumped 0.6/0.4 → 0.8/0.5.
+    setTimeout(() => {
+      this.cameraShakeAmplitude = Math.max(this.cameraShakeAmplitude, 0.8);
+      this.cameraShakeRemaining = Math.max(this.cameraShakeRemaining, 0.5);
+    }, 200);
+
+    // T+300: Debris chunks (8 faster, bigger, 30u/s to reach new 15u radius).
+    setTimeout(() => {
+      emitShockwaveParticles(this.scene, position.x, position.y, {
+        count: 8,
+        speed: 30,
+        color: 0xffaa00,
+        lifetime: 0.6,
+        isDebris: true,
+      });
+    }, 300);
+
+    // T+400: Secondary outer ring (18u radius, cooler red-orange) — Phase 7d: was 14u, bumped to overshoot new 15u damage radius.
+    setTimeout(() => {
+      this.activeShockwaves.push(new Shockwave(position, 0xff4400, 0.5, 18.0));
+    }, 400);
+
+    // DOM edge flash (Phase 7b — kept).
+    this.triggerBombEdgeFlash();
+    // Shards cleansing — restores the EXPANSION spec's "I countered the Shard Swarm" payoff.
+    this.activeShards = this.activeShards.filter(
+      (s) =>
+        Math.hypot(
+          s.state.position.x - position.x,
+          s.state.position.y - position.y,
+        ) > BOMB_STRIKE_RADIUS,
+    );
+    // Damage pass (unchanged).
+    const alive: LiveAsteroid[] = [];
+    for (const asteroid of this.asteroids) {
+      const d = Math.hypot(
+        asteroid.state.position.x - position.x,
+        asteroid.state.position.y - position.y,
+      );
+      if (d <= BOMB_STRIKE_RADIUS) {
+        asteroid.state.health = Math.max(0, asteroid.state.health - BOMB_STRIKE_DAMAGE);
+        if (asteroid.state.health <= 0) {
+          this.destroyAsteroid(asteroid, 'BOMB');
+          continue;
+        }
+      }
+      alive.push(asteroid);
+    }
+    this.asteroids = alive;
+    this.spawnFloatingTextAt('BOMB!', position, 0, '#ff8800', 0, 0, 18, 1.0);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

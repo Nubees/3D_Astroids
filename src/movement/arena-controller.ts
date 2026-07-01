@@ -15,12 +15,6 @@ import { InputState } from '../input';
 // Gotchas: Camera stays at origin; asteroids spawn from any arena edge and drift
 //          inward to create unpredictable approach angles. Bound bounce uses
 //          damping so the ship does not ping-pong forever.
-//
-//          Phase 7i-3 refactor — the body of `apply()` is lifted into a free
-//          function `applyArenaShipMovement` so the weapon testbed lab can
-//          call the SAME movement code without subclassing the controller.
-//          The controller's apply() becomes a 1-line delegation. Both
-//          production and the lab execute the same control flow.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const ARENA_WIDTH = 26;
@@ -30,72 +24,6 @@ const SHIP_ACCEL = 12;
 const BOUNCE_DAMPING = 0.55;
 const SPAWN_MIN_INTERVAL = 3.0;
 const SPAWN_MAX_INTERVAL = 5.0;
-
-/**
- * Pure arena-movement step: applies thrust, caps top speed, integrates
- * position, and bounces off arena walls. Lifted from
- * ArenaMovementController.apply() so the weapon testbed lab can call the
- * SAME movement code path as production (Phase 7i-3 refactor).
- *
- * Byte-equivalent to the original method body. Mutates `ship.position`
- * and `ship.velocity` in place (same pattern as the controller's apply).
- */
-export function applyArenaShipMovement(
-  ship: ShipState,
-  input: InputState,
-  deltaTime: number,
-): void {
-  // Apply thrust relative to the ship's facing direction. Up/W is forward
-  // thrust along aim, Down/S is reverse thrust, Left/Right strafe sideways.
-  // No input means coast on momentum.
-  const aim = ship.aim;
-  const forward = input.move.y; // +1 forward, -1 reverse
-  const strafe = input.move.x;  // +1 right, -1 left from the ship's view
-  const accelX = (forward * aim.x + strafe * aim.y) * SHIP_ACCEL;
-  const accelY = (forward * aim.y - strafe * aim.x) * SHIP_ACCEL;
-
-  ship.velocity = {
-    x: ship.velocity.x + accelX * deltaTime,
-    y: ship.velocity.y + accelY * deltaTime,
-  };
-
-  // Cap top speed so the ship remains controllable.
-  const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
-  if (speed > SHIP_MAX_SPEED) {
-    const scale = SHIP_MAX_SPEED / speed;
-    ship.velocity = {
-      x: ship.velocity.x * scale,
-      y: ship.velocity.y * scale,
-    };
-  }
-
-  ship.position = {
-    x: ship.position.x + ship.velocity.x * deltaTime,
-    y: ship.position.y + ship.velocity.y * deltaTime,
-  };
-
-  // Soft bounce at arena bounds.
-  const halfW = ARENA_WIDTH / 2;
-  const halfH = ARENA_HEIGHT / 2;
-  let { x: vx, y: vy } = ship.velocity;
-  let { x: px, y: py } = ship.position;
-  if (px > halfW) {
-    px = halfW;
-    vx *= -BOUNCE_DAMPING;
-  } else if (px < -halfW) {
-    px = -halfW;
-    vx *= -BOUNCE_DAMPING;
-  }
-  if (py > halfH) {
-    py = halfH;
-    vy *= -BOUNCE_DAMPING;
-  } else if (py < -halfH) {
-    py = -halfH;
-    vy *= -BOUNCE_DAMPING;
-  }
-  ship.position = { x: px, y: py };
-  ship.velocity = { x: vx, y: vy };
-}
 
 export class ArenaMovementController implements MovementController {
   readonly mode = MovementMode.ARENA;
@@ -108,9 +36,56 @@ export class ArenaMovementController implements MovementController {
   private lastSpawnPosition: Vector2 = { x: 0, y: 10 };
 
   apply(ship: ShipState, input: InputState, deltaTime: number): void {
-    // Phase 7i-3 refactor — the body of apply() is now a free function in
-    // this module (applyArenaShipMovement). The lab calls it directly.
-    applyArenaShipMovement(ship, input, deltaTime);
+    // Apply thrust relative to the ship's facing direction. Up/W is forward
+    // thrust along aim, Down/S is reverse thrust, Left/Right strafe sideways.
+    // No input means coast on momentum.
+    const aim = ship.aim;
+    const forward = input.move.y; // +1 forward, -1 reverse
+    const strafe = input.move.x;  // +1 right, -1 left from the ship's view
+    const accelX = (forward * aim.x + strafe * aim.y) * SHIP_ACCEL;
+    const accelY = (forward * aim.y - strafe * aim.x) * SHIP_ACCEL;
+
+    ship.velocity = {
+      x: ship.velocity.x + accelX * deltaTime,
+      y: ship.velocity.y + accelY * deltaTime,
+    };
+
+    // Cap top speed so the ship remains controllable.
+    const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+    if (speed > SHIP_MAX_SPEED) {
+      const scale = SHIP_MAX_SPEED / speed;
+      ship.velocity = {
+        x: ship.velocity.x * scale,
+        y: ship.velocity.y * scale,
+      };
+    }
+
+    ship.position = {
+      x: ship.position.x + ship.velocity.x * deltaTime,
+      y: ship.position.y + ship.velocity.y * deltaTime,
+    };
+
+    // Soft bounce at arena bounds.
+    const halfW = ARENA_WIDTH / 2;
+    const halfH = ARENA_HEIGHT / 2;
+    let { x: vx, y: vy } = ship.velocity;
+    let { x: px, y: py } = ship.position;
+    if (px > halfW) {
+      px = halfW;
+      vx *= -BOUNCE_DAMPING;
+    } else if (px < -halfW) {
+      px = -halfW;
+      vx *= -BOUNCE_DAMPING;
+    }
+    if (py > halfH) {
+      py = halfH;
+      vy *= -BOUNCE_DAMPING;
+    } else if (py < -halfH) {
+      py = -halfH;
+      vy *= -BOUNCE_DAMPING;
+    }
+    ship.position = { x: px, y: py };
+    ship.velocity = { x: vx, y: vy };
   }
 
   clampToBounds(position: Vector2): Vector2 {

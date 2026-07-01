@@ -28,16 +28,13 @@
   pointer-events: auto;
 }
 
-/* My Rules — Ship Select toolbar icons (top-left launcher trio).
+/* My Rules — Ship Select toolbar icons (top-left launcher pair).
    Phase 7h v8 added the Asteroid Lab icon next to the existing Ship
-   Hangar icon. Phase 7i-3 added the Weapon Lab (LAB-NO2) icon as the
-   third toolbar entry. All three buttons share the visual treatment
-   (cyan border, hex clip-path, 44x44, hover scale + glow) — they
-   differ only in position (left:18px for Hangar, left:74px for Lab,
-   left:148px for Weapon Lab) and SVG inside. */
+   Hangar icon. Both buttons share the visual treatment (cyan border,
+   hex clip-path, 44x44, hover scale + glow) — they differ only in
+   position (left:18px for Hangar, left:74px for Lab) and SVG inside. */
 .ship-select-hangar-icon,
-.ship-select-lab-icon,
-.ship-select-weapon-lab-icon {
+.ship-select-lab-icon {
   position: absolute;
   top: 18px;
   appearance: none;
@@ -71,14 +68,8 @@
   left: 74px;
 }
 
-.ship-select-weapon-lab-icon {
-  /* Hangar (44px) + 12px gap + Lab (44px) + 12px gap + 18px padding = 130px */
-  left: 130px;
-}
-
 .ship-select-hangar-icon:hover,
-.ship-select-lab-icon:hover,
-.ship-select-weapon-lab-icon:hover {
+.ship-select-lab-icon:hover {
   transform: scale(1.08);
   border-color: #00eaff;
   box-shadow: 0 0 18px rgba(0, 234, 255, 0.45);
