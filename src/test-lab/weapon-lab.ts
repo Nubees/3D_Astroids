@@ -7,32 +7,41 @@
 //          presses Digit1/2/3/4 to fire each weapon at 10 spawned iron
 //          asteroids — no level / wave / pickup-drop system, no scoring.
 //          Camera follows the ship (Arena-style, no drift).
-// Setup:   Served from public/test-lab/weapon-lab.html. Imports the same
-//          active-deployments / pickups / magnet-booster modules as the
-//          main game so the visuals match 1:1. Standalone — does NOT
-//          import from src/main.ts, src/game.ts, or src/ship-select.ts.
-//          The user's "Press [1] BOMB · [2] DRONES · [3] MISSILES · [4]
-//          MAGNET" hint sits under the HUD. Camera follows the ship at
-//          z=20 / FOV=60° matching the production game camera.
+// Setup:   Served from public/test-lab/weapon-lab.html. Mounts the SAME
+//          useActiveItem + fireBombStrike + ship-movement free functions
+//          that the production game calls (Phase 7i-3 refactor). The lab
+//          builds its own GameplayContext with no-op DOM callbacks so the
+//          bomb's screen flash / punch-zoom / camera shake are skipped
+//          (the lab has no DOM HUD wrap or shake camera), but the bomb's
+//          6-layer VFX, charge-stack deploy, drone beam logic, and
+//          missile-schedule spawning are byte-for-byte production paths.
+//          Camera follows the ship at z=20 / FOV=60° matching the
+//          production game camera.
 // Issues:  Pre-Lab-2 the only way to see active-weapon VFX was to play
 //          the game, collect pickups, and fire in a real arena. Reviewing
 //          per-weapon tuning (beam radius, missile sprite, bomb ring
 //          timing) required full game flow.
-// Fix:     Phase 7i-3 — added this standalone page so the user can cycle
-//          through 5 of each addon without playing. Asteroids are pure
-//          iron (no crystals, no shards) so the bomb screen-clear is
-//          clean. The bomb uses a simplified damage pass (no scoring, no
-//          pickup drops) so respawning is a single button. Magnets
-//          activate from a 5-charge bank that maps to the
-//          pendingTier/activeTier state machine in src/magnet-booster.ts.
+//          Pre-Phase-7i-3 the lab re-implemented useActiveItem +
+//          fireBombStrike + ship-movement + asteroid-damage in a parallel
+//          code path that drifted from production. The lab bomb was no
+//          longer a faithful copy of the production bomb.
+// Fix:     Phase 7i-3 — the lab now mounts the SAME code paths the
+//          production game uses via src/gameplay-context.ts. The lab
+//          builds a GameplayContext that supplies its own damage callback
+//          (a local splitAsteroid mirror) and omits all 6 DOM/visual
+//          side-effect callbacks (the lab has no .game-wrap DOM and no
+//          shake camera, so bomb-triggered screen flash / punch-zoom /
+//          camera shake are intentionally skipped — see
+//          gameplay-context.ts Gotcha #2 for the design rationale).
 // Gotchas: The lab creates its OWN camera + scene + InputManager; it does
-//          not import the production Game class. spawnDroneDeployment /
-//          scheduleMissileVolley / fireBombStrike (replicated locally) all
-//          accept a scene + ship position so the lab can drive them
-//          without the Game wrapper. The lab's bomb is a stripped clone
-//          of Game.fireBombStrike: shockwave + particles + DOM flash only,
-//          no camera-shake / freeze-frame / punch-zoom (those are Game-
-//          level integrations not relevant for visual VFX review).
+//          not import the production Game class. The lab's local
+//          damageAsteroid path uses a smaller damage value (1 per drone
+//          beam hit, 10 per missile impact) that matches the production
+//          constants but routes through a lab-only splitAsteroid helper
+//          (no score, no pickup drops). The lab deploys drones at tier 3
+//          unconditionally so the user always sees the peak-tier visual
+//          — production's charge-stack deploy (1/2/3 charges → tier 1/2/3)
+//          is replaced with a fixed tier-3 max for visual review.
 //          updateActiveAmmo + the per-frame DroneDeploymentState /
 //          VolleySchedule tick functions handle all the per-frame VFX
 //          state. Respawn Asteroids re-runs the spawn pass; Reload Ammo
@@ -48,7 +57,6 @@ import {
   Color,
   DirectionalLight,
   Group,
-  IcosahedronGeometry,
   Mesh,
   MeshBasicMaterial,
   PerspectiveCamera,
@@ -67,8 +75,6 @@ import {
   createEmptyActiveAmmo,
   ActiveAmmoMap,
   ActiveAmmoState,
-  canFireActive,
-  consumeActiveCharge,
   tickActiveAmmo,
 } from '../pickups';
 import {
@@ -76,8 +82,6 @@ import {
   HomingMissileState,
   VolleySchedule,
   disposeDroneDeployment,
-  scheduleMissileVolley,
-  spawnDroneDeployment,
   tickDroneDeployments,
   tickMissileVolleySchedules,
   tickHomingMissiles,
@@ -106,25 +110,17 @@ import {
   updateActiveField,
   updateActiveRing,
 } from '../magnet-booster-vfx';
+import { applyArenaShipMovement } from '../movement/arena-controller';
+import {
+  GameplayContext,
+  GameplayAsteroid,
+  fireBombStrike,
+  useActiveItem,
+} from '../gameplay-context';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — single source of truth for the lab
 // ═══════════════════════════════════════════════════════════════════════════
-
-// Mirror src/pickups.ts:BOMB_STRIKE_RADIUS (we replicate bomb damage locally
-// because we are not in the Game class; the radius matches the production
-// constant so a single bomb covers the 8-12u asteroid ring at radius < 15u).
-const BOMB_RADIUS = 15.0;
-const BOMB_DAMAGE = 10;
-
-// Arena bounds — copy of src/movement/arena-controller.ts so the lab can
-// clamp ship position the same way the production game does.
-const ARENA_HALF_WIDTH = 13;
-const ARENA_HALF_HEIGHT = 9;
-
-const SHIP_MAX_SPEED = 7;
-const SHIP_ACCEL = 12;
-const BOUNCE_DAMPING = 0.55;
 
 // Initial ammo bank. 5 of each so the user can fire BOMB×5 + DRONES×5 +
 // MISSILES×5 + MAGNET×5 without worrying about running dry mid-test.
@@ -133,6 +129,13 @@ const INITIAL_AMMO = 5;
 const ASTEROID_COUNT = 10;
 const ASTEROID_RING_MIN = 8;
 const ASTEROID_RING_MAX = 12;
+
+// Lab-only damage per drone beam hit. Production's ORBIT_DRONES_DAMAGE = 1
+// (src/pickups.ts:518) — we hard-code 1 here to match production's beam
+// damage without re-importing the constant (the lab is a self-contained
+// test surface; pulling in too many production constants makes the
+// imports noise-heavy).
+const DRONE_BEAM_DAMAGE = 1;
 
 // Iron asteroid size weights — favor SMALL + MEDIUM so the user can see
 // fragments split when bomb shrapnel hits them.
@@ -409,8 +412,16 @@ function tickArena(dt: number): void {
   const gameTime = performance.now() / 1000 - labState.startTimeSeconds;
   const input = labState.input.currentState();
 
-  // ── Ship movement (Arena clone) ──────────────────────────────────────
-  applyShipMovement(labState.ship.state, input, dt);
+  // ── Ship movement (production Arena controller) ──────────────────────
+  // Phase 7i-3 refactor — the lab previously had a hand-cloned
+  // applyShipMovement (lines 488-529) that drifted from production. The
+  // lab now calls the SAME applyArenaShipMovement free function exported
+  // by src/movement/arena-controller.ts that production's
+  // ArenaMovementController.apply() delegates to. Mouse-aim is computed
+  // here (the production controller's apply() takes aim as input; the
+  // lab's aim is mouse-driven, not the production gamepad/keyboard aim).
+  updateShipAimFromMouse(labState.ship.state, input);
+  applyArenaShipMovement(labState.ship.state, input, dt);
   labState.ship.group.position.x = labState.ship.state.position.x;
   labState.ship.group.position.y = labState.ship.state.position.y;
   labState.ship.group.rotation.z = Math.atan2(labState.ship.state.aim.y, labState.ship.state.aim.x) - Math.PI / 2;
@@ -418,10 +429,12 @@ function tickArena(dt: number): void {
   // ── Input → fire actions ────────────────────────────────────────────
   // Mirror src/game.ts:998-1085 dispatch. We use the live useActive1/2/3/4
   // booleans because the lab doesn't need charge-up (Digit2 fires on press
-  // here — no release detection for drones).
-  if (input.useActive1) tryFireBomb();
-  if (input.useActive2) tryFireDrones();
-  if (input.useActive3) tryFireMissiles();
+  // here — no release detection for drones). tryFireWeapon routes through
+  // the production useActiveItem free function (Phase 7i-3 refactor) so
+  // the lab's bomb / drones / missiles are byte-equivalent to production.
+  if (input.useActive1) tryFireWeapon(PickupKind.BOMB_STRIKE);
+  if (input.useActive2) tryFireWeapon(PickupKind.ORBIT_DRONES);
+  if (input.useActive3) tryFireWeapon(PickupKind.HOMING_MISSILES);
   if (input.useMagnetBooster) tryFireMagnet(gameTime);
 
   // ── Active ammo cooldowns (skip MAGNET — it uses gameTime in
@@ -467,12 +480,12 @@ function tickArena(dt: number): void {
     labState.scene,
     (asteroid) => {
       // Lab-only damage path: matching HOMING_MISSILES_DAMAGE = 10.
-      damageAsteroid(asteroid, 10);
+      labDamageAsteroid(asteroid, 10);
     },
   );
   labState.shockwaves = updateShockwaves(labState.shockwaves, labState.scene, dt);
   updateShockwaveParticles(dt);
-  updateCoreFlashes(dt);
+  updateLabCoreFlashes(dt);
   updateMagnetVfx(dt, gameTime);
 
   // ── Asteroid update (drift + cull) ──────────────────────────────────
@@ -482,47 +495,25 @@ function tickArena(dt: number): void {
   refreshHud();
 }
 
-function applyShipMovement(
-  ship: { position: Vector2; velocity: Vector2; aim: Vector2 },
-  input: { move: Vector2; aim: Vector2 },
-  dt: number,
+/**
+ * Lab-only mouse-aim updater. Production reads aim from gamepad/keyboard
+ * (see src/ship-controller.ts:readShipAim) — the lab's input is mouse
+ * position. The production `applyArenaShipMovement` consumes aim from
+ * `ship.aim` without computing it, so the lab updates aim here BEFORE
+ * calling the production movement function. This is the one piece of
+ * ship behavior the lab owns (it does not exist in production because
+ * production's aim path lives in the ShipController's per-frame update).
+ */
+function updateShipAimFromMouse(
+  ship: { aim: Vector2 },
+  input: { aim: Vector2 },
 ): void {
-  // Aim toward mouse (transform screen→world using camera projection:
-  // we keep it simple and use the screen-centered direction, which
-  // matches what production does for top-down aim).
   const dx = input.aim.x - window.innerWidth / 2;
   const dy = -(input.aim.y - window.innerHeight / 2);
   const len = Math.hypot(dx, dy);
   if (len > 0) {
     ship.aim = { x: dx / len, y: dy / len };
   }
-  // Thrust relative to facing.
-  const forward = input.move.y;
-  const strafe = input.move.x;
-  const accelX = (forward * ship.aim.x + strafe * ship.aim.y) * SHIP_ACCEL;
-  const accelY = (forward * ship.aim.y - strafe * ship.aim.x) * SHIP_ACCEL;
-  ship.velocity = {
-    x: ship.velocity.x + accelX * dt,
-    y: ship.velocity.y + accelY * dt,
-  };
-  const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
-  if (speed > SHIP_MAX_SPEED) {
-    const scale = SHIP_MAX_SPEED / speed;
-    ship.velocity = { x: ship.velocity.x * scale, y: ship.velocity.y * scale };
-  }
-  ship.position = {
-    x: ship.position.x + ship.velocity.x * dt,
-    y: ship.position.y + ship.velocity.y * dt,
-  };
-  // Soft bounce at arena bounds (mirror arena-controller.ts:69-86).
-  let { x: vx, y: vy } = ship.velocity;
-  let { x: px, y: py } = ship.position;
-  if (px > ARENA_HALF_WIDTH) { px = ARENA_HALF_WIDTH; vx *= -BOUNCE_DAMPING; }
-  else if (px < -ARENA_HALF_WIDTH) { px = -ARENA_HALF_WIDTH; vx *= -BOUNCE_DAMPING; }
-  if (py > ARENA_HALF_HEIGHT) { py = ARENA_HALF_HEIGHT; vy *= -BOUNCE_DAMPING; }
-  else if (py < -ARENA_HALF_HEIGHT) { py = -ARENA_HALF_HEIGHT; vy *= -BOUNCE_DAMPING; }
-  ship.position = { x: px, y: py };
-  ship.velocity = { x: vx, y: vy };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -595,17 +586,33 @@ function tickAsteroids(dt: number): void {
  * intentionally do NOT call into the full Game destroy path because the
  * lab is decoupled from scoring / pickup drops / crystal cascades.
  */
-function damageAsteroid(asteroid: AsteroidState, damage: number): void {
+/**
+ * Lab-only damage helper. Mirrors the relevant subset of
+ * Game.destroyAsteroid for the visual test path: decrement health, and
+ * if it hits zero, call labSplitAsteroid (which spawns two SMALLER
+ * children — the classic Asteroids split, or removes the asteroid
+ * outright for TINY size). We intentionally do NOT call into the full
+ * Game destroy path because the lab is decoupled from scoring /
+ * pickup drops / crystal cascades / shard swarms.
+ *
+ * Phase 7i-3 refactor — this is the callback wired into the lab's
+ * GameplayContext.onDamageAsteroid (see labBuildContext). The free
+ * function fireBombStrike in src/gameplay-context.ts calls this
+ * callback after its own damage pass decrements health, so the lab's
+ * BOMB behavior is byte-equivalent to production's BOMB except for
+ * scoring.
+ */
+function labDamageAsteroid(asteroid: AsteroidState, damage: number): void {
   if (!labState) return;
   const live = labState.asteroids.find((a) => a.state === asteroid);
   if (!live) return;
   live.state.health -= damage;
   if (live.state.health <= 0) {
-    splitAsteroidLocal(live);
+    labSplitAsteroid(live);
   }
 }
 
-function splitAsteroidLocal(parent: LabAsteroid): void {
+function labSplitAsteroid(parent: LabAsteroid): void {
   if (!labState) return;
   const p = parent.state.position;
   let childSize: AsteroidSize;
@@ -635,110 +642,112 @@ function splitAsteroidLocal(parent: LabAsteroid): void {
   labState.asteroids = labState.asteroids.filter((a) => a !== parent);
 }
 
+/**
+ * Lab's core-flash tween. The production fireBombStrike free function
+ * pushes a new { mesh, age, duration } onto ctx.activeCoreFlashes, and
+ * the production Game's update loop tweens + disposes them at lines
+ * 2058-2076 of src/game.ts. The lab has no Game update loop, so we
+ * re-implement the tween here. This is the ONLY VFX helper the lab
+ * still owns — everything else (shockwave, particles, ring, debris)
+ * is owned by production. The tween math matches production byte-for-
+ * byte (scale 1→2, opacity 0.7→0 over 0.1s) so a screenshot from the
+ * lab and a screenshot from production look identical at the same
+ * age.
+ */
+function updateLabCoreFlashes(dt: number): void {
+  if (!labState) return;
+  const alive: typeof labState.coreFlashes = [];
+  for (const f of labState.coreFlashes) {
+    f.age += dt;
+    if (f.age >= f.duration) {
+      labState.scene.remove(f.mesh);
+      f.mesh.geometry.dispose();
+      (f.mesh.material as MeshBasicMaterial).dispose();
+      continue;
+    }
+    const t = f.age / f.duration;
+    f.mesh.scale.setScalar(1 + t * 1.0);
+    (f.mesh.material as MeshBasicMaterial).opacity = 0.7 * (1 - t);
+    alive.push(f);
+  }
+  labState.coreFlashes = alive;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Fire actions
 // ═══════════════════════════════════════════════════════════════════════════
 
-function tryFireBomb(): void {
-  if (!labState) return;
-  const ammo = labState.activeAmmo[PickupKind.BOMB_STRIKE];
-  if (!canFireActive(ammo)) return;
-  if (!consumeActiveCharge(ammo, PickupKind.BOMB_STRIKE)) return;
-  fireLabBombStrike({ x: labState.ship.state.position.x, y: labState.ship.state.position.y });
-}
-
-function fireLabBombStrike(position: Vector2): void {
-  if (!labState) return;
-  // Stripped clone of src/game.ts:fireBombStrike. Keeps the shockwave +
-  // particles + screen flash but skips the Game-level camera-shake /
-  // freeze-frame / punch-zoom since those are not VFX under review here.
-  triggerScreenFlash();
-  // Core flash (mirrors src/game.ts:1851-1863).
-  const core = new Mesh(
-    new IcosahedronGeometry(0.5, 2),
-    new MeshBasicMaterial({
-      color: 0xffaa00,
-      transparent: true,
-      opacity: 0.7,
-      blending: AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  core.position.set(position.x, position.y, -0.1);
-  labState.scene.add(core);
-  labState.coreFlashes.push({ mesh: core, age: 0, duration: 0.1 });
-
-  // Primary ring.
-  labState.shockwaves.push(new Shockwave({ x: position.x, y: position.y }, 0xff8800, 1.0, 16.0));
-  // Shock-front particles.
-  emitShockwaveParticles(labState.scene, position.x, position.y, {
-    count: 30,
-    speed: 30,
-    color: 0xffcc66,
-    lifetime: 0.5,
-  });
-  // Debris chunks.
-  emitShockwaveParticles(labState.scene, position.x, position.y, {
-    count: 8,
-    speed: 30,
-    color: 0xffaa00,
-    lifetime: 0.6,
-    isDebris: true,
-  });
-  // Secondary outer ring.
-  labState.shockwaves.push(new Shockwave({ x: position.x, y: position.y }, 0xff4400, 0.5, 18.0));
-
-  // Damage pass.
-  const alive: LabAsteroid[] = [];
-  for (const a of labState.asteroids) {
-    const d = Math.hypot(a.state.position.x - position.x, a.state.position.y - position.y);
-    if (d <= BOMB_RADIUS) {
-      a.state.health = Math.max(0, a.state.health - BOMB_DAMAGE);
-      if (a.state.health <= 0) {
-        splitAsteroidLocal(a);
-        continue;
-      }
-    }
-    alive.push(a);
+/**
+ * Build a GameplayContext for the lab. The context is rebuilt on every
+ * call (cheap — plain data + 2 closure objects) so per-frame state
+ * (asteroids array, charge counters, etc.) is always current.
+ *
+ * Side-effect callbacks (onScreenFlash, onPunchZoom, onEdgeFlash,
+ * onCameraShake, onFloatingText, onFreezeFrames) are intentionally
+ * OMITTED — the lab has no DOM HUD wrap, no score floaters, no shake
+ * camera. The bomb's 6-layer VFX (core flash, primary shockwave,
+ * shock-front particles, debris chunks, secondary outer ring, floating
+ * text) still all fire; only the production-only DOM/score side effects
+ * are skipped. See gameplay-context.ts Gotcha #2 for design rationale.
+ *
+ * onDamageAsteroid routes to labDamageAsteroid (no score, no pickup
+ * drops, no crystal cascade — just a local splitAsteroid mirror).
+ */
+function labBuildContext(): GameplayContext {
+  if (!labState) {
+    throw new Error('labBuildContext called before labState was initialized');
   }
-  labState.asteroids = alive;
-}
-
-function tryFireDrones(): void {
-  if (!labState) return;
-  const ammo = labState.activeAmmo[PickupKind.ORBIT_DRONES];
-  if (!canFireActive(ammo)) return;
-  if (labState.droneDeployments.length > 0) {
-    // Re-press while active: refund the charge so the press is not lost.
-    ammo.charges += 1;
-    ammo.cooldownRemaining = 0;
-    return;
-  }
-  if (!consumeActiveCharge(ammo, PickupKind.ORBIT_DRONES)) return;
-  // Lab always deploys at tier 3 (max drones) for visual review of the
-  // full power. Production game.ts computes tier from banked charges.
-  const dep = spawnDroneDeployment(
-    { x: labState.ship.state.position.x, y: labState.ship.state.position.y },
-    labState.scene,
-    3,
-  );
-  dep.beamHitCallback = (asteroid, _tier) => {
-    damageAsteroid(asteroid, 1);
+  return {
+    scene: labState.scene,
+    activeAmmo: labState.activeAmmo,
+    activeDeployments: labState.droneDeployments,
+    homingMissiles: labState.activeMissiles,
+    missileVolleySchedules: labState.missileSchedules,
+    activeShockwaves: labState.shockwaves,
+    activeCoreFlashes: labState.coreFlashes,
+    magnet: labState.magnet,
+    asteroids: labState.asteroids as unknown as GameplayAsteroid[],
+    onDamageAsteroid: (asteroid, _damage, _source) => {
+      // gameplay-context.ts already decremented health and verified
+      // health <= 0. We route to the lab's local split handler. No
+      // score / pickup / shard logic — the lab is a VFX review surface
+      // for the BOMB itself, not the full destruction cascade.
+      labSplitAsteroid(asteroid as unknown as LabAsteroid);
+    },
+    gameTimeSeconds: performance.now() / 1000 - labState.startTimeSeconds,
+    getShipPosition: () => labState!.ship.state.position,
+    getShipAim: () => labState!.ship.state.aim,
   };
-  labState.droneDeployments.push(dep);
 }
 
-function tryFireMissiles(): void {
+/**
+ * Lab-side fire dispatcher. Calls the production useActiveItem free
+ * function with the lab's GameplayContext, then post-wires the drone
+ * beam hit callback (which needs a closure over the lab's local damage
+ * path — production wires it to Game.onDroneBeamHitAsteroid, the lab
+ * wires it to labDamageAsteroid).
+ *
+ * Pattern matches src/game.ts:1746-1758 (useActiveItem in production).
+ * Phase 7i-3 refactor — before this, the lab had tryFireBomb /
+ * tryFireDrones / tryFireMissiles each duplicating the production
+ * charge-check / consume / dispatch logic. They are now collapsed into
+ * one call into the production free function.
+ */
+function tryFireWeapon(kind: PickupKind): void {
   if (!labState) return;
-  const ammo = labState.activeAmmo[PickupKind.HOMING_MISSILES];
-  if (!canFireActive(ammo)) return;
-  if (!consumeActiveCharge(ammo, PickupKind.HOMING_MISSILES)) return;
-  labState.missileSchedules.push(
-    scheduleMissileVolley(
-      { x: labState.ship.state.position.x, y: labState.ship.state.position.y },
-      labState.ship.state.aim,
-    ),
-  );
+  const previousDroneCount = labState.droneDeployments.length;
+  useActiveItem(labBuildContext(), kind);
+  // Post-wire the drone beam hit callback (lab has no Game.onDroneBeamHitAsteroid
+  // to bind to — the lab's damage path is a no-score split mirror).
+  if (
+    labState.droneDeployments.length > previousDroneCount &&
+    kind === PickupKind.ORBIT_DRONES
+  ) {
+    const dep = labState.droneDeployments[labState.droneDeployments.length - 1];
+    dep.beamHitCallback = (asteroid, _tier) => {
+      labDamageAsteroid(asteroid, DRONE_BEAM_DAMAGE);
+    };
+  }
 }
 
 function tryFireMagnet(gameTime: number): void {
@@ -760,41 +769,15 @@ function tryFireMagnet(gameTime: number): void {
 // ═══════════════════════════════════════════════════════════════════════════
 // VFX helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-function triggerScreenFlash(): void {
-  const flash = document.createElement('div');
-  flash.style.position = 'fixed';
-  flash.style.inset = '0';
-  flash.style.background = 'white';
-  flash.style.pointerEvents = 'none';
-  flash.style.zIndex = '15';
-  flash.style.opacity = '0.6';
-  flash.style.transition = 'opacity 0.15s ease-out';
-  document.body.appendChild(flash);
-  // Force layout, then fade.
-  void flash.offsetWidth;
-  flash.style.opacity = '0';
-  setTimeout(() => flash.remove(), 200);
-}
-
-function updateCoreFlashes(dt: number): void {
-  if (!labState) return;
-  const alive: typeof labState.coreFlashes = [];
-  for (const f of labState.coreFlashes) {
-    f.age += dt;
-    if (f.age >= f.duration) {
-      labState.scene.remove(f.mesh);
-      f.mesh.geometry.dispose();
-      (f.mesh.material as MeshBasicMaterial).dispose();
-      continue;
-    }
-    const t = f.age / f.duration;
-    f.mesh.scale.setScalar(1 + t * 1.0);
-    (f.mesh.material as MeshBasicMaterial).opacity = 0.7 * (1 - t);
-    alive.push(f);
-  }
-  labState.coreFlashes = alive;
-}
+// (The lab previously had its own triggerScreenFlash + updateCoreFlashes
+// helpers. The screen flash is now omitted entirely (the lab's
+// GameplayContext does not wire onScreenFlash), and the core-flash
+// tween is owned by the production fireBombStrike free function via
+// ctx.activeCoreFlashes — the lab just hands that array to the free
+// function, and the free function pushes a new flash + the lab's
+// existing per-frame update path disposes it. See
+// gameplay-context.ts:228-241 for the core-flash mesh construction
+// that lives in production now.)
 
 function updateMagnetVfx(dt: number, gameTime: number): void {
   if (!labState) return;
