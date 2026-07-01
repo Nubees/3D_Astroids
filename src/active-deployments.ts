@@ -5,10 +5,12 @@ import {
   IcosahedronGeometry,
   Line,
   LineBasicMaterial,
+  Material,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
+  ShaderMaterial,
   SphereGeometry,
   Sprite,
   SpriteMaterial,
@@ -47,12 +49,14 @@ import {
   createDroneMesh,
   createLockOnSprite,
   createMuzzleFlash,
+  createPlasmaDroneBeamGlow,
   createTetherLine,
   updateBeam,
   updateDeployShockwave,
   updateDroneVisuals,
   updateLockOnSprite,
   updateMuzzleFlash,
+  updatePlasmaDroneBeam,
   updateTetherLine,
 } from './orbit-drone-vfx';
 import {
@@ -287,6 +291,17 @@ export interface PerDroneState {
   // tick in tickDroneDeployments ages both and calls updateBeam /
   // updateMuzzleFlash while in-window.
   beamLine: Mesh | null;
+  // Phase 7i-2 hotfix #9 — second outer "glow" cylinder. Pairs with
+  // beamLine (the bright core) to deliver a two-layer beam visual:
+  // core = saturated red, ~19px diameter on viewport; glow = desaturated
+  // red halo, ~37px diameter. The two-layer approach approximates the
+  // bloom dilation this project can't provide (src/post-processing.ts
+  // is a no-op composer stub — UnrealBloomPass was removed to fix
+  // crystal white-out). Lifecycle mirrors beamLine exactly: created
+  // at deploy time, set visible=true on fireDroneBeam, back to false
+  // on beam expiry, disposed on deployment cleanup. Nulled the same
+  // way beamLine is nulled (line 985) so the dispose path is symmetric.
+  beamGlow: Mesh | null;
   muzzleFlash: Sprite;
   beamAge: number;
   muzzleFlashAge: number;
@@ -537,9 +552,17 @@ export function spawnDroneDeployment(
     // at the last fire origin.
     const beamLine = createDroneBeam(tier);
     const muzzleFlash = createMuzzleFlash(tier);
+    // Phase 7i-2 hotfix #9 — second outer glow cylinder. The two-layer
+    // beam needs BOTH meshes added to the scene so per-fire lookup
+    // never trips on a null parent. The glow stays visible=false until
+    // fireDroneBeam promotes it (parallel to beamLine's visibility flag).
+    // The per-drone state tracks both so the tick can pose them together.
+    const beamGlow = createPlasmaDroneBeamGlow(tier);
     scene.add(beamLine);
     scene.add(muzzleFlash);
+    scene.add(beamGlow);
     beamLine.visible = false;
+    beamGlow.visible = false;
     perDrone.push({
       mesh,
       bobPhase: Math.random() * Math.PI * 2,
@@ -561,6 +584,7 @@ export function spawnDroneDeployment(
       // edge case in the tick branch does not try to read a stale
       // pointer.
       beamLine,
+      beamGlow,
       muzzleFlash,
       beamAge: ORBIT_DRONES_BEAM_LIFETIME_SECONDS,
       muzzleFlashAge: 999,
@@ -840,6 +864,11 @@ export function tickDroneDeployments(
         drone.beamAge += deltaTime;
         if (drone.beamAge >= ORBIT_DRONES_BEAM_LIFETIME_SECONDS) {
           drone.beamLine.visible = false;
+          // Phase 7i-2 hotfix #9 — hide the outer glow in lockstep with
+          // the bright core. The two-layer beam is a single visual
+          // unit; if the core expires the glow must also clear or the
+          // user sees a "ghost halo" floating off-target for a frame.
+          if (drone.beamGlow) drone.beamGlow.visible = false;
           drone.currentBeamTarget = null;
         } else if (drone.currentBeamTarget) {
           // Phase 7i-2 (Task 11b) — explicit z=0 here because
@@ -850,13 +879,45 @@ export function tickDroneDeployments(
           // the center"). The intersection check (pointToSegmentDistance
           // in game.ts) reads only .x/.y so it kept working — only
           // the visual was wrong.
-          updateBeam(
-            drone.beamLine,
-            drone.mesh.position,
-            { x: drone.currentBeamTarget.position.x,
-              y: drone.currentBeamTarget.position.y,
-              z: 0 },
-          );
+          //
+          // Phase 7i-2 hotfix #8 — when ORBIT_DRONES_USE_SHADER_BEAM is
+          // true at beam-create time, the material is a ShaderMaterial
+          // and the per-frame tick must also write its uTime uniform so
+          // the axial noise animation advances. We branch on the
+          // material's constructor (cheap instanceof check) to keep
+          // the dispatch invisible to the per-drone loop. dep.sceneClock
+          // is the existing scene-time accumulator and the same clock
+          // the aura pulse + bob/spin all read, so the plasma animation
+          // stays in lockstep with the rest of the drone VFX.
+          const targetPos = { x: drone.currentBeamTarget.position.x,
+                              y: drone.currentBeamTarget.position.y,
+                              z: 0 };
+          if (drone.beamLine.material instanceof ShaderMaterial) {
+            updatePlasmaDroneBeam(
+              drone.beamLine,
+              drone.mesh.position,
+              targetPos,
+              dep.sceneClock,
+            );
+            // Phase 7i-2 hotfix #9 — pose the outer glow cylinder in
+            // lockstep with the bright core. Same pose (drone→target
+            // midpoint, Y-scale to length, quaternion to align +Y with
+            // direction), same time uniform — only the geometry (larger
+            // radius) and material uniforms (desaturated color, lower
+            // opacity cap) differ. updatePlasmaDroneBeam works on any
+            // ShaderMaterial cylinder, so the existing helper handles
+            // both layers without modification.
+            if (drone.beamGlow) {
+              updatePlasmaDroneBeam(
+                drone.beamGlow,
+                drone.mesh.position,
+                targetPos,
+                dep.sceneClock,
+              );
+            }
+          } else {
+            updateBeam(drone.beamLine, drone.mesh.position, targetPos);
+          }
         }
       }
       if (drone.muzzleFlashAge < 0.08) {
@@ -951,11 +1012,30 @@ export function disposeDroneDeployment(dep: DroneDeploymentState, scene: Object3
       scene.remove(drone.beamLine);
       // Phase 7i-2 (post-ship hotfix) — beam is now a CylinderGeometry
       // mesh (not a Line + LineBasicMaterial). dispose() the
-      // CylinderGeometry (per-instance) and the MeshBasicMaterial
-      // (per-instance) just like the muzzle-flash path does.
+      // CylinderGeometry (per-instance) and the material (per-instance)
+      // just like the muzzle-flash path does.
+      //
+      // Phase 7i-2 hotfix #8 — beam material can now be either a
+      // MeshBasicMaterial (default) or a ShaderMaterial (plasma path,
+      // when ORBIT_DRONES_USE_SHADER_BEAM=true at createDroneBeam time).
+      // Both inherit dispose() from the Material base class so the
+      // runtime cast to `Material` covers both. Disposing twice on
+      // Three.js Material is idempotent per the same note that covers
+      // disposeMissileState below.
       drone.beamLine.geometry.dispose();
-      (drone.beamLine.material as MeshBasicMaterial).dispose();
+      (drone.beamLine.material as Material).dispose();
       drone.beamLine = null;
+    }
+    // Phase 7i-2 hotfix #9 — second outer glow cylinder. Same dispose
+    // pattern as beamLine (geometry + Material.dispose), same Mesh |
+    // Group-agnostic Material cast. The ShaderMaterial uniforms
+    // reference Vector3 Color objects that are GC-friendly (no
+    // GPU resource), so just disposing the material is enough.
+    if (drone.beamGlow) {
+      scene.remove(drone.beamGlow);
+      drone.beamGlow.geometry.dispose();
+      (drone.beamGlow.material as Material).dispose();
+      drone.beamGlow = null;
     }
     if (drone.muzzleFlash) {
       scene.remove(drone.muzzleFlash);
@@ -1534,6 +1614,10 @@ export function fireDroneBeam(
   drone.beamHasHitTarget = false;
   if (target && drone.beamLine) {
     drone.beamLine.visible = true;
+    // Phase 7i-2 hotfix #9 — show the outer glow in lockstep with the
+    // bright core. Both layers must appear/disappear on the same frame
+    // or the user sees a "halo first, beam second" pop-in.
+    if (drone.beamGlow) drone.beamGlow.visible = true;
     // Phase 7i-2 (Task 11b) — see the per-frame tick above for the
     // Vector2→Vector3 NaN explanation. Explicit z=0 here keeps the
     // initial beam endpoint valid before the per-frame tick takes
@@ -1579,6 +1663,11 @@ export function clearDroneBeam(drone: PerDroneState): void {
   drone.currentBeamTarget = null;
   if (drone.beamLine) {
     drone.beamLine.visible = false;
+    // Phase 7i-2 hotfix #9 — clear the outer glow in lockstep. The
+    // "beam cross-system" hotfix #4 path also calls clearDroneBeam
+    // when a kill removes the target mid-flight; both layers must
+    // clear or the halo survives the beam.
+    if (drone.beamGlow) drone.beamGlow.visible = false;
   }
 }
 

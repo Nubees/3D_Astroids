@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
 import {
   AdditiveBlending,
@@ -26,7 +26,12 @@ import {
   createDroneMesh,
   createLockOnSprite,
   createMuzzleFlash,
+  createPlasmaDroneBeam,
+  createPlasmaDroneBeamGlow,
   createTetherLine,
+  disposePlasmaDroneBeam,
+  getUseShaderBeam,
+  setUseShaderBeam,
   updateAuraPulse,
   updateBeam,
   updateChargeUpRing,
@@ -34,6 +39,7 @@ import {
   updateDroneVisuals,
   updateLockOnSprite,
   updateMuzzleFlash,
+  updatePlasmaDroneBeam,
   updateTetherLine,
 } from '../src/orbit-drone-vfx';
 
@@ -368,13 +374,30 @@ describe('Phase 7i-2 — drone mesh + aura sizing', () => {
 });
 
 describe('Phase 7i-2 — createDroneBeam', () => {
-  it('returns a Mesh (cylinder) with AdditiveBlending material', () => {
+  it('returns a Mesh with AdditiveBlending material (dispatcher contract)', () => {
+    // Phase 7i-2 hotfix #8 — createDroneBeam is now a thin dispatcher
+    // that branches on ORBIT_DRONES_USE_SHADER_BEAM at create time.
+    // The material can be EITHER MeshBasicMaterial (legacy solid
+    // cylinder) OR ShaderMaterial (plasma path) depending on the
+    // runtime constant. Material-specific assertions live in the
+    // dedicated describe blocks below. This test only pins the
+    // public contract: it returns a Mesh, the material is
+    // AdditiveBlending + transparent, and opacity never exceeds the
+    // 0.8 white-out cap.
     const beam = createDroneBeam(2);
-    const mat = beam.material as THREE.MeshBasicMaterial;
     expect(beam).toBeInstanceOf(THREE.Mesh);
+    // Three.js exposes blending on every Material base class, so the
+    // contract holds for both material branches.
+    const mat = beam.material as THREE.MeshBasicMaterial | THREE.ShaderMaterial;
     expect(mat.blending).toBe(THREE.AdditiveBlending);
-    expect(mat.color.getHex()).toBe(0xff0033);
-    expect(mat.opacity).toBeLessThanOrEqual(0.8);
+    expect(mat.transparent).toBe(true);
+    // For MeshBasicMaterial the opacity is on the material directly;
+    // for ShaderMaterial the opacity is computed per-fragment in
+    // the fragment shader (clamped to 0.8 by min() in the GLSL).
+    // The GLSL clamp is asserted in the plasma-specific tests below.
+    if (mat instanceof THREE.MeshBasicMaterial) {
+      expect(mat.opacity).toBeLessThanOrEqual(0.8);
+    }
   });
 
   it('starts hidden (visible=false) so spawnDroneDeployment shows nothing on frame 0', () => {
@@ -493,5 +516,312 @@ describe('Phase 7i-2 — updateChargeUpRing', () => {
     expect(ring.scale.x).toBeCloseTo(0, 6);
     updateChargeUpRing(ring, 1);
     expect(ring.scale.x).toBeCloseTo(3.0, 1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// My Rules — Phase 7i-2 hotfix #8 (plasma beam shader)
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: TDD tests for the shader-driven plasma beam (user picked
+//          "Shader-driven plasma beam" from the 4-way architecture question
+//          after the 3rd failed beam-width iteration). The plasma beam
+//          replaces the solid-color MeshBasicMaterial cylinder with a
+//          custom ShaderMaterial that adds radial falloff + axial FBM
+//          noise — the in-shader substitute for the disabled bloom pass.
+// Setup:   Vitest node environment. ShaderMaterial is created without
+//          a real GL context, so we can only assert on the JS-level
+//          properties (uniforms, blending flags, material type). The
+//          actual GLSL rendering is verified by the in-game Playwright
+//          screenshot — see tests/phase-7i-2-hotfix-8-screenshot.spec.ts.
+// Issues:  3 prior beam-width iterations (0.04 → 0.08 → 0.24) failed to
+//          deliver a "power laser" feel because bloom is DISABLED in
+//          this project. A wider cylinder alone reads as "fat red bar",
+//          not "energy beam". Only an animated, gradient, glowing
+//          surface can fake bloom in a no-bloom pipeline.
+// Fix:     createPlasmaDroneBeam (ShaderMaterial) + updatePlasmaDroneBeam
+//          (writes uTime per frame) + disposePlasmaDroneBeam (explicit
+//          material dispose). The 3 factory exports keep their public
+//          signatures; createDroneBeam is now a thin dispatcher that
+//          branches on ORBIT_DRONES_USE_SHADER_BEAM at create time.
+// Gotchas: ORBIT_DRONES_USE_SHADER_BEAM is `true` by default — so the
+//          existing createDroneBeam test that asserts MeshBasicMaterial
+//          will need a follow-up that flips the constant OR tests
+//          createPlasmaDroneBeam directly. The test below opts for the
+//          direct-call approach so it stays robust against future
+//          constant flips.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Phase 7i-2 hotfix #8 — createPlasmaDroneBeam', () => {
+  it('returns a Mesh with ShaderMaterial (not MeshBasicMaterial)', () => {
+    // Import lazily so the test file reads top-to-bottom; plasma path
+    // is only exercised by this describe block.
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      expect(beam).toBeInstanceOf(Mesh);
+      expect(beam.material).toBeInstanceOf(THREE.ShaderMaterial);
+    });
+  });
+
+  it('plasma material is transparent + AdditiveBlending + DoubleSide + depthWrite false', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(2);
+      const mat = beam.material as THREE.ShaderMaterial;
+      expect(mat.transparent).toBe(true);
+      expect(mat.blending).toBe(AdditiveBlending);
+      expect(mat.side).toBe(DoubleSide);
+      expect(mat.depthWrite).toBe(false);
+    });
+  });
+
+  it('plasma material exposes uTime / uCoreColor / uOuterColor / uBeamRadius / uPlasmaSpeed / uFalloffPower uniforms', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      const mat = beam.material as THREE.ShaderMaterial;
+      expect(mat.uniforms.uTime).toBeDefined();
+      expect(mat.uniforms.uCoreColor).toBeDefined();
+      expect(mat.uniforms.uOuterColor).toBeDefined();
+      expect(mat.uniforms.uBeamRadius).toBeDefined();
+      expect(mat.uniforms.uPlasmaSpeed).toBeDefined();
+      expect(mat.uniforms.uFalloffPower).toBeDefined();
+      // uTime starts at 0 so the first frame's axial noise is at t=0.
+      expect(mat.uniforms.uTime.value).toBe(0);
+    });
+  });
+
+  it('plasma geometry is CylinderGeometry r=0.24 (same as solid beam — only material differs)', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      const geom = beam.geometry as THREE.CylinderGeometry;
+      expect(geom).toBeInstanceOf(THREE.CylinderGeometry);
+      expect(geom.parameters.radiusTop).toBeCloseTo(0.24, 6);
+      expect(geom.parameters.radiusBottom).toBeCloseTo(0.24, 6);
+      expect(geom.parameters.height).toBe(1);
+    });
+  });
+
+  it('plasma beam starts hidden (visible=false) so spawnDroneDeployment shows nothing on frame 0', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      expect(beam.visible).toBe(false);
+    });
+  });
+
+  it('plasma fragment shader contains the FBM hash + noise functions', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      const mat = beam.material as THREE.ShaderMaterial;
+      // hash11 is the entry point; fbm is the call we use; noise1d
+      // is the smooth-step interpolator. All three must be present so
+      // the shader compiles + the noise animation renders.
+      expect(mat.fragmentShader).toContain('float hash11');
+      expect(mat.fragmentShader).toContain('float noise1d');
+      expect(mat.fragmentShader).toContain('float fbm');
+    });
+  });
+
+  it('plasma fragment shader caps final alpha at 0.8 (additive white-out discipline)', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      const mat = beam.material as THREE.ShaderMaterial;
+      // The min() call against 0.8 is the additive white-out guard.
+      // It is REQUIRED so 2 stacked beams cannot saturate a pixel to
+      // pure white.
+      expect(mat.fragmentShader).toContain('min(');
+      expect(mat.fragmentShader).toContain('0.8');
+    });
+  });
+});
+
+describe('Phase 7i-2 hotfix #8 — updatePlasmaDroneBeam', () => {
+  it('writes uTime uniform each call so the axial noise animation advances', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      mod.updatePlasmaDroneBeam(
+        beam,
+        { x: 0, y: 0, z: 0 },
+        { x: 1, y: 0, z: 0 },
+        1.234,
+      );
+      const mat = beam.material as THREE.ShaderMaterial;
+      expect(mat.uniforms.uTime.value).toBeCloseTo(1.234, 6);
+    });
+  });
+
+  it('positions the cylinder at the drone→target midpoint (same as updateBeam)', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      mod.updatePlasmaDroneBeam(
+        beam,
+        { x: 0, y: 0, z: 0 },
+        { x: 4, y: 6, z: 0 },
+        0,
+      );
+      expect(beam.position.x).toBeCloseTo(2, 6);
+      expect(beam.position.y).toBeCloseTo(3, 6);
+      expect(beam.position.z).toBeCloseTo(0, 6);
+    });
+  });
+
+  it('scales the cylinder Y to the segment length (same as updateBeam)', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      mod.updatePlasmaDroneBeam(
+        beam,
+        { x: 0, y: 0, z: 0 },
+        { x: 3, y: 4, z: 0 },
+        0,
+      );
+      // 3-4-5 triangle.
+      expect(beam.scale.y).toBeCloseTo(5, 6);
+    });
+  });
+
+  it('handles coincident drone/target without producing NaN (length clamp)', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      mod.updatePlasmaDroneBeam(
+        beam,
+        { x: 1, y: 1, z: 0 },
+        { x: 1, y: 1, z: 0 },
+        0,
+      );
+      expect(Number.isFinite(beam.position.x)).toBe(true);
+      expect(Number.isFinite(beam.scale.y)).toBe(true);
+      expect(Number.isFinite(beam.quaternion.x)).toBe(true);
+    });
+  });
+});
+
+describe('Phase 7i-2 hotfix #8 — disposePlasmaDroneBeam', () => {
+  it('does not throw when called once on a fresh beam', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      expect(() => mod.disposePlasmaDroneBeam(beam)).not.toThrow();
+    });
+  });
+
+  it('disposes both geometry and material (custom ShaderMaterial needs explicit dispose)', () => {
+    return import('../src/orbit-drone-vfx').then(mod => {
+      const beam = mod.createPlasmaDroneBeam(1);
+      // Spy on dispose; vitest's vi.fn() lets us assert without
+      // needing a real GL context to confirm the resource was freed.
+      const geomDispose = vi.spyOn(beam.geometry, 'dispose');
+      const matDispose = vi.spyOn(beam.material as THREE.ShaderMaterial, 'dispose');
+      mod.disposePlasmaDroneBeam(beam);
+      expect(geomDispose).toHaveBeenCalledTimes(1);
+      expect(matDispose).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7i-2 hotfix #9 — runtime-toggled shader beam selector
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: The B-key handler in main.ts and the __hooks.setPlasmaBeam hook
+//          both call setUseShaderBeam to flip the module-level
+//          _useShaderBeam. createDroneBeam reads this value (not the
+//          ORBIT_DRONES_USE_SHADER_BEAM const from pickups.ts) so the
+//          toggle actually changes the next-spawned beam's material.
+//          In hotfix #8 the toggle was a local `let` in main.ts that
+//          only fed console.log, so pressing B did nothing visually.
+//          These tests pin the live-read behavior so a future refactor
+//          can't regress back to a dead toggle.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('Phase 7i-2 hotfix #9 — runtime shader beam toggle', () => {
+  // Save/restore the toggle around the test so other tests' behavior
+  // (which may depend on the default `true`) isn't affected. Default
+  // is true (see ORBIT_DRONES_USE_SHADER_BEAM in src/pickups.ts).
+  const original = getUseShaderBeam();
+  afterEach(() => {
+    setUseShaderBeam(original);
+  });
+  it('starts true by default and getUseShaderBeam reads it', () => {
+    setUseShaderBeam(true);
+    expect(getUseShaderBeam()).toBe(true);
+    setUseShaderBeam(false);
+    expect(getUseShaderBeam()).toBe(false);
+  });
+  it('createDroneBeam reflects the current toggle value (not the const)', () => {
+    setUseShaderBeam(true);
+    const shader = createDroneBeam(1);
+    expect(shader.material).toBeInstanceOf(THREE.ShaderMaterial);
+    setUseShaderBeam(false);
+    const solid = createDroneBeam(1);
+    // When the toggle is false, createDroneBeam returns the hotfix #7
+    // MeshBasicMaterial path (the fall-back preserved verbatim from
+    // commit 67812bf for the A/B comparison).
+    expect(solid.material).toBeInstanceOf(THREE.MeshBasicMaterial);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7i-2 hotfix #9 — outer glow cylinder for the two-layer beam
+// ═══════════════════════════════════════════════════════════════════════════
+// Purpose: createPlasmaDroneBeamGlow returns a larger desaturated-red
+//          cylinder that pairs with the bright core from
+//          createPlasmaDroneBeam. The two-layer approach approximates
+//          the bloom dilation this project can't provide
+//          (src/post-processing.ts:23-36 returns a no-op composer
+//          stub). These tests pin the contract that active-deployments
+//          depends on: ShaderMaterial with all 6 uniforms initialized,
+//          geometry is a CylinderGeometry with the GLOW radius, default
+//          visible=false, dispose works through the same Material cast
+//          that the core uses.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('Phase 7i-2 hotfix #9 — createPlasmaDroneBeamGlow', () => {
+  it('returns a Mesh with a ShaderMaterial', () => {
+    const glow = createPlasmaDroneBeamGlow(2);
+    expect(glow).toBeInstanceOf(THREE.Mesh);
+    expect(glow.material).toBeInstanceOf(THREE.ShaderMaterial);
+  });
+  it('initializes all six shader uniforms (uTime, uPlasmaSpeed, uFalloffPower, uCoreColor, uOuterColor, uBeamRadius, uOpacityCap)', () => {
+    const glow = createPlasmaDroneBeamGlow(2);
+    const u = (glow.material as THREE.ShaderMaterial).uniforms;
+    expect(u.uTime).toBeDefined();
+    expect(u.uPlasmaSpeed).toBeDefined();
+    expect(u.uFalloffPower).toBeDefined();
+    expect(u.uCoreColor).toBeDefined();
+    expect(u.uOuterColor).toBeDefined();
+    expect(u.uBeamRadius).toBeDefined();
+    expect(u.uOpacityCap).toBeDefined();
+  });
+  it('uses the GLOW radius for the cylinder geometry (larger than the core)', () => {
+    const glow = createPlasmaDroneBeamGlow(2);
+    const core = createPlasmaDroneBeam(2);
+    // CylinderGeometry's `parameters` object exposes the constructor
+    // args. Both top and bottom are the same for our beams (uniform
+    // cylinder) so reading either is fine. Comparing radiusTop is the
+    // cheapest check without instantiating a real GPU buffer.
+    const glowR = (glow.geometry as THREE.CylinderGeometry).parameters.radiusTop;
+    const coreR = (core.geometry as THREE.CylinderGeometry).parameters.radiusTop;
+    expect(glowR).toBeGreaterThan(coreR);
+    expect(glowR).toBe(0.6); // ORBIT_DRONES_BEAM_GLOW_RADIUS
+  });
+  it('defaults to visible=false (matches core beam contract — beam is shown on fire, hidden otherwise)', () => {
+    const glow = createPlasmaDroneBeamGlow(1);
+    expect(glow.visible).toBe(false);
+  });
+  it('uOpacityCap is 0.4 (lower than core 0.8 — white-out discipline)', () => {
+    const glow = createPlasmaDroneBeamGlow(1);
+    const u = (glow.material as THREE.ShaderMaterial).uniforms;
+    expect(u.uOpacityCap.value).toBeCloseTo(0.4, 5);
+  });
+  it('disposePlasmaDroneBeam cleans up both geometry and material', () => {
+    const glow = createPlasmaDroneBeamGlow(1);
+    const geomDispose = vi.spyOn(glow.geometry, 'dispose');
+    const matDispose = vi.spyOn(glow.material as THREE.ShaderMaterial, 'dispose');
+    disposePlasmaDroneBeam(glow);
+    expect(geomDispose).toHaveBeenCalledTimes(1);
+    expect(matDispose).toHaveBeenCalledTimes(1);
+  });
+  it('updatePlasmaDroneBeam writes uTime to the glow uniform (lockstep with core)', () => {
+    const glow = createPlasmaDroneBeamGlow(1);
+    updatePlasmaDroneBeam(
+      glow,
+      { x: 0, y: 0, z: 0 },
+      { x: 5, y: 0, z: 0 },
+      1.23,
+    );
+    expect((glow.material as THREE.ShaderMaterial).uniforms.uTime.value).toBe(1.23);
   });
 });

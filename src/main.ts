@@ -1,5 +1,10 @@
 import { Game } from './game';
 import { ShipSelectScreen } from './ship-select';
+import { ORBIT_DRONES_USE_SHADER_BEAM } from './pickups';
+import {
+  getUseShaderBeam,
+  setUseShaderBeam,
+} from './orbit-drone-vfx';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // My Rules — Entry Point
@@ -51,6 +56,38 @@ async function main(): Promise<void> {
   window.addEventListener('beforeunload', () => {
     game.stop();
   });
+
+  // Phase 7i-2 hotfix #8 — A/B compare plasma beam vs solid cylinder.
+  // Press 'B' to toggle ORBIT_DRONES_USE_SHADER_BEAM at runtime. The
+  // toggle takes effect on the next drone deployment — existing beams
+  // finish their 0.25s lifetime, then new spawns use the new material.
+  // Logged to the console for the user to confirm.
+  // Exposed via __hooks too so the Playwright harness can flip it
+  // without a keyboard event.
+  //
+  // Phase 7i-2 hotfix #9 — actually wired to the dispatch path. In hotfix
+  // #8 the local `useShaderBeam` only fed console.log (createDroneBeam
+  // read the const import directly, ignoring the local), so pressing B
+  // changed the log but not the visual. setUseShaderBeam now mutates
+  // the module-level `_useShaderBeam` that createDroneBeam actually
+  // reads. ORBIT_DRONES_USE_SHADER_BEAM is still the default-seed
+  // value at module init.
+  setUseShaderBeam(ORBIT_DRONES_USE_SHADER_BEAM);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'b' || e.key === 'B') {
+      const next = !getUseShaderBeam();
+      setUseShaderBeam(next);
+      console.log(`[hotfix #8/9] ORBIT_DRONES_USE_SHADER_BEAM = ${next}`);
+    }
+  });
+  (window as unknown as { __hooks: Record<string, unknown> }).__hooks = {
+    ...((window as unknown as { __hooks: Record<string, unknown> }).__hooks ?? {}),
+    setPlasmaBeam: (enabled: boolean) => {
+      setUseShaderBeam(enabled);
+      console.log(`[hotfix #8/9] ORBIT_DRONES_USE_SHADER_BEAM = ${enabled} (via hook)`);
+    },
+    isPlasmaBeam: () => getUseShaderBeam(),
+  };
 }
 
 main();

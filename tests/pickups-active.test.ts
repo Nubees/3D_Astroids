@@ -220,7 +220,11 @@ describe('Orbit Drones — deployment', () => {
     // beamLine is initially invisible (created by createDroneBeam at 0,0,0) and
     // muzzleFlash is also added to scene at construction time even though it is
     // only ever visible for the first 80ms of fire.
-    expect(scene.children.length).toBe(12);
+    //
+    // Phase 7i-2 hotfix #9 — added a second outer "glow" cylinder per
+    // drone (beamGlow). 2 drones × 6 per-drone (mesh, beamLine, beamGlow,
+    // muzzle, tether, lockOn) + 1 aura ring + 1 deploy shockwave = 14.
+    expect(scene.children.length).toBe(14);
   });
 
   it('after 0.5s of ticks, drone meshes are at radius 2.5 from ship (within tolerance)', () => {
