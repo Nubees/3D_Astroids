@@ -541,44 +541,24 @@ export const ORBIT_DRONES_BEAM_REACH = 8; // was 24, hotfix #7 user picked 1/3
 export const ORBIT_DRONES_BEAM_COLOR = 0xff0033; // hotfix #7, was 0xff2233
 export const ORBIT_DRONES_BEAM_LIFETIME_SECONDS = 0.25; // per firing
 
-// Phase 7i-2 hotfix #8 — user reported hotfix #7 beam (0.24u radius,
-// solid CylinderGeometry) still reads as "too thin, not super strong".
-// 3rd failed beam-width iteration under the systematic-debugging 3+ rule.
-// Architectural change: replace the static MeshBasicMaterial with a
-// custom ShaderMaterial that adds (1) radial-falloff alpha so the beam
-// fades to zero at the edges instead of a hard cylinder outline, (2)
-// bright red core (0xff0033) + softer red outer (0x661122) so the
-// silhouette reads as a "glowing core" instead of a "red bar", (3)
-// axial FBM noise animated via a `time` uniform to create a "flowing
-// energy" effect. The flag is exposed so the user can A/B compare
-// the shader version vs the solid-cylinder version in-game before
-// committing. Initial value is TRUE per user's pick of "Shader-driven
-// plasma beam" from the architecture AskUserQuestion. When FALSE, the
-// createDroneBeam factory falls back to the hotfix #7 CylinderGeometry
-// path so the user can flip back without a rebuild. Per-pixel additive
-// overlap math UNCHANGED (still worst-case 2 beams/pixel at peak tier
-// 3), the shader's radial falloff + softer outer color reduces the
-// average per-pixel contribution so the wider effective area doesn't
-// push the worst-case stack toward white.
-export const ORBIT_DRONES_USE_SHADER_BEAM = true;
-export const ORBIT_DRONES_BEAM_OUTER_COLOR = 0x661122; // softer red halo
-export const ORBIT_DRONES_BEAM_PLASMA_SPEED = 3.0; // noise axis scroll rate (Hz)
-export const ORBIT_DRONES_BEAM_PLASMA_FALLOFF_POWER = 2.0; // 1.0=linear, 2.0=quadratic
-// Phase 7i-2 hotfix #9 — second outer "glow" cylinder. The bright core
-// (BEAM_RADIUS=0.24, saturated red, opacity 0.8) handles the "laser"
-// silhouette; this second larger cylinder (radius 0.60, desaturated red,
-// opacity 0.40) approximates the bloom dilation this project can't
-// provide (src/post-processing.ts:23-36 returns a no-op composer stub
-// — UnrealBloomPass removed to fix crystal white-out). Without bloom,
-// a single solid cylinder reads as a fat red bar; with the outer glow
-// the silhouette reads as a "power laser" emitting energy into the
-// surrounding space. Per-pixel additive overlap math UNCHANGED (2
-// beams/pixel worst case at peak tier 3) — the glow's lower opacity
-// + desaturated color (R=0.40 vs R=1.0) keeps the worst-case 2-stack
-// below the white-out cap.
-export const ORBIT_DRONES_BEAM_GLOW_RADIUS = 0.60;
-export const ORBIT_DRONES_BEAM_GLOW_OPACITY = 0.40;
-export const ORBIT_DRONES_BEAM_GLOW_COLOR = 0xaa1133; // desaturated red halo
+// Phase 7i-2 hotfix #10 — user reported hotfix #9 (two-layer plasma
+// shader) beam "not red, not wide". Root cause: quadratic radial
+// falloff (FALLOFF_POWER=2.0) + dim outer color (0x661122) washed the
+// shader to a muddy dim red — only the inner ~30% of cylinder area
+// read as bright red, the rest was 0x661122 RGB (0.4, 0.067, 0.133)
+// that looks black against space. The plasma shader + glow layer were
+// reverted; back to a single MeshBasicMaterial cylinder at
+// BEAM_RADIUS=0.48 (2× hotfix #7's 0.24) — solid saturated red reads
+// as a confident wide red laser. The "energy" character the plasma
+// shader tried to add wasn't worth the color washout; user picked
+// "boring is best" in the hotfix #10 architecture AskUserQuestion.
+// ORBIT_DRONES_USE_SHADER_BEAM, ORBIT_DRONES_BEAM_OUTER_COLOR,
+// ORBIT_DRONES_BEAM_PLASMA_SPEED, ORBIT_DRONES_BEAM_PLASMA_FALLOFF_POWER,
+// ORBIT_DRONES_BEAM_GLOW_RADIUS/OPACITY/COLOR, _useShaderBeam,
+// setUseShaderBeam/getUseShaderBeam, createPlasmaDroneBeam/Glow,
+// updatePlasmaDroneBeam, disposePlasmaDroneBeam, B-key handler, and
+// __hooks.setPlasmaBeam/isPlasmaBeam all REMOVED in this hotfix.
+export const ORBIT_DRONES_BEAM_RADIUS = 0.48; // hotfix #10: 2× wider (was 0.24)
 
 // Phase 7i-2: charge-up hold
 export const ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS = 0.3;

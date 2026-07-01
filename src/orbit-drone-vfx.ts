@@ -80,7 +80,6 @@ import {
   MeshStandardMaterial,
   Quaternion,
   RingGeometry,
-  ShaderMaterial,
   Sprite,
   SpriteMaterial,
   Vector3,
@@ -88,14 +87,8 @@ import {
 import { Vector2 } from './types';
 import {
   ORBIT_DRONES_BEAM_COLOR,
-  ORBIT_DRONES_BEAM_GLOW_COLOR,
-  ORBIT_DRONES_BEAM_GLOW_OPACITY,
-  ORBIT_DRONES_BEAM_GLOW_RADIUS,
-  ORBIT_DRONES_BEAM_OUTER_COLOR,
-  ORBIT_DRONES_BEAM_PLASMA_FALLOFF_POWER,
-  ORBIT_DRONES_BEAM_PLASMA_SPEED,
+  ORBIT_DRONES_BEAM_RADIUS,
   ORBIT_DRONES_CHARGE_UP_RING_MAX_RADIUS,
-  ORBIT_DRONES_USE_SHADER_BEAM,
 } from './pickups';
 import { ORBIT_DRONES_TIER_COLOR, bobOffset, fireFlashCurve, spinAngles } from './orbit-drone';
 
@@ -166,8 +159,9 @@ const MUZZLE_FLASH_SCALE = 0.3;
 // BEAM_HIT_RADIUS=0.3 unchanged (visual is cosmetic; hit check is
 // point-to-segment, independent of cylinder radius). Per-pixel
 // additive overlap math unchanged: worst case 2 beams/pixel, peak
-// stack unchanged.
-const BEAM_RADIUS = 0.24;
+// stack unchanged. Phase 7i-2 hotfix #10 — cylinder radius sourced
+// from the new module constant ORBIT_DRONES_BEAM_RADIUS (0.48, was
+// 0.24) so all beam tuning lives in src/pickups.ts.
 
 export function createDroneMesh(tier: 1 | 2 | 3): Mesh {
   const color = ORBIT_DRONES_TIER_COLOR(tier);
@@ -369,53 +363,27 @@ export function updateDeployShockwave(ring: Mesh, age: number): void {
  * Phase 7i-2 (post-ship hotfix) — beam was Line + LineBasicMaterial in
  * v15.0 but WebGL's `linewidth` is a no-op (always 1px), so the beam
  * was effectively invisible against bloom + bright asteroid surfaces.
- * Now a CylinderGeometry (r=BEAM_RADIUS=0.24, h=1 along Y) so the
- * beam is a real triangle mesh that renders at the intended thickness.
- * Phase 7i-2 hotfix #6 doubled the radius from 0.04 → 0.08 per user
- * feedback "make the laser 2x bigger in width". Phase 7i-2 hotfix #7
- * tripled it again to 0.24 per user feedback "make the laser 2 pixels
- * thicker" — see BEAM_RADIUS My Rules for the bloom-disabled root
- * cause. The cylinder is unit-height; updateBeam scales Y to the
- * drone→target distance and re-orients via
- * Quaternion.setFromUnitVectors(UP, dir). Color (0xff0033 after #7,
- * was 0xff2233 from v15.0), additive blending, opacity cap 0.8, and
- * depthWrite=false are unchanged.
+ * Now a CylinderGeometry (r=ORBIT_DRONES_BEAM_RADIUS=0.48, h=1 along
+ * Y) so the beam is a real triangle mesh that renders at the intended
+ * thickness. Phase 7i-2 hotfix #10 reverted the hotfix #8 plasma
+ * shader and hotfix #9 glow layer — both washed the color toward a
+ * dim muddy red at pixel scale, defeating the "make it red" feedback.
+ * Beam is now a single solid-color cylinder at 2× the previous
+ * radius (0.24 → 0.48 = ~40px diameter at game camera distance,
+ * reads as a confident wide red laser). Color (0xff0033, unchanged
+ * from hotfix #7), additive blending, opacity 0.8, and depthWrite
+ * false are preserved verbatim. Per-pixel additive overlap math
+ * unchanged: worst case 2 beams/pixel at peak tier 3.
  */
-/**
- * Phase 7i-2 hotfix #8 — `createDroneBeam` is now a thin dispatcher that
- * branches on `ORBIT_DRONES_USE_SHADER_BEAM` at construction time.
- *
- * - If true: returns the ShaderMaterial plasma beam from `createPlasmaDroneBeam`
- *   (radial falloff + flowing FBM noise — the in-shader substitute for
- *   bloom that compensates for bloom being disabled in this project).
- * - If false: returns the original MeshBasicMaterial solid-color cylinder
- *   (preserved verbatim from hotfix #7 so the A/B comparison is clean).
- *
- * Runtime note: the constant is read at construction time only. Existing
- * beams in flight keep their original material — flipping the constant
- * mid-game affects the next beam spawned, not currently-active ones.
- * The keyboard handler in `src/main.ts` (B key) and the `__hooks.setPlasmaBeam`
- * hook let the user flip the value at runtime without a rebuild.
- */
-// Phase 7i-2 hotfix #9 — module-level runtime copy of the toggle so the
-// B-key handler and __hooks.setPlasmaBeam actually affect createDroneBeam.
-// In hotfix #8 the toggle lived only as a local `let` in main.ts that
-// was never read by the dispatcher, so pressing B did nothing — user
-// reported "It has not Changed" after the B press, which was technically
-// correct (the toggle was wired to console.log only). Mirrored here
-// so the dispatch path reads the live value, not the const import.
-let _useShaderBeam = ORBIT_DRONES_USE_SHADER_BEAM;
-export function setUseShaderBeam(enabled: boolean): void {
-  _useShaderBeam = enabled;
-}
-export function getUseShaderBeam(): boolean {
-  return _useShaderBeam;
-}
-export function createDroneBeam(tier: 1 | 2 | 3): Mesh {
-  if (_useShaderBeam) {
-    return createPlasmaDroneBeam(tier);
-  }
-  const geometry = new CylinderGeometry(BEAM_RADIUS, BEAM_RADIUS, 1, 8, 1, true);
+export function createDroneBeam(_tier: 1 | 2 | 3): Mesh {
+  const geometry = new CylinderGeometry(
+    ORBIT_DRONES_BEAM_RADIUS,
+    ORBIT_DRONES_BEAM_RADIUS,
+    1,
+    8,
+    1,
+    true,
+  );
   const material = new MeshBasicMaterial({
     color: ORBIT_DRONES_BEAM_COLOR,
     transparent: true,
@@ -430,294 +398,13 @@ export function createDroneBeam(tier: 1 | 2 | 3): Mesh {
   mesh.visible = false;
   return mesh;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Phase 7i-2 hotfix #8 — ShaderMaterial plasma beam (user picked
-// "Shader-driven plasma beam" from the 4-way architecture AskUserQuestion
-// after the 3rd failed beam-width iteration). Replaces the solid-color
-// MeshBasicMaterial cylinder with a custom ShaderMaterial that adds:
-//   1. Radial-falloff alpha — beam fades to zero at the edges instead of
-//      a hard cylinder outline. Eliminates the "red bar" look.
-//   2. Bright core (0xff0033) + softer outer (0x661122) color mix — the
-//      silhouette reads as a "glowing energy core" instead of a "tube
-//      painted red".
-//   3. Axial FBM noise animated by a `time` uniform — creates a "flowing
-//      energy" effect that scrolls drone→target at ORBIT_DRONES_BEAM_PLASMA_SPEED
-//      Hz. This is the in-shader substitute for bloom (which is disabled
-//      in this project, see src/post-processing.ts:23-36). Without bloom,
-//      a static wide cylinder reads as a fat red bar; with the flowing
-//      noise, it reads as a "power laser".
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Phase 7i-2 hotfix #8 — GLSL fragment shader for the plasma beam.
- *
- * UVs come from the CylinderGeometry's default UV layout: u runs around
- * the circumference (0..1), v runs along the length (0=base, 1=top).
- * Because the beam is a CYLINDER (not a flat plane), u is NOT a true
- * "radial" coordinate — it's the angular position around the cylinder.
- * We need a real radial coordinate for the falloff. Trick: convert the
- * world-space position of the fragment to a local coordinate relative
- * to the cylinder's axis (Y in local space), then use the distance from
- * the axis as the radial coordinate. The vertex shader passes the local
- * position to the fragment, and the fragment computes the radial
- * distance in the local frame.
- *
- * The vertex shader is minimal — pass through position, normal, uv.
- *
- * The fragment does:
- *   1. localRadial = length(vLocalPosition.xz) / cylinderRadius
- *   2. radialAlpha = pow(1.0 - localRadial, FALLOFF_POWER)
- *   3. colorMix = mix(OUTER, CORE, radialAlpha)
- *   4. axialNoise = fbm(vUv.y * 6.0 - time * PLASMA_SPEED) // flows
- *   5. finalAlpha = radialAlpha * (0.6 + 0.4 * axialNoise) // pulse
- *   6. gl_FragColor = vec4(colorMix, finalAlpha)
- *
- * Per the additive-blending white-out discipline
- * (feedback_additive_blending_whiteout.md), the per-pixel alpha is
- * capped at 0.8 by mixing against a base brightness floor. The
- * combination of (a) radial falloff reducing edge contribution,
- * (b) 0.6 base + 0.4 noise pulse range, and (c) the OUTER color being
- * a dim red (0x661122) instead of saturated (0xff0033) means the
- * beam cannot stack with a second beam into pure white at the
- * worst-case overlap (2 beams/pixel at peak tier 3 deployment).
- */
-const _PLASMA_VERTEX_SHADER = /* glsl */ `
-  varying vec3 vLocalPosition;
-  varying vec2 vUv;
-  void main() {
-    vLocalPosition = position;
-    vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-const _PLASMA_FRAGMENT_SHADER = /* glsl */ `
-  precision highp float;
-  uniform float uTime;
-  uniform float uPlasmaSpeed;
-  uniform float uFalloffPower;
-  uniform vec3 uCoreColor;
-  uniform vec3 uOuterColor;
-  uniform float uBeamRadius;
-  uniform float uOpacityCap;
-  varying vec3 vLocalPosition;
-  varying vec2 vUv;
-
-  // 1D hash + smooth interpolation. Cheap, branchless, deterministic.
-  // Identical pattern to the inline GLSL noise in src/crystal-fx.ts:140
-  // (Phase 6d CrystalLightning) and src/lightning.ts:60 (vendored
-  // three.js r149). Avoids the need to vendor a SimplexNoise library
-  // for a single FBM call.
-  float hash11(float p) {
-    p = fract(p * 0.1031);
-    p *= p + 33.33;
-    p *= p + p;
-    return fract(p);
-  }
-
-  float noise1d(float x) {
-    float i = floor(x);
-    float f = fract(x);
-    float u = f * f * (3.0 - 2.0 * f);
-    return mix(hash11(i), hash11(i + 1.0), u);
-  }
-
-  // 4-octave FBM. The 0.5 amplitude ladder + 2.0 frequency ladder is
-  // the standard fBm recipe (Musgrave et al 1992) — gives a fractal
-  // texture that reads as "energy" without obvious periodicity.
-  float fbm(float x) {
-    float v = 0.0;
-    float amp = 0.5;
-    for (int i = 0; i < 4; i++) {
-      v += amp * noise1d(x);
-      x *= 2.0;
-      amp *= 0.5;
-    }
-    return v;
-  }
-
-  void main() {
-    // CylinderGeometry local frame: axis is Y, radial direction is XZ.
-    // Length(xz) at the cylinder surface equals uBeamRadius.
-    float radial = length(vLocalPosition.xz) / uBeamRadius;
-    // Clamp to [0, 1] — fragments inside the cap triangles (at the
-    // cylinder ends) can have radial > 1 in degenerate cases.
-    radial = clamp(radial, 0.0, 1.0);
-    // Radial falloff: 1.0 at center (radial=0), 0.0 at edge (radial=1).
-    // pow() sharpens the falloff — FALLOFF_POWER=2.0 gives a quadratic
-    // falloff that reads as a "soft glow" rather than a "tube".
-    float radialAlpha = pow(1.0 - radial, uFalloffPower);
-
-    // Core/outer color mix: outer (dim red) at edges, core (bright red)
-    // at center. The mix factor uses radialAlpha so the colors blend
-    // along the same gradient as the alpha.
-    vec3 color = mix(uOuterColor, uCoreColor, radialAlpha);
-
-    // Axial noise: scrolls along the beam length. vUv.y goes 0→1 along
-    // the cylinder Y axis, time advances the noise sample so the
-    // pattern appears to flow drone→target.
-    float axialCoord = vUv.y * 6.0 - uTime * uPlasmaSpeed;
-    float noiseValue = fbm(axialCoord);
-
-    // Modulate alpha by noise: 0.6 base + 0.4 noise range. The base
-    // ensures the beam is always visible (never fades to zero), the
-    // noise range gives the "flowing energy" texture.
-    float finalAlpha = radialAlpha * (0.6 + 0.4 * noiseValue);
-
-    // Cap finalAlpha at uOpacityCap per the additive-blending white-out
-    // discipline — even with 2 beams stacked, the per-pixel result
-    // stays at 2*CAP of one beam, not 2.0 of one beam. Core uses 0.8,
-    // glow uses 0.4, worst-case 2-stack of (core + glow) is 1.2 per
-    // pixel — well below the white-out threshold.
-    finalAlpha = min(finalAlpha, uOpacityCap);
-
-    gl_FragColor = vec4(color, finalAlpha);
-  }
-`;
-
-/**
- * Phase 7i-2 hotfix #8 — plasma beam factory. Replaces createDroneBeam's
- * MeshBasicMaterial cylinder with a ShaderMaterial cylinder. Same
- * geometry (CylinderGeometry r=BEAM_RADIUS, unit Y-height) so updateBeam
- * per-frame pose logic is unchanged. The shader needs a `time` uniform
- * updated each frame; updatePlasmaDroneBeam writes it via the standard
- * `material.uniforms.uTime.value = clock` pattern.
- */
-export function createPlasmaDroneBeam(_tier: 1 | 2 | 3): Mesh {
-  const geometry = new CylinderGeometry(BEAM_RADIUS, BEAM_RADIUS, 1, 12, 1, true);
-  const material = new ShaderMaterial({
-    uniforms: {
-      uTime: { value: 0 },
-      uPlasmaSpeed: { value: ORBIT_DRONES_BEAM_PLASMA_SPEED },
-      uFalloffPower: { value: ORBIT_DRONES_BEAM_PLASMA_FALLOFF_POWER },
-      uCoreColor: { value: new Vector3(
-        ((ORBIT_DRONES_BEAM_COLOR >> 16) & 0xff) / 255,
-        ((ORBIT_DRONES_BEAM_COLOR >> 8) & 0xff) / 255,
-        (ORBIT_DRONES_BEAM_COLOR & 0xff) / 255,
-      ) },
-      uOuterColor: { value: new Vector3(
-        ((ORBIT_DRONES_BEAM_OUTER_COLOR >> 16) & 0xff) / 255,
-        ((ORBIT_DRONES_BEAM_OUTER_COLOR >> 8) & 0xff) / 255,
-        (ORBIT_DRONES_BEAM_OUTER_COLOR & 0xff) / 255,
-      ) },
-      uBeamRadius: { value: BEAM_RADIUS },
-      uOpacityCap: { value: 0.8 },
-    },
-    vertexShader: _PLASMA_VERTEX_SHADER,
-    fragmentShader: _PLASMA_FRAGMENT_SHADER,
-    transparent: true,
-    blending: AdditiveBlending,
-    depthWrite: false,
-    side: DoubleSide,
-  });
-  const mesh = new Mesh(geometry, material);
-  mesh.visible = false;
-  return mesh;
-}
-
-/**
- * Phase 7i-2 hotfix #8 — per-frame pose update for the plasma beam.
- * Identical to updateBeam's pose logic (drone→target midpoint, Y-scale
- * to length, quaternion to align +Y with direction) but also writes
- * the shader's uTime uniform so the axial noise animation advances.
- */
-export function updatePlasmaDroneBeam(
-  beam: Mesh,
-  dronePos: { x: number; y: number; z: number },
-  targetPos: { x: number; y: number; z: number },
-  timeSeconds: number,
-): void {
-  // Pose — identical to updateBeam.
-  const dx = targetPos.x - dronePos.x;
-  const dy = targetPos.y - dronePos.y;
-  const dz = targetPos.z - dronePos.z;
-  const length = Math.max(0.001, Math.hypot(dx, dy, dz));
-  _BEAM_DIR.set(dx / length, dy / length, dz / length);
-  _BEAM_QUAT.setFromUnitVectors(_BEAM_UP, _BEAM_DIR);
-  beam.position.set(
-    (dronePos.x + targetPos.x) * 0.5,
-    (dronePos.y + targetPos.y) * 0.5,
-    (dronePos.z + targetPos.z) * 0.5,
-  );
-  beam.quaternion.copy(_BEAM_QUAT);
-  beam.scale.set(1, length, 1);
-  // Shader time update — advances the axial noise animation.
-  (beam.material as ShaderMaterial).uniforms.uTime.value = timeSeconds;
-}
-
-/**
- * Phase 7i-2 hotfix #8 — dispose the plasma beam's GPU resources.
- * The ShaderMaterial is custom so it isn't auto-disposed by Three.js's
- * standard MeshBasicMaterial path; explicit dispose is required.
- */
-export function disposePlasmaDroneBeam(beam: Mesh): void {
-  beam.geometry.dispose();
-  (beam.material as ShaderMaterial).dispose();
-}
-
-/**
- * Phase 7i-2 hotfix #9 — outer "glow" cylinder for the two-layer beam.
- * Pairs with the bright core returned by createPlasmaDroneBeam: the core
- * handles the saturated-red silhouette (~19px diameter at game camera
- * distance), the glow provides a desaturated-red halo (~37px diameter)
- * that approximates the bloom dilation this project can't provide
- * (src/post-processing.ts:23-36 returns a no-op composer stub).
- *
- * Same plasma shader as the core (radial falloff + axial FBM noise) but
- * with different uniforms:
- *   - uCoreColor = GLOW_COLOR (desaturated red, reads as halo not beam)
- *   - uOuterColor = GLOW_COLOR (no contrast — the glow is uniformly
- *     dim, not a bright center)
- *   - uBeamRadius = GLOW_RADIUS (the falloff normalizer scales with the
- *     larger geometry)
- *   - uFalloffPower = same as core (consistent halo shape)
- *
- * The opacity cap is 0.40 (vs core's 0.8) so the per-pixel additive
- * contribution stays well below the 2-beam stack limit. Returns a
- * Mesh with visible=false; active-deployments sets visible=true on
- * fire and back to false on beam expiry. updatePlasmaDroneBeam and
- * disposePlasmaDroneBeam work unchanged on this mesh because it uses
- * the same shader, geometry family, and material lifecycle.
- */
-export function createPlasmaDroneBeamGlow(_tier: 1 | 2 | 3): Mesh {
-  const geometry = new CylinderGeometry(
-    ORBIT_DRONES_BEAM_GLOW_RADIUS,
-    ORBIT_DRONES_BEAM_GLOW_RADIUS,
-    1,
-    16, // more segments than core (12) — larger circumference needs more polys
-    1,
-    true,
-  );
-  const material = new ShaderMaterial({
-    uniforms: {
-      uTime: { value: 0 },
-      uPlasmaSpeed: { value: ORBIT_DRONES_BEAM_PLASMA_SPEED },
-      uFalloffPower: { value: ORBIT_DRONES_BEAM_PLASMA_FALLOFF_POWER },
-      uCoreColor: { value: new Vector3(
-        ((ORBIT_DRONES_BEAM_GLOW_COLOR >> 16) & 0xff) / 255,
-        ((ORBIT_DRONES_BEAM_GLOW_COLOR >> 8) & 0xff) / 255,
-        (ORBIT_DRONES_BEAM_GLOW_COLOR & 0xff) / 255,
-      ) },
-      uOuterColor: { value: new Vector3(
-        ((ORBIT_DRONES_BEAM_GLOW_COLOR >> 16) & 0xff) / 255,
-        ((ORBIT_DRONES_BEAM_GLOW_COLOR >> 8) & 0xff) / 255,
-        (ORBIT_DRONES_BEAM_GLOW_COLOR & 0xff) / 255,
-      ) },
-      uBeamRadius: { value: ORBIT_DRONES_BEAM_GLOW_RADIUS },
-      uOpacityCap: { value: ORBIT_DRONES_BEAM_GLOW_OPACITY },
-    },
-    vertexShader: _PLASMA_VERTEX_SHADER,
-    fragmentShader: _PLASMA_FRAGMENT_SHADER,
-    transparent: true,
-    blending: AdditiveBlending,
-    depthWrite: false,
-    side: DoubleSide,
-  });
-  const mesh = new Mesh(geometry, material);
-  mesh.visible = false;
-  return mesh;
-}
+// Phase 7i-2 hotfix #10 — plasma shader + glow layer reverted. User
+// picked "Drop the shader, go solid + 2× wider" after the shader's
+// quadratic falloff (FALLOFF_POWER=2.0) + dim outer color (0x661122)
+// washed the beam to a muddy dim red. Solid MeshBasicMaterial at
+// BEAM_RADIUS=0.48 (hotfix #10) reads as a confident wide red laser
+// without the color washout. See createDroneBeam above for the new
+// home of the beam factory.
 
 /**
  * Phase 7i-2 — bright red muzzle flash sprite at the drone barrel.
