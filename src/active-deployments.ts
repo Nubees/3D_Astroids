@@ -275,7 +275,7 @@ export interface PerDroneState {
   // no-op (1px max), so a bright-red additive line was effectively
   // invisible against bloom + bright asteroid surfaces — the user
   // reported "beams behaving weird" because the visual punch was
-  // missing. Now a CylinderGeometry mesh (r=0.04, unit h, additive
+  // missing. Now a CylinderGeometry mesh (r=0.24, unit h, additive
   // 0xff2233, opacity 0.8 cap, depthWrite false) that updateBeam
   // per-frame poses at the drone→target midpoint with the cylinder Y
   // scaled to the segment length and rotated to align with the

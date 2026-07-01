@@ -43,7 +43,8 @@ import { MAGNET_RADIUS } from './scrap';
 //          drones reach far asteroids without constant heading rotation,
 //          the 9→11s fire-interval taper (0.4s→1.0s) creates a clear
 //          wind-down telegraph before expiry, and the new ORBIT_DRONES_BEAM_*
-//          constants (BEAM_REACH=24, BEAM_COLOR=0xff2233, BEAM_LIFETIME=0.25s)
+//          constants (BEAM_REACH=8 after hotfix #7, was 24; BEAM_COLOR=0xff0033
+//          after hotfix #7, was 0xff2233; BEAM_LIFETIME=0.25s)
 //          replace the per-tick projectile path with an instant beam.
 //          The charge-up sequence (HOLD 0.3s → DEPLOY_SCALE 2.5 shockwave →
 //          LERP 0.7s drone arrival) makes tier-3 deploys feel cinematic
@@ -519,8 +520,25 @@ export const ORBIT_DRONES_DRONE_COUNT = 2;
 export const ORBIT_DRONES_FADE_OUT_SECONDS = 0.3;
 
 // Phase 7i-2: beam replaces projectile
-export const ORBIT_DRONES_BEAM_REACH = 24; // was ORBIT_DRONES_TARGET_RADIUS=4
-export const ORBIT_DRONES_BEAM_COLOR = 0xff2233; // bright red
+// Hotfix #7 — user feedback after #6: "change the range the lazer
+// shoots, set it smaller by 50%". User chose the more aggressive
+// option: ORBIT_DRONES_BEAM_REACH 24 → 8 (1/3 the original, not just
+// 50%). Drones now operate as a short-range perimeter guard — the
+// ship needs to be near asteroids for the drones to engage, which
+// matches the user's preferred playstyle (per the inline follow-up
+// "make the laser 2 pixels thicker" — they're focusing on close-in
+// drone combat, not a screen-wide sweep).
+//
+// Hotfix #7 — color: user picked "Push to a more saturated red" from
+// the AskUserQuestion. 0xff2233 → 0xff0033 (R=255, G=0, B=51). The
+// green channel is zeroed so additive blending against bright orange
+// asteroids doesn't push the rendered result toward yellow/orange;
+// 100% R-channel saturation + zero G-channel means the beam reads as
+// bright red regardless of the surface underneath. The 3× radius
+// increase (hotfix #7 BEAM_RADIUS 0.08 → 0.24) gives the saturated
+// red enough area to DOMINATE the visual patch.
+export const ORBIT_DRONES_BEAM_REACH = 8; // was 24, hotfix #7 user picked 1/3
+export const ORBIT_DRONES_BEAM_COLOR = 0xff0033; // hotfix #7, was 0xff2233
 export const ORBIT_DRONES_BEAM_LIFETIME_SECONDS = 0.25; // per firing
 
 // Phase 7i-2: charge-up hold

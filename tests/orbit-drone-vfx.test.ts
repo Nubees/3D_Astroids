@@ -373,7 +373,7 @@ describe('Phase 7i-2 — createDroneBeam', () => {
     const mat = beam.material as THREE.MeshBasicMaterial;
     expect(beam).toBeInstanceOf(THREE.Mesh);
     expect(mat.blending).toBe(THREE.AdditiveBlending);
-    expect(mat.color.getHex()).toBe(0xff2233);
+    expect(mat.color.getHex()).toBe(0xff0033);
     expect(mat.opacity).toBeLessThanOrEqual(0.8);
   });
 
@@ -382,16 +382,20 @@ describe('Phase 7i-2 — createDroneBeam', () => {
     expect(beam.visible).toBe(false);
   });
 
-  it('uses a CylinderGeometry with r=0.08 + h=1 (unit height for per-frame Y-scale)', () => {
+  it('uses a CylinderGeometry with r=0.24 + h=1 (unit height for per-frame Y-scale)', () => {
     const beam = createDroneBeam(1);
     const geom = beam.geometry as THREE.CylinderGeometry;
     expect(geom).toBeInstanceOf(THREE.CylinderGeometry);
-    // radiusTop === radiusBottom === 0.08 (Phase 7i-2 hotfix #6 — was 0.04
-    // before user asked to "make the laser 2x bigger in width"; 0.08 = 2×0.04
-    // = 2× the cylinder diameter, per the user's "2x in width" phrasing).
-    // Unit h is set via scale.y in updateBeam, not baked into the geometry.
-    expect(geom.parameters.radiusTop).toBeCloseTo(0.08, 6);
-    expect(geom.parameters.radiusBottom).toBeCloseTo(0.08, 6);
+    // radiusTop === radiusBottom === 0.24 (Phase 7i-2 hotfix #7 — was 0.08
+    // after hotfix #6 (0.04→0.08), now 0.24 per user feedback "make the
+    // lasers 2 pixels thicker" interpreted as "make the laser actually
+    // read as thick". Bloom is DISABLED in this project (see
+    // src/post-processing.ts:23-36) so the wider cylinder is the only
+    // lever for visual area; 0.24u radius = 0.48u diameter, ~25px on a
+    // 1280px viewport at camera z=20, FOV=60°. Unit h is set via scale.y
+    // in updateBeam, not baked into the geometry.
+    expect(geom.parameters.radiusTop).toBeCloseTo(0.24, 6);
+    expect(geom.parameters.radiusBottom).toBeCloseTo(0.24, 6);
     expect(geom.parameters.height).toBe(1);
   });
 });
@@ -401,7 +405,7 @@ describe('Phase 7i-2 — createMuzzleFlash', () => {
     const flash = createMuzzleFlash(1);
     const mat = flash.material as THREE.SpriteMaterial;
     expect(mat.blending).toBe(THREE.AdditiveBlending);
-    expect(mat.color.getHex()).toBe(0xff2233);
+    expect(mat.color.getHex()).toBe(0xff0033);
   });
 });
 

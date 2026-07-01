@@ -162,8 +162,8 @@ describe('Per-kind constants match spec values', () => {
     expect(ORBIT_DRONES_DURATION_SECONDS).toBe(11.0);
     expect(ORBIT_DRONES_ORBIT_RADIUS).toBe(2.5);
     expect(ORBIT_DRONES_ORBIT_PERIOD_SECONDS).toBe(1.5);
-    // Phase 7i-2 — ORBIT_DRONES_TARGET_RADIUS is now an alias of BEAM_REACH (24).
-    expect(ORBIT_DRONES_TARGET_RADIUS).toBe(24.0);
+    // Phase 7i-2 — ORBIT_DRONES_TARGET_RADIUS is now an alias of BEAM_REACH (8, hotfix #7).
+    expect(ORBIT_DRONES_TARGET_RADIUS).toBe(8.0);
     expect(ORBIT_DRONES_FIRE_INTERVAL_SECONDS).toBe(0.4);
     expect(ORBIT_DRONES_DAMAGE).toBe(1);
     expect(ORBIT_DRONES_DRONE_COUNT).toBe(2);
@@ -302,12 +302,12 @@ describe('Phase 7i-2 — power redesign constants', () => {
     expect(ORBIT_DRONES_FIRE_INTERVAL_TAPER_END).toBe(1.0);
   });
 
-  it('ORBIT_DRONES_BEAM_REACH === 24', () => {
-    expect(ORBIT_DRONES_BEAM_REACH).toBe(24);
+  it('ORBIT_DRONES_BEAM_REACH === 8 (Phase 7i-2 hotfix #7: 24 → 8)', () => {
+    expect(ORBIT_DRONES_BEAM_REACH).toBe(8);
   });
 
-  it('ORBIT_DRONES_BEAM_COLOR === 0xff2233', () => {
-    expect(ORBIT_DRONES_BEAM_COLOR).toBe(0xff2233);
+  it('ORBIT_DRONES_BEAM_COLOR === 0xff0033 (Phase 7i-2 hotfix #7: 0xff2233 → 0xff0033)', () => {
+    expect(ORBIT_DRONES_BEAM_COLOR).toBe(0xff0033);
   });
 
   it('ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS === 0.3', () => {

@@ -29,11 +29,19 @@
 //            ignores `linewidth` so 1px additive red was invisible against
 //            bloom + bright asteroid surfaces. Cylinder r=BEAM_RADIUS
 //            (was 0.04, hotfix #6 doubled to 0.08 = 2× width per user
-//            "make the laser 2x bigger in width" — the beam now reads
-//            as a clearly visible "laser" streak rather than a thin
-//            streak that was washing to orange against bloom + dark
-//            asteroid backdrop) renders as a real triangle mesh and
-//            reads at glance distance. Same visual contract otherwise.
+//            "make the laser 2x bigger in width", hotfix #7 tripled to
+//            0.24 = 3× the original 0.04 per user "make the lasers 2
+//            pixels thicker" — root cause was that bloom is DISABLED
+//            in this project so the wider cylinder is the only lever
+//            for visual area; at game camera z=20, FOV=60° the 0.16u
+//            cylinder was still only ~7-8px on a 1280px viewport)
+//            renders as a real triangle mesh and reads as a confident
+//            bright-red laser at glance distance. Color is 0xff0033
+//            after hotfix #7 (was 0xff2233 from v15.0→#6) — R=255,
+//            G=0, B=51 zeroed green channel so additive blending
+//            against warm surfaces (bright orange asteroids) doesn't
+//            push the result toward yellow/orange. Same visual
+//            contract otherwise.
 //          - createMuzzleFlash — additive Sprite at muzzle using the
 //            shared lock-on diamond texture, 80ms sin-curve opacity 0→0.6→0
 //          - createChargeUpRing — tier-colored flat ring under ship
@@ -128,7 +136,35 @@ const MUZZLE_FLASH_SCALE = 0.3;
 // existing bloom + dark asteroid backdrop. Color is unchanged
 // (0xff2233 was already "bright red"); bumping the radius is what
 // makes it LOOK brighter because more pixels hit the saturation cap.
-const BEAM_RADIUS = 0.08;
+//
+// Phase 7i-2 hotfix #7 — user feedback after #6: "Note Sees to be no
+// change, as THe Lasers are not thinker and Not in Bright RED" —
+// root-cause analysis showed the prior premise was wrong:
+//  • Bloom is DISABLED in this project (src/post-processing.ts:23-36
+//    returns a no-op composer stub — UnrealBloomPass removed to fix
+//    crystal white-out), so there is no bloom convolution dilating
+//    the saturated pixels. The 0.04→0.08 change only doubled the
+//    geometric area; at camera z=20, FOV=60° the 0.16u-diameter
+//    cylinder is only ~7-8px on a 1280px viewport which still reads
+//    as a thin streak.
+//  • The color was already 0xff2233 (R=255, G=34, B=51) but additive
+//    blending against bright orange asteroids (R~0.8, G~0.4, B~0.1)
+//    pushes the rendered result toward warm tones. The saturated
+//    red needs to DOMINATE the visual patch, not blend into the
+//    surface below it.
+// Fix: BEAM_RADIUS 0.08 → 0.24 (3× per user "make the laser 2 pixels
+// thicker" — interpreted as "make the laser actually read as thick"
+// since 2px at game camera distance is below the visual threshold).
+// ORBIT_DRONES_BEAM_COLOR 0xff2233 → 0xff0033 (R=255, G=0, B=51 —
+// maximum red saturation, G channel zeroed so additive mixing
+// against any warm surface pulls the result back toward red, not
+// toward yellow/orange). 9× the geometric area + 100% R-channel
+// saturation = confident bright-red laser even over bright asteroids.
+// BEAM_HIT_RADIUS=0.3 unchanged (visual is cosmetic; hit check is
+// point-to-segment, independent of cylinder radius). Per-pixel
+// additive overlap math unchanged: worst case 2 beams/pixel, peak
+// stack unchanged.
+const BEAM_RADIUS = 0.24;
 
 export function createDroneMesh(tier: 1 | 2 | 3): Mesh {
   const color = ORBIT_DRONES_TIER_COLOR(tier);
@@ -330,14 +366,17 @@ export function updateDeployShockwave(ring: Mesh, age: number): void {
  * Phase 7i-2 (post-ship hotfix) — beam was Line + LineBasicMaterial in
  * v15.0 but WebGL's `linewidth` is a no-op (always 1px), so the beam
  * was effectively invisible against bloom + bright asteroid surfaces.
- * Now a thin CylinderGeometry (r=BEAM_RADIUS=0.08, h=1 along Y) so the
+ * Now a CylinderGeometry (r=BEAM_RADIUS=0.24, h=1 along Y) so the
  * beam is a real triangle mesh that renders at the intended thickness.
  * Phase 7i-2 hotfix #6 doubled the radius from 0.04 → 0.08 per user
- * feedback "make the laser 2x bigger in width". The cylinder is
- * unit-height; updateBeam scales Y to the drone→target distance and
- * re-orients via Quaternion.setFromUnitVectors(UP, dir). Color
- * (0xff2233), additive blending, opacity cap 0.8, and depthWrite=false
- * are unchanged.
+ * feedback "make the laser 2x bigger in width". Phase 7i-2 hotfix #7
+ * tripled it again to 0.24 per user feedback "make the laser 2 pixels
+ * thicker" — see BEAM_RADIUS My Rules for the bloom-disabled root
+ * cause. The cylinder is unit-height; updateBeam scales Y to the
+ * drone→target distance and re-orients via
+ * Quaternion.setFromUnitVectors(UP, dir). Color (0xff0033 after #7,
+ * was 0xff2233 from v15.0), additive blending, opacity cap 0.8, and
+ * depthWrite=false are unchanged.
  */
 export function createDroneBeam(_tier: 1 | 2 | 3): Mesh {
   const geometry = new CylinderGeometry(BEAM_RADIUS, BEAM_RADIUS, 1, 8, 1, true);

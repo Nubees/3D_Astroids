@@ -48,11 +48,12 @@
 //           ── Phase 7i-2 (Task 10) peak-tier assertion paragraph ──
 //           This file gains a 4th test (test 4/4) for the Phase 7i-2 closeout
 //           that asserts the three load-bearing spec changes that the user can
-//           eyeball: (1) red beam color = 0xff2233 (ORBIT_DRONES_BEAM_COLOR in
-//           src/pickups.ts:523), (2) orbit radius > 2.0 (the value was bumped
-//           from 1.5u to 2.5u in src/pickups.ts:513 — ORBIT_DRONES_ORBIT_RADIUS
-//           is the spec; the >2.0 lower bound handles the Y-bob trough), and
-//           (3) 11s active window (the dep.remaining field starts at
+//           eyeball: (1) red beam color = 0xff0033 (ORBIT_DRONES_BEAM_COLOR in
+//           src/pickups.ts:523 — Phase 7i-2 hotfix #7: was 0xff2233), (2) orbit
+//           radius > 2.0 (the value was bumped from 1.5u to 2.5u in
+//           src/pickups.ts:513 — ORBIT_DRONES_ORBIT_RADIUS is the spec; the
+//           >2.0 lower bound handles the Y-bob trough), and (3) 11s active
+//           window (the dep.remaining field starts at
 //           ORBIT_DRONES_DURATION_SECONDS=11.0 and dt-decrements each frame).
 //
 //           The hook surface is `__game` (set in src/main.ts:34-35) NOT
@@ -66,7 +67,7 @@
 //           ~5u of the ship in headless mode), so fireDroneBeam's target
 //           branch never fires and `drone.beamLine.visible` stays false.
 //           The factory still constructs the Line with the correct red
-//           material at spawn, so `beamLine.material.color.getHex() === 0xff2233`
+//           material at spawn, so `beamLine.material.color.getHex() === 0xff0033`
 //           IS the load-bearing Phase 7i-2 spec change — the visibility
 //           is a runtime detail. We assert the color IF beamLine exists
 //           and silently skip when it is null (shouldn't happen — spawnDroneDeployment
@@ -480,13 +481,14 @@ test.describe('Phase 7i Sprint 2 — drone deploy + shockwave', () => {
     expect(peakState.tier).toBe(3);
     expect(peakState.droneCount).toBe(4);
 
-    // (1) Red beam color = 0xff2233 (ORBIT_DRONES_BEAM_COLOR). The beam
-    // Line is created at spawn with the correct material color, so even
-    // if the runtime never promotes visible=true (no in-range asteroid),
-    // the material itself is the spec. See My Rules DELTA at the top of
-    // this file for the visibility-vs-color reasoning.
+    // (1) Red beam color = 0xff0033 (ORBIT_DRONES_BEAM_COLOR, Phase 7i-2
+    // hotfix #7: was 0xff2233). The beam Line is created at spawn with the
+    // correct material color, so even if the runtime never promotes
+    // visible=true (no in-range asteroid), the material itself is the
+    // spec. See My Rules DELTA at the top of this file for the
+    // visibility-vs-color reasoning.
     expect(peakState.beamLinePresent).toBe(true);
-    expect(peakState.beamColor).toBe(0xff2233);
+    expect(peakState.beamColor).toBe(0xff0033);
 
     // (2) Orbit radius > 2.0. The spec is 2.5u
     // (ORBIT_DRONES_ORBIT_RADIUS=2.5 in src/pickups.ts:513) plus a Y-bob
