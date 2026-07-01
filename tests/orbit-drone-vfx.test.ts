@@ -394,18 +394,21 @@ describe('Phase 7i-2 — createDroneBeam', () => {
     expect(beam.visible).toBe(false);
   });
 
-  it('uses a CylinderGeometry with r=0.48 + h=1 (unit height for per-frame Y-scale)', () => {
+  it('uses a CylinderGeometry with r=0.08 + h=1 (5px-wide at 720p viewport)', () => {
     const beam = createDroneBeam(1);
     const geom = beam.geometry as THREE.CylinderGeometry;
     expect(geom).toBeInstanceOf(THREE.CylinderGeometry);
-    // radiusTop === radiusBottom === 0.48 (Phase 7i-2 hotfix #10 — 2× wider
-    // than hotfix #7's 0.24, 12× the original 0.04). Bloom is DISABLED
-    // in this project (see src/post-processing.ts:23-36) so the wider
-    // cylinder is the only lever for visual area; 0.48u radius = 0.96u
-    // diameter, ~50px on a 1280px viewport at camera z=20, FOV=60°. Unit
-    // h is set via scale.y in updateBeam, not baked into the geometry.
-    expect(geom.parameters.radiusTop).toBeCloseTo(0.48, 6);
-    expect(geom.parameters.radiusBottom).toBeCloseTo(0.48, 6);
+    // radiusTop === radiusBottom === 0.08 (Phase 7i-2 hotfix #11 —
+    // "5 pixel wide" beam per user's explicit request after hotfix
+    // #10's 0.48 cylinder still read thin on their screen). Math:
+    // camera z=20, FOV=60°, viewport 720px tall → 1u = 31.18px.
+    // r=0.08u → 0.16u diameter → ~5px on screen. Beam width is
+    // viewport-dependent (5px at 720p = ~7-8px at 1080p); for
+    // viewport-independent width the future polish pass should swap
+    // to a screen-space overlay (Sprite or clip-space shader). For
+    // now this matches the user's "basic and simple" instruction.
+    expect(geom.parameters.radiusTop).toBeCloseTo(0.08, 6);
+    expect(geom.parameters.radiusBottom).toBeCloseTo(0.08, 6);
     expect(geom.parameters.height).toBe(1);
   });
 });

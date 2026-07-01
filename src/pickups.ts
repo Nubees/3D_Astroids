@@ -558,7 +558,15 @@ export const ORBIT_DRONES_BEAM_LIFETIME_SECONDS = 0.25; // per firing
 // setUseShaderBeam/getUseShaderBeam, createPlasmaDroneBeam/Glow,
 // updatePlasmaDroneBeam, disposePlasmaDroneBeam, B-key handler, and
 // __hooks.setPlasmaBeam/isPlasmaBeam all REMOVED in this hotfix.
-export const ORBIT_DRONES_BEAM_RADIUS = 0.48; // hotfix #10: 2× wider (was 0.24)
+export const ORBIT_DRONES_BEAM_RADIUS = 0.08; // hotfix #11: 5px-wide at 720p
+// Math: game camera z=20, FOV=60°, viewport 720px tall → 1u = 31.18px.
+// r=0.08u → 0.16u diameter → ~5px on screen. User's exact "5 pixel wide"
+// request from the post-hotfix-#10 frustration. Width assumes the
+// default 720p viewport; on higher-res viewports the beam will look
+// proportionally thinner (5px at 1080p would need r=0.053). Future
+// polish pass can swap to a screen-space overlay (Sprite or clip-space
+// shader) for viewport-independent width; for now this matches the
+// user's "basic and simple" instruction.
 
 // Phase 7i-2: charge-up hold
 export const ORBIT_DRONES_CHARGE_UP_HOLD_SECONDS = 0.3;

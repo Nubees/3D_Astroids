@@ -363,17 +363,21 @@ export function updateDeployShockwave(ring: Mesh, age: number): void {
  * Phase 7i-2 (post-ship hotfix) — beam was Line + LineBasicMaterial in
  * v15.0 but WebGL's `linewidth` is a no-op (always 1px), so the beam
  * was effectively invisible against bloom + bright asteroid surfaces.
- * Now a CylinderGeometry (r=ORBIT_DRONES_BEAM_RADIUS=0.48, h=1 along
+ * Now a CylinderGeometry (r=ORBIT_DRONES_BEAM_RADIUS=0.08, h=1 along
  * Y) so the beam is a real triangle mesh that renders at the intended
- * thickness. Phase 7i-2 hotfix #10 reverted the hotfix #8 plasma
- * shader and hotfix #9 glow layer — both washed the color toward a
- * dim muddy red at pixel scale, defeating the "make it red" feedback.
- * Beam is now a single solid-color cylinder at 2× the previous
- * radius (0.24 → 0.48 = ~40px diameter at game camera distance,
- * reads as a confident wide red laser). Color (0xff0033, unchanged
- * from hotfix #7), additive blending, opacity 0.8, and depthWrite
- * false are preserved verbatim. Per-pixel additive overlap math
- * unchanged: worst case 2 beams/pixel at peak tier 3.
+ * thickness. Phase 7i-2 hotfix #11 reset the beam to the user's
+ * "5 pixel wide" target after hotfix #10's 0.48 cylinder still read
+ * thin on their screen. Math: camera z=20, FOV=60°, viewport 720px
+ * tall → 1 world unit = 31.18px. r=0.08u → 0.16u diameter → ~5px on
+ * screen. Width assumes the default 720p viewport; on higher-res
+ * viewports the beam will look proportionally thinner (5px at 1080p
+ * would need r=0.053). Future polish pass can swap to a screen-space
+ * overlay (Sprite or clip-space shader) for viewport-independent
+ * width; for now this matches the user's "basic and simple"
+ * instruction. Color (0xff0033, unchanged from hotfix #7), additive
+ * blending, opacity 0.8, and depthWrite false are preserved verbatim.
+ * Per-pixel additive overlap math unchanged: worst case 2 beams/pixel
+ * at peak tier 3.
  */
 export function createDroneBeam(_tier: 1 | 2 | 3): Mesh {
   const geometry = new CylinderGeometry(
@@ -398,13 +402,15 @@ export function createDroneBeam(_tier: 1 | 2 | 3): Mesh {
   mesh.visible = false;
   return mesh;
 }
-// Phase 7i-2 hotfix #10 — plasma shader + glow layer reverted. User
-// picked "Drop the shader, go solid + 2× wider" after the shader's
-// quadratic falloff (FALLOFF_POWER=2.0) + dim outer color (0x661122)
-// washed the beam to a muddy dim red. Solid MeshBasicMaterial at
-// BEAM_RADIUS=0.48 (hotfix #10) reads as a confident wide red laser
-// without the color washout. See createDroneBeam above for the new
-// home of the beam factory.
+// Phase 7i-2 hotfix #11 — after hotfix #10 reverted the plasma
+// shader, the user picked "5 pixel wide" as the explicit target.
+// BEAM_RADIUS 0.48 → 0.08 = 5px on a 720p viewport. Color stays
+// 0xff0033 (zero G channel — the only constant from the 7-iteration
+// series that actually worked). Single solid MeshBasicMaterial
+// cylinder; no shader, no glow. Width is viewport-dependent; a
+// future polish pass should swap to a screen-space overlay for
+// viewport-independent width. See createDroneBeam above for the
+// new home of the beam factory.
 
 /**
  * Phase 7i-2 — bright red muzzle flash sprite at the drone barrel.
