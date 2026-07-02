@@ -214,6 +214,7 @@ import {
 // TypeScript duplicate-identifier error.
 import {
   MAGNET_BOOSTER_DURATION_SECONDS,
+  MAX_PENDING_TIER,
   MagnetBoosterState,
   activateMagnetBooster,
   activeRemainingSeconds,
@@ -469,6 +470,11 @@ export class Game {
   // default to visible=false so they
   // never appear on a fresh game start.
   private magnetBooster: MagnetBoosterState = createMagnetBooster();
+  // Test mode flag — true when preloadTestAmmo() ran. Drives the
+  // self-re-arming of the magnet booster after each 10s window expires,
+  // so test-mode 99-charge runs can stress-test the magnet pull without
+  // the player needing to grind pickup drops to re-arm. Reset in stop().
+  private testModeActive = false;
   private readonly magnetActiveRing: Mesh = createActiveRing();
   private readonly magnetActiveField: Mesh = createActiveField();
   private readonly shield: ShieldState;
@@ -807,6 +813,8 @@ export class Game {
     this.homingMissiles = [];
     this.activeEffects = [];
     this.pickups = [];
+    this.magnetBooster = createMagnetBooster();
+    this.testModeActive = false;
     // Phase 7b — Bomb Strike side effects. The missileVolleySchedules queue
     // and any in-flight core flashes must be cleared; the bomb edge flash
     // DOM element must be removed; the module-scope InstancedMesh pools for
@@ -1757,8 +1765,15 @@ export class Game {
       // then reset charges to 0 — the player banked 3 pickups but the cost
       // is still one cooldown. Example: banked 3, pressed Digit2 → tier=3
       // deploy (4 drones), charges=0, cooldown=4s.
-      const tier = (this.activeAmmo[kind].charges + 1) as 1 | 2 | 3;
-      this.activeAmmo[kind].charges = 0;
+      //
+      // Test-mode pre-load: when the pre-load seeded 99 charges, "banked"
+      // would be 99 — clamp tier to 3 and only spend 1 charge per press,
+      // so the test-mode 99 → 98 → ... → 0 yields 99 tier-1 deploys.
+      // Without the clamp, tier would be 100 (TS-asserted as 1|2|3 but
+      // runtime is 100) and the entire pre-load would burn in one press.
+      const banked = this.activeAmmo[kind].charges + 1;
+      const tier = Math.min(3, banked) as 1 | 2 | 3;
+      this.activeAmmo[kind].charges = banked <= 3 ? 0 : banked - 1;
       const dep = spawnDroneDeployment(shipPos, this.scene, tier);
       // Phase 7i-2 (Task 9) — wire the beam-vs-asteroid hit callback. The
       // dispatch field was added in Task 6 (default null) and is the single
@@ -1971,6 +1986,14 @@ export class Game {
     // with the ring. 2026-06-26 v2 — preview ring removed entirely; the
     // pending state is communicated by the HUD pill alone.
     tickMagnetBooster(this.magnetBooster, this.gameTimeSeconds);
+    // Test mode re-arm: when the 10s magnet window expires, restore
+    // pendingTier so the next Digit4 press can re-activate. tickMagnetBooster
+    // returns true on the expiry frame but only sets activeUntil=0 /
+    // activeTier=0; the re-arm is a separate side-effect.
+    if (this.testModeActive && this.magnetBooster.activeUntil === 0 &&
+        this.magnetBooster.pendingTier === 0) {
+      this.magnetBooster.pendingTier = MAX_PENDING_TIER;
+    }
     updateActiveRing(
       this.magnetActiveRing,
       this.magnetBooster.activeTier,
@@ -4271,6 +4294,35 @@ export class Game {
     const pickupKind = kind as PickupKind;
     this.spawnPickup(pickupKind, { x, y });
     return true;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Test Mode pre-load
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: Bypass the 3-charge cap and seed the 4 active addons with 99
+  //          charges each so QA can stress-test weapons and the magnet
+  //          booster without grinding pickup drops. Triggered by the TEST
+  //          MODE toggle on the ship-select screen.
+  // Setup:   Called from main.ts after Game.create() and before game.start()
+  //          when the ship-select toggle was ON. ammo.charges is written
+  //          directly to bypass the applyActivePickupEffect cap clamp.
+  // Issues:  Without this, every QA pass must grind 30+ kills to test
+  //          chained drone / missile / magnet combos.
+  // Fix:     Direct write to activeAmmo[kind].charges for the 3 ammo kinds
+  //          + direct write to magnetBooster.pendingTier for the magnet.
+  //          Per-session, no persistence.
+  // Gotchas: Does NOT preload the 3 passive pickups (FIRE_RATE / SHIELD /
+  //          SPREAD) — they're timer-based and would need separate
+  //          activeEffects entries with remaining = total. Out of scope.
+  //          The 99 cap is intentional: chargeCap=3 in production; 99 lets
+  //          testers fire freely without us needing a UI to top up.
+  // ═══════════════════════════════════════════════════════════════════════════
+  preloadTestAmmo(): void {
+    this.activeAmmo[PickupKind.BOMB_STRIKE].charges = 99;
+    this.activeAmmo[PickupKind.ORBIT_DRONES].charges = 99;
+    this.activeAmmo[PickupKind.HOMING_MISSILES].charges = 99;
+    this.magnetBooster.pendingTier = MAX_PENDING_TIER;
+    this.testModeActive = true;
   }
 }
 

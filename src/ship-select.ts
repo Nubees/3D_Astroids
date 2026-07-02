@@ -45,6 +45,7 @@ interface LoadedShip {
 export interface ShipSelection {
   readonly entry: ShipCatalogEntry;
   readonly mesh: Group;
+  readonly testMode: boolean;
 }
 
 export class ShipSelectScreen {
@@ -61,6 +62,7 @@ export class ShipSelectScreen {
   private resolve: ((value: ShipSelection) => void) | null = null;
   private rafId = 0;
   private lastTime = 0;
+  private testModeEnabled = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -176,6 +178,43 @@ export class ShipSelectScreen {
       window.location.href = '/test-lab/asteroid-lab.html';
     });
     overlay.appendChild(labButton);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // My Rules — TEST MODE toggle (3rd toolbar slot)
+    // ═══════════════════════════════════════════════════════════════════════
+    // Purpose: Per-session dev-only toggle that pre-loads 99 charges of the
+    //          4 active addons (BOMB/DRONES/MISSILES/MAGNET) so QA can test
+    //          weapons and the magnet without grinding asteroid kills for
+    //          pickup drops.
+    // Setup:   3rd toolbar icon at left:130px, wider (180px) to fit the text
+    //          label, hex clip-path matching the existing toolbar pair. A
+    //          span inside the button carries the live label so the click
+    //          handler can rewrite it on toggle.
+    // Issues:  Without a UI surface, testers had to either grind the 10%
+    //          drop rate or hand-edit the ammo map via the Playwright hook.
+    // Fix:     Click handler flips this.testModeEnabled, rewrites the label
+    //          text, and toggles the is-on class (green border + bg in CSS).
+    //          Per-session only — no localStorage, defaults OFF on reload.
+    // Gotchas: The flag travels with the resolved ShipSelection, not via
+    //          a global, so main.ts reads it after waitForSelection()
+    //          resolves. The Game-side effect (game.preloadTestAmmo) is
+    //          called in main.ts between Game.create() and game.start().
+    // ═══════════════════════════════════════════════════════════════════════
+    const testModeButton = document.createElement('button');
+    testModeButton.className = 'ship-select-test-mode-toggle';
+    testModeButton.type = 'button';
+    testModeButton.setAttribute('aria-label', 'Toggle Test Mode');
+    testModeButton.title = 'Pre-load 99 charges of all active addons';
+    const testModeLabel = document.createElement('span');
+    testModeLabel.className = 'ship-select-test-mode-label';
+    testModeLabel.textContent = 'TEST MODE: OFF';
+    testModeButton.appendChild(testModeLabel);
+    testModeButton.addEventListener('click', () => {
+      this.testModeEnabled = !this.testModeEnabled;
+      testModeLabel.textContent = this.testModeEnabled ? 'TEST MODE: ON' : 'TEST MODE: OFF';
+      testModeButton.classList.toggle('is-on', this.testModeEnabled);
+    });
+    overlay.appendChild(testModeButton);
 
     const title = document.createElement('h1');
     title.className = 'ship-select-title';
@@ -349,7 +388,7 @@ export class ShipSelectScreen {
     if (!focused) return;
 
     // Return the original loaded mesh, not the clone, so Game owns it.
-    this.resolve({ entry: focused.entry, mesh: focused.mesh });
+    this.resolve({ entry: focused.entry, mesh: focused.mesh, testMode: this.testModeEnabled });
     this.dispose();
   }
 

@@ -25,6 +25,27 @@ async function main(): Promise<void> {
   const selection = await selectScreen.waitForSelection();
 
   const game = await Game.create(canvas, selection.entry.id, selection.mesh);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // My Rules — Test Mode pre-load
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Purpose: When the player enabled the TEST MODE toggle on the ship-select
+  //          screen, seed the 4 active addons with 99 charges each before
+  //          the first tick so QA can stress-test weapons + magnet without
+  //          grinding pickup drops.
+  // Setup:   selection.testMode is the boolean the ship-select toggle
+  //          resolves with. Triggers game.preloadTestAmmo() which writes
+  //          directly to activeAmmo[kind].charges + magnetBooster.pendingTier.
+  // Issues:  Without this hook, the toggle has no game-side effect and the
+  //          pre-load intent is silent.
+  // Fix:     Conditional call between Game.create() (which builds an empty
+  //          ammo map) and game.start() (which begins the tick loop).
+  // Gotchas: Per-session only — no localStorage write. Defaults to OFF
+  //          every page load. Game.stop() rebuilds the ammo map on
+  //          respawn, so the pre-load is one-shot per page life.
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (selection.testMode) game.preloadTestAmmo();
+
   game.start();
 
   // Expose a screenshot/debug hook on `window` so the Playwright harness can

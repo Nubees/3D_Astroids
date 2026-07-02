@@ -76,6 +76,66 @@
   background: rgba(0, 40, 70, 0.85);
 }
 
+/* My Rules — TEST MODE toggle (3rd toolbar slot)
+   Matches the Hangar + Lab toolbar visual treatment (cyan border, hex
+   clip-path, hover scale + glow). Wider (180px) to fit the text label.
+   Positioned at left:130px = 18 (page padding) + 44 (Hangar) + 12 (gap)
+   + 44 (Lab) + 12 (gap) = 130. The is-on variant uses a green border +
+   background to telegraph "active" at a glance. */
+.ship-select-test-mode-toggle {
+  position: absolute;
+  top: 18px;
+  left: 130px;
+  appearance: none;
+  border: 1px solid rgba(0, 234, 255, 0.45);
+  background: rgba(0, 20, 40, 0.75);
+  color: #00eaff;
+  width: 180px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding-left: 14px;
+  cursor: pointer;
+  pointer-events: auto;
+  clip-path: polygon(
+    0 0,
+    calc(100% - 8px) 0,
+    100% 8px,
+    100% 100%,
+    8px 100%,
+    0 calc(100% - 8px)
+  );
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease,
+    background 0.15s ease, color 0.15s ease;
+}
+
+.ship-select-test-mode-toggle:hover {
+  transform: scale(1.04);
+  border-color: #00eaff;
+  box-shadow: 0 0 18px rgba(0, 234, 255, 0.45);
+  background: rgba(0, 40, 70, 0.85);
+}
+
+.ship-select-test-mode-toggle.is-on {
+  border-color: rgba(0, 255, 136, 0.7);
+  background: rgba(0, 40, 25, 0.85);
+  color: #00ff88;
+}
+
+.ship-select-test-mode-toggle.is-on:hover {
+  border-color: #00ff88;
+  box-shadow: 0 0 18px rgba(0, 255, 136, 0.45);
+  background: rgba(0, 60, 35, 0.9);
+}
+
+.ship-select-test-mode-label {
+  font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  font-family: monospace;
+}
+
 .ship-select-loading {
   position: absolute;
   top: 50%;
